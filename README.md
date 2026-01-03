@@ -1,119 +1,106 @@
-# MDBX Profiler
+# reth-mdbx-profiler
 
-eBPF-based profiler for analyzing MDBX page fault patterns. This tool traces memory-mapped file accesses to understand database I/O behavior and identify optimization opportunities.
+eBPF-based profiler for analyzing MDBX page fault patterns in Reth.
 
-Works with any application using [libmdbx](https://github.com/erthink/libmdbx) - including Reth, Erigon, and other MDBX-based databases.
+traces memory-mapped file accesses to understand database I/O behavior and identify optimization opportunities for state root computation, trie traversal, and block execution.
 
-## Features
+## features
 
-- **Page Fault Tracing**: Captures every page fault in MDBX memory-mapped regions
-- **Access Pattern Analysis**: Identifies sequential vs random access patterns
-- **Prefetch Opportunity Detection**: Analyzes if prefetching could improve performance
-- **Thread Distribution**: Shows which threads cause the most I/O
-- **Hot Page Identification**: Finds frequently accessed pages for potential mlock()
+- **page fault tracing**: captures every page fault in MDBX memory-mapped regions with major/minor fault detection
+- **table attribution**: maps page faults to Reth MDBX tables (AccountsTrie, StoragesTrie, PlainAccountState, etc.)
+- **web-based viewer**: generates self-contained HTML visualizations with interactive charts and heatmaps
+- **access pattern analysis**: identifies sequential vs random access patterns
+- **prefetch opportunity detection**: analyzes if prefetching could improve performance
+- **thread distribution**: shows which threads cause the most I/O
 
-## Requirements
+## requirements
 
 - Linux kernel 5.8+ (for ring buffer support)
-- BTF enabled (/sys/kernel/btf/vmlinux exists)
-- Root access (for eBPF)
-- Application running with MDBX database
+- BTF enabled (`/sys/kernel/btf/vmlinux` exists)
+- root access (for eBPF)
+- Reth node with MDBX database
 
-## Quick Start
+## quick start
 
-### 1. Setup
+### 1. setup
 
 ```bash
-# Clone and enter the directory
-git clone <repo-url>
-cd mdbx-profiler
-
-# Run setup script (installs dependencies, generates vmlinux.h)
+# run setup script (installs dependencies, generates vmlinux.h)
 sudo ./scripts/setup-node.sh
 
-# Build the profiler
+# build the profiler
 cargo build --release
 ```
 
-### 2. Collect a trace
+### 2. collect a trace
 
 ```bash
-sudo ./scripts/collect-trace.sh 30
+# find the reth process and mdbx path
+./target/release/mdbx-profiler find-mdbx --pid $(pgrep reth)
+
+# trace for 30 seconds
+sudo ./target/release/mdbx-profiler trace \
+    --pid $(pgrep reth) \
+    --mdbx-path /data/reth/db/mdbx.dat \
+    --duration 30s \
+    --output trace.jsonl
 ```
 
-### 3. Analyze the trace
+### 3. analyze the trace
+
 ```bash
-# Summary output
-cargo run --release --bin mdbx-trace-analyzer -- \
-    --input trace.jsonl \
-    --format summary
+# generate interactive HTML viewer (opens in browser)
+./target/release/mdbx-trace-analyzer --input trace.jsonl
 
-# Other analysis modes:
-#   --format csv       # Export for spreadsheet
-#   --format heatmap   # ASCII heatmap of access patterns
-#   --format pattern   # Stride and burst analysis
-#   --format prefetch  # Prefetch opportunity analysis
+# or export as CSV
+./target/release/mdbx-trace-analyzer --input trace.jsonl --format csv
 ```
 
-## Output Examples
+the analyzer runs on macOS/Linux and doesn't require eBPF - you can collect traces on your node and analyze them locally.
 
-### Summary Output
-```
-==============================================================
-              MDBX Page Fault Trace Summary
-==============================================================
- Duration:                30.25 seconds
- Total Events:           125,432
- Page Faults:            124,891
- Major Faults:            12,345
- Unique Pages:            45,678
---------------------------------------------------------------
- Fault Rate:             4,129.2 /sec
- Sequential Ratio:          34.5%
-==============================================================
-```
+## web viewer
 
-## Interpreting Results
+the HTML viewer includes:
 
-### High Sequential Ratio (>50%)
-- Access patterns are predictable
-- Prefetching via madvise(MADV_WILLNEED) could help
+- **summary dashboard**: total faults, major/minor ratio, fault rate, duration
+- **timeline heatmap**: interactive 2D view of time vs file offset
+- **table breakdown**: pie/bar charts showing faults per MDBX table
+- **thread distribution**: which threads cause the most faults
+- **hot pages table**: sortable table of most-accessed pages
+- **access pattern analysis**: sequential vs random ratio, stride distribution
+- **prefetch opportunity score**: prediction hit rate and locality analysis
 
-### Low Sequential Ratio (<30%)
-- Random access patterns dominate
-- Consider: larger MDBX page size, mlock() hot pages
+## interpreting results
 
-### High Major Fault Rate
-- Many faults require disk I/O (not in page cache)
-- Consider: more RAM, faster storage (NVMe)
+### high major fault ratio (>10%)
+- many faults require disk I/O (not in page cache)
+- consider: more RAM, faster storage (NVMe), or mlock() for hot pages
 
-## Use Cases
+### low sequential ratio (<30%)
+- random access patterns dominate (typical for trie traversal)
+- prefetching unlikely to help significantly
 
-- **Reth/Erigon**: Profile Ethereum client database access patterns
-- **Any MDBX Application**: Understand I/O behavior of LMDB/MDBX databases
-- **Performance Optimization**: Find opportunities for prefetching or caching
-- **Capacity Planning**: Understand memory and I/O requirements
+### high sequential ratio (>50%)
+- access patterns are predictable
+- prefetching via `madvise(MADV_WILLNEED)` could reduce faults
 
-## Project Structure
+## project structure
 
 ```
-mdbx-profiler/
-├── Cargo.toml              # Rust dependencies
-├── README.md
+reth-mdbx-profiler/
 ├── bpf/
-│   ├── mdbx_tracer.bpf.c   # eBPF probe (C)
-│   └── vmlinux.h           # Kernel types (generated by setup)
+│   └── mdbx_tracer.bpf.c   # eBPF probes (kprobe/kretprobe on handle_mm_fault)
 ├── src/
-│   ├── main.rs             # Profiler CLI
-│   ├── analyzer.rs         # Trace analyzer
-│   ├── event.rs            # Shared event types
-│   └── mdbx.rs             # MDBX file detection
+│   ├── main.rs             # profiler CLI (Linux only, requires eBPF)
+│   ├── analyzer.rs         # trace analyzer with web viewer
+│   ├── event.rs            # shared event types
+│   ├── mdbx.rs             # MDBX file detection
+│   ├── mdbx_metadata.rs    # table attribution
+│   └── viewer/             # HTML viewer generation
 └── scripts/
-    ├── setup-node.sh       # Install dependencies and generate vmlinux.h
-    ├── collect-trace.sh    # Collect trace wrapper
-    └── analyze-trace.sh    # Analysis wrapper
+    └── setup-node.sh       # install dependencies
 ```
 
-## License
+## license
 
 MIT OR Apache-2.0

@@ -18,6 +18,9 @@
 #define EVENT_MMAP           2
 #define EVENT_CURSOR_SEEK    3
 
+// VM_FAULT flags from kernel (used in handle_mm_fault return value)
+#define VM_FAULT_MAJOR   0x0004
+
 // Page fault event sent to userspace
 struct page_fault_event {
     __u64 timestamp_ns;      // Kernel timestamp
@@ -31,6 +34,19 @@ struct page_fault_event {
     __u32 fault_flags;       // Page fault flags (read/write/etc)
     __u64 latency_ns;        // Time spent in fault handler (if available)
     __u8  is_major;          // Major fault (disk I/O) vs minor (in page cache)
+};
+
+// Context for correlating kprobe entry with kretprobe return
+struct fault_context {
+    __u64 timestamp_ns;      // Entry timestamp for latency calculation
+    __u64 address;           // Faulting address
+    __u64 file_offset;       // File offset
+    __u64 vma_start;         // VMA bounds
+    __u64 vma_end;
+    __u32 pid;
+    __u32 tid;
+    __u32 fault_flags;
+    __u8  should_trace;      // Whether this fault should be traced
 };
 
 // Ring buffer for events - sized for high throughput
@@ -73,6 +89,15 @@ struct {
     __type(value, __u64);
 } stats SEC(".maps");
 
+// Per-task fault context for correlating kprobe entry with kretprobe return
+// Key: tid (thread id), Value: fault_context
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 10240);
+    __type(key, __u64);    // pid_tgid
+    __type(value, struct fault_context);
+} pending_faults SEC(".maps");
+
 #define STAT_TOTAL_FAULTS     0
 #define STAT_MDBX_FAULTS      1
 #define STAT_MAJOR_FAULTS     2
@@ -105,14 +130,15 @@ static __always_inline __u64 get_file_inode(struct file *file) {
     return BPF_CORE_READ(inode, i_ino);
 }
 
-// Trace page faults - this is the hot path
+// Trace page faults entry - save context for kretprobe
 SEC("kprobe/handle_mm_fault")
 int BPF_KPROBE(trace_page_fault, 
                struct vm_area_struct *vma,
                unsigned long address,
                unsigned int flags)
 {
-    __u32 pid = bpf_get_current_pid_tgid() >> 32;
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 pid = pid_tgid >> 32;
     
     // Filter by PID first (fast path)
     if (!should_trace_pid(pid)) {
@@ -127,6 +153,8 @@ int BPF_KPROBE(trace_page_fault,
     
     // Check if this is a VMA we're tracking
     __u64 *file_offset_base = bpf_map_lookup_elem(&vma_to_offset, &vm_start);
+    __u64 offset_base_val = 0;
+    
     if (!file_offset_base) {
         // Not a tracked VMA - check if it's a new MDBX mmap
         struct file *file = BPF_CORE_READ(vma, vm_file);
@@ -140,37 +168,83 @@ int BPF_KPROBE(trace_page_fault,
         
         // New VMA for tracked inode - register it
         __u64 pgoff = BPF_CORE_READ(vma, vm_pgoff);
-        __u64 offset = pgoff * 4096;  // PAGE_SIZE
-        bpf_map_update_elem(&vma_to_offset, &vm_start, &offset, BPF_ANY);
-        file_offset_base = &offset;
+        offset_base_val = pgoff * 4096;  // PAGE_SIZE
+        bpf_map_update_elem(&vma_to_offset, &vm_start, &offset_base_val, BPF_ANY);
+    } else {
+        offset_base_val = *file_offset_base;
     }
     
     inc_stat(STAT_MDBX_FAULTS);
     
     // Calculate file offset from virtual address
-    __u64 file_offset = *file_offset_base + (address - vm_start);
+    __u64 file_offset = offset_base_val + (address - vm_start);
+    
+    // Save context for kretprobe to use
+    struct fault_context ctx = {
+        .timestamp_ns = bpf_ktime_get_ns(),
+        .address = address,
+        .file_offset = file_offset,
+        .vma_start = vm_start,
+        .vma_end = vm_end,
+        .pid = pid,
+        .tid = (__u32)pid_tgid,
+        .fault_flags = flags,
+        .should_trace = 1,
+    };
+    
+    bpf_map_update_elem(&pending_faults, &pid_tgid, &ctx, BPF_ANY);
+    
+    return 0;
+}
+
+// Trace page fault return - detect major faults from return value
+SEC("kretprobe/handle_mm_fault")
+int BPF_KRETPROBE(trace_page_fault_ret, vm_fault_t ret)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    
+    // Look up the saved context
+    struct fault_context *ctx = bpf_map_lookup_elem(&pending_faults, &pid_tgid);
+    if (!ctx || !ctx->should_trace) {
+        return 0;
+    }
+    
+    // Determine if this was a major fault from return value
+    __u8 is_major = (ret & VM_FAULT_MAJOR) ? 1 : 0;
+    
+    if (is_major) {
+        inc_stat(STAT_MAJOR_FAULTS);
+    }
+    
+    // Calculate latency
+    __u64 now = bpf_ktime_get_ns();
+    __u64 latency = now - ctx->timestamp_ns;
     
     // Reserve space in ring buffer
     struct page_fault_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
     if (!e) {
         inc_stat(STAT_EVENTS_DROPPED);
+        bpf_map_delete_elem(&pending_faults, &pid_tgid);
         return 0;
     }
     
-    // Fill event
-    e->timestamp_ns = bpf_ktime_get_ns();
-    e->address = address;
-    e->file_offset = file_offset;
-    e->vma_start = vm_start;
-    e->vma_end = vm_end;
-    e->pid = pid;
-    e->tid = bpf_get_current_pid_tgid() & 0xFFFFFFFF;
+    // Fill event with saved context and return info
+    e->timestamp_ns = ctx->timestamp_ns;
+    e->address = ctx->address;
+    e->file_offset = ctx->file_offset;
+    e->vma_start = ctx->vma_start;
+    e->vma_end = ctx->vma_end;
+    e->pid = ctx->pid;
+    e->tid = ctx->tid;
     e->event_type = EVENT_PAGE_FAULT;
-    e->fault_flags = flags;
-    e->latency_ns = 0;  // Will be filled by return probe
-    e->is_major = 0;    // Will determine from flags
+    e->fault_flags = ctx->fault_flags;
+    e->latency_ns = latency;
+    e->is_major = is_major;
     
     bpf_ringbuf_submit(e, 0);
+    
+    // Clean up
+    bpf_map_delete_elem(&pending_faults, &pid_tgid);
     
     return 0;
 }
