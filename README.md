@@ -70,20 +70,6 @@ the HTML viewer includes:
 - **access pattern analysis**: sequential vs random ratio, stride distribution
 - **prefetch opportunity score**: prediction hit rate and locality analysis
 
-## interpreting results
-
-### high major fault ratio (>10%)
-- many faults require disk I/O (not in page cache)
-- consider: more RAM, faster storage (NVMe), or mlock() for hot pages
-
-### low sequential ratio (<30%)
-- random access patterns dominate (typical for trie traversal)
-- prefetching unlikely to help significantly
-
-### high sequential ratio (>50%)
-- access patterns are predictable
-- prefetching via `madvise(MADV_WILLNEED)` could reduce faults
-
 ## project structure
 
 ```
