@@ -255,69 +255,87 @@ const CSS: &str = r##"
 
 body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-    background: #1a1a2e;
+    background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 50%, #0f0f1a 100%);
     color: #eee;
     min-height: 100vh;
 }
 
 #app {
-    max-width: 1400px;
+    max-width: 1600px;
     margin: 0 auto;
-    padding: 20px;
+    padding: 20px 30px;
 }
 
 header {
     text-align: center;
-    padding: 30px 0;
-    border-bottom: 1px solid #333;
-    margin-bottom: 20px;
+    padding: 40px 0;
+    border-bottom: 1px solid rgba(0, 212, 255, 0.2);
+    margin-bottom: 30px;
+    background: linear-gradient(180deg, rgba(0, 212, 255, 0.05) 0%, transparent 100%);
 }
 
 header h1 {
-    font-size: 2em;
-    color: #00d4ff;
-    margin-bottom: 5px;
+    font-size: 2.2em;
+    font-weight: 700;
+    background: linear-gradient(135deg, #00d4ff 0%, #00ff88 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 8px;
+    letter-spacing: -0.5px;
 }
 
 .subtitle {
-    color: #888;
-    font-size: 0.9em;
+    color: #666;
+    font-size: 0.95em;
+    font-weight: 500;
+    letter-spacing: 2px;
+    text-transform: uppercase;
 }
 
 .tabs {
     display: flex;
-    gap: 5px;
-    margin-bottom: 20px;
+    gap: 8px;
+    margin-bottom: 25px;
     flex-wrap: wrap;
+    background: rgba(20, 20, 40, 0.5);
+    padding: 8px;
+    border-radius: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 .tab {
-    padding: 10px 20px;
-    background: #252542;
+    padding: 12px 24px;
+    background: transparent;
     border: none;
-    color: #aaa;
+    color: #888;
     cursor: pointer;
-    border-radius: 5px 5px 0 0;
-    transition: all 0.2s;
+    border-radius: 8px;
+    transition: all 0.2s ease;
+    font-size: 0.9em;
+    font-weight: 500;
 }
 
 .tab:hover {
-    background: #303050;
+    background: rgba(0, 212, 255, 0.1);
     color: #fff;
 }
 
 .tab.active {
-    background: #00d4ff;
-    color: #1a1a2e;
-    font-weight: bold;
+    background: linear-gradient(135deg, #00d4ff 0%, #0088cc 100%);
+    color: #fff;
+    font-weight: 600;
+    box-shadow: 0 4px 15px rgba(0, 212, 255, 0.3);
 }
 
 .panel {
     display: none;
-    background: #252542;
-    border-radius: 10px;
-    padding: 25px;
+    background: linear-gradient(180deg, rgba(37, 37, 66, 0.8) 0%, rgba(30, 30, 50, 0.9) 100%);
+    border-radius: 16px;
+    padding: 30px;
     animation: fadeIn 0.3s ease;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
 }
 
 .panel.active {
@@ -331,61 +349,85 @@ header h1 {
 
 .summary-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 15px;
-    margin-bottom: 30px;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 16px;
+    margin-bottom: 35px;
 }
 
 .stat-card {
-    background: #1a1a2e;
-    padding: 20px;
-    border-radius: 8px;
+    background: linear-gradient(135deg, rgba(26, 26, 46, 0.9) 0%, rgba(20, 20, 35, 0.9) 100%);
+    padding: 24px 20px;
+    border-radius: 12px;
     text-align: center;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.stat-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 25px rgba(0, 0, 0, 0.3);
 }
 
 .stat-label {
-    font-size: 0.85em;
+    font-size: 0.8em;
     color: #888;
-    margin-bottom: 8px;
+    margin-bottom: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 500;
 }
 
 .stat-value {
-    font-size: 1.5em;
-    font-weight: bold;
+    font-size: 1.6em;
+    font-weight: 700;
     color: #00d4ff;
+    text-shadow: 0 0 20px rgba(0, 212, 255, 0.3);
 }
 
 .stat-value.major {
     color: #ff6b6b;
+    text-shadow: 0 0 20px rgba(255, 107, 107, 0.3);
 }
 
 .stat-value.minor {
     color: #51cf66;
+    text-shadow: 0 0 20px rgba(81, 207, 102, 0.3);
 }
 
 .summary-charts {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-    gap: 20px;
+    grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+    gap: 24px;
 }
 
 .chart-container {
-    background: #1a1a2e;
-    padding: 20px;
-    border-radius: 8px;
+    background: linear-gradient(135deg, rgba(26, 26, 46, 0.9) 0%, rgba(20, 20, 35, 0.9) 100%);
+    padding: 24px;
+    border-radius: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    min-height: 280px;
+}
+
+.chart-container canvas {
+    width: 100% !important;
+    height: 220px !important;
 }
 
 .chart-container h3 {
-    margin-bottom: 15px;
+    margin-bottom: 20px;
     font-size: 1em;
     color: #aaa;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
 }
 
 .chart-full {
-    background: #1a1a2e;
-    padding: 20px;
-    border-radius: 8px;
-    margin-bottom: 15px;
+    background: linear-gradient(135deg, rgba(26, 26, 46, 0.9) 0%, rgba(20, 20, 35, 0.9) 100%);
+    padding: 24px;
+    border-radius: 12px;
+    margin-bottom: 20px;
+    border: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 .chart-full canvas {
@@ -395,113 +437,150 @@ header h1 {
 
 .timeline-controls {
     display: flex;
-    gap: 20px;
+    gap: 30px;
     justify-content: center;
+    padding: 15px;
+    background: rgba(26, 26, 46, 0.5);
+    border-radius: 8px;
 }
 
 .timeline-controls label {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 8px;
     cursor: pointer;
+    color: #aaa;
+    font-size: 0.9em;
+    transition: color 0.2s;
+}
+
+.timeline-controls label:hover {
+    color: #fff;
+}
+
+.timeline-controls input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    accent-color: #00d4ff;
 }
 
 .heatmap-container {
     position: relative;
-    background: #1a1a2e;
-    padding: 20px;
-    border-radius: 8px;
+    background: linear-gradient(135deg, rgba(26, 26, 46, 0.9) 0%, rgba(20, 20, 35, 0.9) 100%);
+    padding: 24px;
+    border-radius: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 #heatmap-canvas {
     width: 100%;
-    height: 400px;
+    height: 450px;
     cursor: crosshair;
+    border-radius: 8px;
 }
 
 .heatmap-legend {
     display: flex;
     align-items: center;
     justify-content: center;
-    gap: 10px;
-    margin-top: 15px;
+    gap: 15px;
+    margin-top: 20px;
+    padding: 15px;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 8px;
 }
 
 .legend-gradient {
-    width: 200px;
-    height: 20px;
-    background: linear-gradient(to right, #1a1a2e, #0066ff, #00d4ff, #ffff00, #ff6600, #ff0000);
-    border-radius: 3px;
+    width: 250px;
+    height: 24px;
+    background: linear-gradient(to right, #1e2850, #0066ff, #00d4ff, #32ff96, #ffff00, #ff9600, #ff3232, #ff64a0);
+    border-radius: 4px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .legend-label {
-    font-size: 0.8em;
+    font-size: 0.85em;
     color: #888;
+    font-weight: 500;
 }
 
 .heatmap-info {
     display: flex;
     justify-content: space-between;
-    margin-top: 10px;
-    font-size: 0.85em;
+    margin-top: 15px;
+    font-size: 0.9em;
     color: #888;
+    padding: 0 10px;
 }
 
 .table-charts {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 20px;
-    margin-bottom: 20px;
+    gap: 24px;
+    margin-bottom: 24px;
 }
 
 .data-table {
     width: 100%;
     border-collapse: collapse;
-    background: #1a1a2e;
-    border-radius: 8px;
+    background: linear-gradient(135deg, rgba(26, 26, 46, 0.9) 0%, rgba(20, 20, 35, 0.9) 100%);
+    border-radius: 12px;
     overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 .data-table th,
 .data-table td {
-    padding: 12px 15px;
+    padding: 14px 18px;
     text-align: left;
-    border-bottom: 1px solid #333;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 .data-table th {
-    background: #303050;
+    background: rgba(0, 212, 255, 0.1);
     font-weight: 600;
     color: #00d4ff;
     cursor: pointer;
+    text-transform: uppercase;
+    font-size: 0.8em;
+    letter-spacing: 0.5px;
 }
 
 .data-table th:hover {
-    background: #404060;
+    background: rgba(0, 212, 255, 0.2);
+}
+
+.data-table tr {
+    transition: background 0.2s;
 }
 
 .data-table tr:hover {
-    background: #303050;
+    background: rgba(0, 212, 255, 0.05);
 }
 
 .data-table tbody tr:last-child td {
     border-bottom: none;
 }
 
+.data-table td {
+    font-variant-numeric: tabular-nums;
+}
+
 .filter-bar {
     display: flex;
     gap: 15px;
-    margin-bottom: 15px;
+    margin-bottom: 20px;
 }
 
 .filter-bar input,
 .filter-bar select {
-    padding: 10px 15px;
-    background: #1a1a2e;
-    border: 1px solid #444;
-    border-radius: 5px;
+    padding: 12px 18px;
+    background: rgba(26, 26, 46, 0.9);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
     color: #eee;
     font-size: 0.9em;
+    transition: border-color 0.2s, box-shadow 0.2s;
 }
 
 .filter-bar input {
@@ -512,12 +591,17 @@ header h1 {
 .filter-bar select:focus {
     outline: none;
     border-color: #00d4ff;
+    box-shadow: 0 0 15px rgba(0, 212, 255, 0.2);
+}
+
+.filter-bar select {
+    cursor: pointer;
 }
 
 .pattern-summary {
     display: flex;
-    gap: 20px;
-    margin-bottom: 25px;
+    gap: 24px;
+    margin-bottom: 30px;
 }
 
 .pattern-summary .stat-card {
@@ -526,8 +610,8 @@ header h1 {
 
 .burst-stats {
     display: flex;
-    gap: 15px;
-    margin-top: 15px;
+    gap: 20px;
+    margin-top: 20px;
 }
 
 .burst-stats .stat-card {
@@ -537,8 +621,8 @@ header h1 {
 .prefetch-gauge {
     display: flex;
     justify-content: center;
-    gap: 50px;
-    margin-bottom: 30px;
+    gap: 80px;
+    margin-bottom: 40px;
 }
 
 .gauge-container {
@@ -546,59 +630,95 @@ header h1 {
 }
 
 .gauge-container canvas {
-    width: 200px;
-    height: 200px;
+    width: 220px;
+    height: 220px;
 }
 
 .gauge-label {
-    margin-top: 10px;
+    margin-top: 15px;
     color: #888;
+    font-weight: 500;
+    font-size: 0.95em;
 }
 
 .recommendation-box {
-    background: #1a1a2e;
-    padding: 20px;
-    border-radius: 8px;
+    background: linear-gradient(135deg, rgba(26, 26, 46, 0.9) 0%, rgba(20, 20, 35, 0.9) 100%);
+    padding: 24px;
+    border-radius: 12px;
     border-left: 4px solid #00d4ff;
-    margin-bottom: 20px;
+    margin-bottom: 24px;
+    line-height: 1.6;
 }
 
 .recommendation-box.good {
     border-left-color: #51cf66;
+    background: linear-gradient(135deg, rgba(26, 46, 36, 0.9) 0%, rgba(20, 35, 25, 0.9) 100%);
 }
 
 .recommendation-box.moderate {
     border-left-color: #ffd43b;
+    background: linear-gradient(135deg, rgba(46, 40, 26, 0.9) 0%, rgba(35, 30, 20, 0.9) 100%);
 }
 
 .recommendation-box.poor {
     border-left-color: #ff6b6b;
+    background: linear-gradient(135deg, rgba(46, 26, 26, 0.9) 0%, rgba(35, 20, 20, 0.9) 100%);
 }
 
 .prefetch-details {
-    background: #1a1a2e;
-    padding: 20px;
-    border-radius: 8px;
+    background: linear-gradient(135deg, rgba(26, 26, 46, 0.9) 0%, rgba(20, 20, 35, 0.9) 100%);
+    padding: 24px;
+    border-radius: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 .prefetch-details h3 {
-    margin-bottom: 15px;
+    margin-bottom: 20px;
     color: #aaa;
+    font-weight: 600;
 }
 
 .prefetch-details p {
-    margin-bottom: 10px;
+    margin-bottom: 12px;
+    color: #ccc;
 }
 
-h2 {
-    margin-bottom: 20px;
+.prefetch-details strong {
     color: #00d4ff;
 }
 
+h2 {
+    margin-bottom: 25px;
+    color: #00d4ff;
+    font-size: 1.4em;
+    font-weight: 600;
+}
+
 h3 {
-    margin: 20px 0 15px;
+    margin: 25px 0 20px;
     color: #aaa;
     font-size: 1.1em;
+    font-weight: 600;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: rgba(0, 212, 255, 0.3);
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 212, 255, 0.5);
 }
 
 @media (max-width: 768px) {
@@ -610,6 +730,8 @@ h3 {
         flex: 1;
         text-align: center;
         min-width: 80px;
+        padding: 10px 12px;
+        font-size: 0.8em;
     }
 
     .table-charts {
@@ -619,6 +741,16 @@ h3 {
     .prefetch-gauge {
         flex-direction: column;
         align-items: center;
+        gap: 40px;
+    }
+
+    .summary-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .pattern-summary,
+    .burst-stats {
+        flex-direction: column;
     }
 }
 "##;
@@ -629,106 +761,232 @@ class SimpleChart {
     constructor(canvas) {
         this.canvas = canvas;
         this.ctx = canvas.getContext('2d');
-        this.resize();
-        window.addEventListener('resize', () => this.resize());
+        this.width = 0;
+        this.height = 0;
+        this.lastDrawFn = null;
+        this.lastDrawArgs = null;
+        window.addEventListener('resize', () => this.redraw());
     }
 
     resize() {
         const rect = this.canvas.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) return false;
+
         this.canvas.width = rect.width * window.devicePixelRatio;
         this.canvas.height = rect.height * window.devicePixelRatio;
         this.ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
         this.width = rect.width;
         this.height = rect.height;
+        return true;
+    }
+
+    redraw() {
+        if (this.lastDrawFn && this.lastDrawArgs) {
+            this.lastDrawFn.apply(this, this.lastDrawArgs);
+        }
     }
 
     clear() {
         this.ctx.clearRect(0, 0, this.width, this.height);
     }
 
-    drawPie(data, colors) {
-        this.resize();
+    drawPie(data, colors, labels = []) {
+        this.lastDrawFn = this.drawPie;
+        this.lastDrawArgs = [data, colors, labels];
+
+        if (!this.resize()) return;
         this.clear();
-        const cx = this.width / 2;
+
+        const cx = this.width * 0.35;
         const cy = this.height / 2;
-        const radius = Math.max(10, Math.min(cx, cy) - 20);
+        const radius = Math.max(10, Math.min(this.width * 0.3, this.height / 2) - 20);
 
         const total = data.reduce((a, b) => a + b, 0);
         if (total === 0 || radius <= 0) return;
         let startAngle = -Math.PI / 2;
 
+        // Draw slices with gap
         data.forEach((value, i) => {
+            if (value === 0) return;
             const sliceAngle = (value / total) * Math.PI * 2;
+            const midAngle = startAngle + sliceAngle / 2;
+
+            // Slight offset for 3D effect
+            const offsetX = Math.cos(midAngle) * 3;
+            const offsetY = Math.sin(midAngle) * 3;
 
             this.ctx.beginPath();
-            this.ctx.moveTo(cx, cy);
-            this.ctx.arc(cx, cy, radius, startAngle, startAngle + sliceAngle);
+            this.ctx.moveTo(cx + offsetX, cy + offsetY);
+            this.ctx.arc(cx + offsetX, cy + offsetY, radius, startAngle, startAngle + sliceAngle);
             this.ctx.closePath();
-            this.ctx.fillStyle = colors[i % colors.length];
+
+            // Gradient fill
+            const gradient = this.ctx.createRadialGradient(cx + offsetX, cy + offsetY, 0, cx + offsetX, cy + offsetY, radius);
+            gradient.addColorStop(0, this.lightenColor(colors[i % colors.length], 20));
+            gradient.addColorStop(1, colors[i % colors.length]);
+            this.ctx.fillStyle = gradient;
             this.ctx.fill();
+
+            // Border
+            this.ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+            this.ctx.lineWidth = 1;
+            this.ctx.stroke();
 
             startAngle += sliceAngle;
         });
+
+        // Draw legend on the right
+        if (labels.length > 0) {
+            const legendX = this.width * 0.65;
+            let legendY = (this.height - labels.length * 25) / 2;
+
+            this.ctx.font = '12px -apple-system, BlinkMacSystemFont, sans-serif';
+            labels.forEach((label, i) => {
+                if (data[i] === 0) return;
+
+                // Color box
+                this.ctx.fillStyle = colors[i % colors.length];
+                this.ctx.fillRect(legendX, legendY, 14, 14);
+                this.ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+                this.ctx.strokeRect(legendX, legendY, 14, 14);
+
+                // Label text
+                this.ctx.fillStyle = '#ccc';
+                this.ctx.textAlign = 'left';
+                const pct = ((data[i] / total) * 100).toFixed(1);
+                this.ctx.fillText(`${label} (${pct}%)`, legendX + 22, legendY + 11);
+
+                legendY += 25;
+            });
+        }
     }
 
-    drawBar(labels, data, color) {
-        this.resize();
+    lightenColor(color, percent) {
+        const num = parseInt(color.replace('#', ''), 16);
+        const amt = Math.round(2.55 * percent);
+        const R = Math.min(255, (num >> 16) + amt);
+        const G = Math.min(255, ((num >> 8) & 0x00FF) + amt);
+        const B = Math.min(255, (num & 0x0000FF) + amt);
+        return `rgb(${R},${G},${B})`;
+    }
+
+    drawBar(labels, data, color, options = {}) {
+        this.lastDrawFn = this.drawBar;
+        this.lastDrawArgs = [labels, data, color, options];
+
+        if (!this.resize()) return;
         this.clear();
         if (!data.length) return;
-        const padding = { top: 20, right: 20, bottom: 60, left: 60 };
+
+        const padding = { top: 30, right: 30, bottom: 70, left: 70 };
         const chartWidth = Math.max(1, this.width - padding.left - padding.right);
         const chartHeight = Math.max(1, this.height - padding.top - padding.bottom);
-        const barWidth = chartWidth / data.length * 0.8;
-        const barGap = chartWidth / data.length * 0.2;
-        const maxValue = Math.max(...data);
+        const barWidth = (chartWidth / data.length) * 0.7;
+        const barGap = (chartWidth / data.length) * 0.3;
+        const maxValue = Math.max(...data) * 1.1;
 
-        // Draw axes
-        this.ctx.strokeStyle = '#444';
-        this.ctx.beginPath();
-        this.ctx.moveTo(padding.left, padding.top);
-        this.ctx.lineTo(padding.left, this.height - padding.bottom);
-        this.ctx.lineTo(this.width - padding.right, this.height - padding.bottom);
-        this.ctx.stroke();
+        // Title
+        if (options.title) {
+            this.ctx.fillStyle = '#aaa';
+            this.ctx.font = 'bold 14px -apple-system, BlinkMacSystemFont, sans-serif';
+            this.ctx.textAlign = 'center';
+            this.ctx.fillText(options.title, this.width / 2, 20);
+        }
 
-        // Draw bars
+        // Draw grid lines
+        this.ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+        this.ctx.lineWidth = 1;
+        for (let i = 0; i <= 5; i++) {
+            const y = padding.top + (chartHeight / 5) * i;
+            this.ctx.beginPath();
+            this.ctx.moveTo(padding.left, y);
+            this.ctx.lineTo(this.width - padding.right, y);
+            this.ctx.stroke();
+
+            // Y-axis labels
+            const value = maxValue - (maxValue / 5) * i;
+            this.ctx.fillStyle = '#888';
+            this.ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
+            this.ctx.textAlign = 'right';
+            this.ctx.fillText(formatNumber(value), padding.left - 10, y + 4);
+        }
+
+        // Draw bars with gradient
         data.forEach((value, i) => {
             const barHeight = (value / maxValue) * chartHeight;
             const x = padding.left + i * (barWidth + barGap) + barGap / 2;
             const y = this.height - padding.bottom - barHeight;
 
-            this.ctx.fillStyle = color;
+            // Bar gradient
+            const gradient = this.ctx.createLinearGradient(x, y, x, this.height - padding.bottom);
+            gradient.addColorStop(0, this.lightenColor(color, 30));
+            gradient.addColorStop(1, color);
+
+            // Bar shadow
+            this.ctx.fillStyle = 'rgba(0,0,0,0.3)';
+            this.ctx.fillRect(x + 3, y + 3, barWidth, barHeight);
+
+            // Bar
+            this.ctx.fillStyle = gradient;
             this.ctx.fillRect(x, y, barWidth, barHeight);
+
+            // Bar border
+            this.ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+            this.ctx.strokeRect(x, y, barWidth, barHeight);
+
+            // Value on top
+            if (barHeight > 20) {
+                this.ctx.fillStyle = '#fff';
+                this.ctx.font = 'bold 10px -apple-system, BlinkMacSystemFont, sans-serif';
+                this.ctx.textAlign = 'center';
+                this.ctx.fillText(formatNumber(value), x + barWidth / 2, y - 5);
+            }
 
             // Labels
             this.ctx.fillStyle = '#888';
-            this.ctx.font = '10px sans-serif';
-            this.ctx.textAlign = 'center';
+            this.ctx.font = '10px -apple-system, BlinkMacSystemFont, sans-serif';
+            this.ctx.textAlign = 'right';
             this.ctx.save();
-            this.ctx.translate(x + barWidth / 2, this.height - padding.bottom + 10);
+            this.ctx.translate(x + barWidth / 2, this.height - padding.bottom + 8);
             this.ctx.rotate(Math.PI / 4);
-            this.ctx.fillText(labels[i].substring(0, 15), 0, 0);
+            this.ctx.fillText(labels[i].substring(0, 20), 0, 0);
             this.ctx.restore();
         });
     }
 
     drawLine(data, options = {}) {
-        this.resize();
+        this.lastDrawFn = this.drawLine;
+        this.lastDrawArgs = [data, options];
+
+        if (!this.resize()) return;
         this.clear();
-        const padding = { top: 20, right: 20, bottom: 40, left: 60 };
+
+        const padding = { top: 40, right: 30, bottom: 50, left: 70 };
         const chartWidth = Math.max(1, this.width - padding.left - padding.right);
         const chartHeight = Math.max(1, this.height - padding.top - padding.bottom);
 
         const datasets = Array.isArray(data[0]) ? data : [data];
         const colors = options.colors || ['#00d4ff', '#ff6b6b', '#51cf66'];
+        const labels = options.labels || [];
 
         let allValues = datasets.flat();
-        const maxValue = Math.max(...allValues);
-        const minValue = Math.min(...allValues);
+        if (allValues.length === 0) return;
+
+        const maxValue = Math.max(...allValues) * 1.1;
+        const minValue = Math.min(0, Math.min(...allValues));
         const range = maxValue - minValue || 1;
 
+        // Title
+        if (options.title) {
+            this.ctx.fillStyle = '#aaa';
+            this.ctx.font = 'bold 14px -apple-system, BlinkMacSystemFont, sans-serif';
+            this.ctx.textAlign = 'center';
+            this.ctx.fillText(options.title, this.width / 2, 20);
+        }
+
         // Draw grid
-        this.ctx.strokeStyle = '#333';
-        this.ctx.lineWidth = 0.5;
+        this.ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+        this.ctx.lineWidth = 1;
         for (let i = 0; i <= 5; i++) {
             const y = padding.top + (chartHeight / 5) * i;
             this.ctx.beginPath();
@@ -737,20 +995,46 @@ class SimpleChart {
             this.ctx.stroke();
 
             const value = maxValue - (range / 5) * i;
-            this.ctx.fillStyle = '#666';
-            this.ctx.font = '10px sans-serif';
+            this.ctx.fillStyle = '#888';
+            this.ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
             this.ctx.textAlign = 'right';
-            this.ctx.fillText(formatNumber(value), padding.left - 5, y + 3);
+            this.ctx.fillText(formatNumber(value), padding.left - 10, y + 4);
         }
 
-        // Draw lines
+        // Draw area fill and lines
         datasets.forEach((dataset, di) => {
-            this.ctx.strokeStyle = colors[di % colors.length];
-            this.ctx.lineWidth = 2;
+            if (dataset.length === 0) return;
+
+            const color = colors[di % colors.length];
+
+            // Area fill
+            this.ctx.beginPath();
+            this.ctx.moveTo(padding.left, this.height - padding.bottom);
+
+            dataset.forEach((value, i) => {
+                const x = padding.left + (i / Math.max(1, dataset.length - 1)) * chartWidth;
+                const y = padding.top + ((maxValue - value) / range) * chartHeight;
+                this.ctx.lineTo(x, y);
+            });
+
+            this.ctx.lineTo(padding.left + chartWidth, this.height - padding.bottom);
+            this.ctx.closePath();
+
+            const gradient = this.ctx.createLinearGradient(0, padding.top, 0, this.height - padding.bottom);
+            gradient.addColorStop(0, color + '40');
+            gradient.addColorStop(1, color + '05');
+            this.ctx.fillStyle = gradient;
+            this.ctx.fill();
+
+            // Line
+            this.ctx.strokeStyle = color;
+            this.ctx.lineWidth = 2.5;
+            this.ctx.lineCap = 'round';
+            this.ctx.lineJoin = 'round';
             this.ctx.beginPath();
 
             dataset.forEach((value, i) => {
-                const x = padding.left + (i / (dataset.length - 1)) * chartWidth;
+                const x = padding.left + (i / Math.max(1, dataset.length - 1)) * chartWidth;
                 const y = padding.top + ((maxValue - value) / range) * chartHeight;
 
                 if (i === 0) {
@@ -762,36 +1046,93 @@ class SimpleChart {
 
             this.ctx.stroke();
         });
+
+        // Legend
+        if (labels.length > 0) {
+            const legendX = padding.left;
+            const legendY = this.height - 20;
+
+            this.ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
+            let offsetX = 0;
+
+            labels.forEach((label, i) => {
+                const color = colors[i % colors.length];
+
+                // Line sample
+                this.ctx.strokeStyle = color;
+                this.ctx.lineWidth = 3;
+                this.ctx.beginPath();
+                this.ctx.moveTo(legendX + offsetX, legendY);
+                this.ctx.lineTo(legendX + offsetX + 20, legendY);
+                this.ctx.stroke();
+
+                // Label
+                this.ctx.fillStyle = '#aaa';
+                this.ctx.textAlign = 'left';
+                this.ctx.fillText(label, legendX + offsetX + 25, legendY + 4);
+
+                offsetX += this.ctx.measureText(label).width + 50;
+            });
+        }
     }
 
     drawGauge(value, maxValue, color) {
-        this.resize();
+        this.lastDrawFn = this.drawGauge;
+        this.lastDrawArgs = [value, maxValue, color];
+
+        if (!this.resize()) return;
         this.clear();
+
         const cx = this.width / 2;
         const cy = this.height / 2 + 20;
-        const radius = Math.max(10, Math.min(cx, cy) - 30);
+        const radius = Math.max(10, Math.min(cx, cy) - 40);
         if (radius <= 0 || maxValue === 0) return;
 
-        // Background arc
+        // Background arc with gradient
         this.ctx.beginPath();
         this.ctx.arc(cx, cy, radius, Math.PI, 0);
-        this.ctx.strokeStyle = '#333';
-        this.ctx.lineWidth = 20;
+        this.ctx.strokeStyle = '#2a2a4a';
+        this.ctx.lineWidth = 25;
+        this.ctx.lineCap = 'round';
         this.ctx.stroke();
 
-        // Value arc
-        const angle = Math.PI + (value / maxValue) * Math.PI;
+        // Value arc with gradient
+        const angle = Math.PI + (Math.min(value, maxValue) / maxValue) * Math.PI;
+
+        // Create arc gradient
+        const gradient = this.ctx.createLinearGradient(cx - radius, cy, cx + radius, cy);
+        gradient.addColorStop(0, this.lightenColor(color, -20));
+        gradient.addColorStop(0.5, color);
+        gradient.addColorStop(1, this.lightenColor(color, 20));
+
+        this.ctx.beginPath();
+        this.ctx.arc(cx, cy, radius, Math.PI, angle);
+        this.ctx.strokeStyle = gradient;
+        this.ctx.lineWidth = 25;
+        this.ctx.lineCap = 'round';
+        this.ctx.stroke();
+
+        // Glow effect
+        this.ctx.shadowColor = color;
+        this.ctx.shadowBlur = 15;
         this.ctx.beginPath();
         this.ctx.arc(cx, cy, radius, Math.PI, angle);
         this.ctx.strokeStyle = color;
-        this.ctx.lineWidth = 20;
+        this.ctx.lineWidth = 3;
         this.ctx.stroke();
+        this.ctx.shadowBlur = 0;
 
         // Value text
         this.ctx.fillStyle = '#fff';
-        this.ctx.font = 'bold 24px sans-serif';
+        this.ctx.font = 'bold 32px -apple-system, BlinkMacSystemFont, sans-serif';
         this.ctx.textAlign = 'center';
-        this.ctx.fillText(value.toFixed(1) + '%', cx, cy);
+        this.ctx.fillText(value.toFixed(1) + '%', cx, cy + 10);
+
+        // Min/Max labels
+        this.ctx.fillStyle = '#666';
+        this.ctx.font = '12px -apple-system, BlinkMacSystemFont, sans-serif';
+        this.ctx.fillText('0', cx - radius - 5, cy + 25);
+        this.ctx.fillText('100', cx + radius + 5, cy + 25);
     }
 }
 
@@ -800,24 +1141,37 @@ class HeatmapRenderer {
     constructor(canvas) {
         this.canvas = canvas;
         this.ctx = canvas.getContext('2d');
+        this.data = null;
+        window.addEventListener('resize', () => this.redraw());
+    }
+
+    redraw() {
+        if (this.data) this.render(this.data);
     }
 
     render(heatmapData) {
+        this.data = heatmapData;
         const { time_buckets, offset_buckets, data, max_count } = heatmapData;
 
         const rect = this.canvas.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) return;
+
         this.canvas.width = rect.width * window.devicePixelRatio;
         this.canvas.height = rect.height * window.devicePixelRatio;
         this.ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
 
         const width = rect.width;
         const height = rect.height;
-        const padding = { top: 30, right: 20, bottom: 50, left: 70 };
+        const padding = { top: 40, right: 30, bottom: 60, left: 80 };
 
         const cellWidth = (width - padding.left - padding.right) / time_buckets;
         const cellHeight = (height - padding.top - padding.bottom) / offset_buckets;
 
-        // Draw cells
+        // Background
+        this.ctx.fillStyle = '#1a1a2e';
+        this.ctx.fillRect(0, 0, width, height);
+
+        // Draw cells with smooth interpolation
         for (let t = 0; t < time_buckets; t++) {
             for (let o = 0; o < offset_buckets; o++) {
                 const idx = t * offset_buckets + o;
@@ -832,23 +1186,38 @@ class HeatmapRenderer {
             }
         }
 
+        // Draw border around heatmap
+        this.ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+        this.ctx.lineWidth = 1;
+        this.ctx.strokeRect(padding.left, padding.top, width - padding.left - padding.right, height - padding.top - padding.bottom);
+
         // Draw axes labels
-        this.ctx.fillStyle = '#888';
-        this.ctx.font = '11px sans-serif';
+        this.ctx.fillStyle = '#aaa';
+        this.ctx.font = '12px -apple-system, BlinkMacSystemFont, sans-serif';
         this.ctx.textAlign = 'center';
-        this.ctx.fillText('Time (seconds)', width / 2, height - 10);
+        this.ctx.fillText('Time (seconds)', width / 2, height - 15);
 
         this.ctx.save();
-        this.ctx.translate(15, height / 2);
+        this.ctx.translate(20, height / 2);
         this.ctx.rotate(-Math.PI / 2);
         this.ctx.fillText('File Offset (GB)', 0, 0);
         this.ctx.restore();
 
         // Time axis ticks
+        this.ctx.fillStyle = '#888';
+        this.ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
         for (let i = 0; i <= 5; i++) {
             const x = padding.left + (i / 5) * (width - padding.left - padding.right);
             const time = (heatmapData.min_time_ms + (heatmapData.max_time_ms - heatmapData.min_time_ms) * i / 5) / 1000;
-            this.ctx.fillText(time.toFixed(0) + 's', x, height - padding.bottom + 20);
+
+            // Tick mark
+            this.ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+            this.ctx.beginPath();
+            this.ctx.moveTo(x, height - padding.bottom);
+            this.ctx.lineTo(x, height - padding.bottom + 5);
+            this.ctx.stroke();
+
+            this.ctx.fillText(time.toFixed(1) + 's', x, height - padding.bottom + 20);
         }
 
         // Offset axis ticks
@@ -856,23 +1225,34 @@ class HeatmapRenderer {
         for (let i = 0; i <= 5; i++) {
             const y = padding.top + (i / 5) * (height - padding.top - padding.bottom);
             const offset = heatmapData.max_offset_gb - (heatmapData.max_offset_gb - heatmapData.min_offset_gb) * i / 5;
-            this.ctx.fillText(offset.toFixed(1), padding.left - 5, y + 4);
+
+            // Tick mark
+            this.ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+            this.ctx.beginPath();
+            this.ctx.moveTo(padding.left - 5, y);
+            this.ctx.lineTo(padding.left, y);
+            this.ctx.stroke();
+
+            this.ctx.fillText(offset.toFixed(1), padding.left - 10, y + 4);
         }
     }
 
     getHeatColor(intensity) {
         if (intensity === 0) return '#1a1a2e';
 
-        // Blue -> Cyan -> Yellow -> Orange -> Red
+        // More vibrant color scale
         const colors = [
+            [30, 40, 80],     // Dark blue
             [0, 102, 255],    // Blue
             [0, 212, 255],    // Cyan
+            [50, 255, 150],   // Teal
             [255, 255, 0],    // Yellow
-            [255, 102, 0],    // Orange
-            [255, 0, 0]       // Red
+            [255, 150, 0],    // Orange
+            [255, 50, 50],    // Red
+            [255, 100, 150]   // Pink/hot
         ];
 
-        const idx = intensity * (colors.length - 1);
+        const idx = Math.pow(intensity, 0.7) * (colors.length - 1); // Gamma correction for better visibility
         const i = Math.floor(idx);
         const t = idx - i;
 
@@ -905,19 +1285,52 @@ function formatDuration(secs) {
     return (secs / 3600).toFixed(1) + 'h';
 }
 
-// Initialize the viewer
-function init() {
-    // Tab switching
-    document.querySelectorAll('.tab').forEach(tab => {
-        tab.addEventListener('click', () => {
-            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-            document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-            tab.classList.add('active');
-            document.getElementById(tab.dataset.tab).classList.add('active');
-        });
-    });
+// Chart instances (created lazily when tabs become visible)
+const charts = {};
+const tabInitialized = {};
 
-    // Summary
+// Initialize a specific tab's charts
+function initTab(tabName) {
+    if (tabInitialized[tabName]) {
+        // Just redraw existing charts
+        Object.values(charts).forEach(chart => {
+            if (chart && chart.redraw) chart.redraw();
+        });
+        return;
+    }
+
+    tabInitialized[tabName] = true;
+
+    switch(tabName) {
+        case 'summary':
+            initSummary();
+            break;
+        case 'timeline':
+            initTimeline();
+            break;
+        case 'heatmap':
+            initHeatmap();
+            break;
+        case 'tables':
+            initTables();
+            break;
+        case 'threads':
+            initThreads();
+            break;
+        case 'hotpages':
+            initHotPages();
+            break;
+        case 'patterns':
+            initPatterns();
+            break;
+        case 'prefetch':
+            initPrefetch();
+            break;
+    }
+}
+
+function initSummary() {
+    // Summary stats
     document.getElementById('duration').textContent = formatDuration(DATA.summary.duration_secs);
     document.getElementById('total-faults').textContent = formatNumber(DATA.summary.page_faults);
     document.getElementById('major-faults').textContent = formatNumber(DATA.summary.major_faults);
@@ -928,57 +1341,103 @@ function init() {
     document.getElementById('file-range').textContent = DATA.summary.file_size_gb.toFixed(2) + ' GB';
 
     // Fault type pie chart
-    const faultTypeChart = new SimpleChart(document.getElementById('fault-type-chart'));
-    faultTypeChart.drawPie(
+    charts.faultType = new SimpleChart(document.getElementById('fault-type-chart'));
+    charts.faultType.drawPie(
         [DATA.summary.major_faults, DATA.summary.minor_faults],
-        ['#ff6b6b', '#51cf66']
+        ['#ff6b6b', '#51cf66'],
+        ['Major (Disk I/O)', 'Minor (Cache)']
     );
 
     // Access pattern pie chart
-    const accessPatternChart = new SimpleChart(document.getElementById('access-pattern-chart'));
-    accessPatternChart.drawPie(
+    charts.accessPattern = new SimpleChart(document.getElementById('access-pattern-chart'));
+    charts.accessPattern.drawPie(
         [DATA.patterns.sequential_ratio, DATA.patterns.random_ratio],
-        ['#00d4ff', '#ffd43b']
+        ['#00d4ff', '#ffd43b'],
+        ['Sequential', 'Random']
     );
+}
 
-    // Timeline chart
+function initTimeline() {
     if (DATA.timeline.length > 0) {
-        const timelineChart = new SimpleChart(document.getElementById('timeline-chart'));
+        charts.timeline = new SimpleChart(document.getElementById('timeline-chart'));
         const faults = DATA.timeline.map(t => t.faults);
         const major = DATA.timeline.map(t => t.major_faults);
-        timelineChart.drawLine([faults, major], { colors: ['#00d4ff', '#ff6b6b'] });
-    }
+        charts.timeline.drawLine([faults, major], {
+            colors: ['#00d4ff', '#ff6b6b'],
+            labels: ['Total Faults', 'Major Faults'],
+            title: 'Page Faults Over Time'
+        });
 
-    // Heatmap
+        // Timeline controls
+        const showMajor = document.getElementById('show-major');
+        const showUnique = document.getElementById('show-unique');
+
+        function updateTimeline() {
+            const datasets = [];
+            const colors = [];
+            const labels = [];
+
+            datasets.push(DATA.timeline.map(t => t.faults));
+            colors.push('#00d4ff');
+            labels.push('Total Faults');
+
+            if (showMajor.checked) {
+                datasets.push(DATA.timeline.map(t => t.major_faults));
+                colors.push('#ff6b6b');
+                labels.push('Major Faults');
+            }
+
+            if (showUnique.checked) {
+                datasets.push(DATA.timeline.map(t => t.unique_pages));
+                colors.push('#51cf66');
+                labels.push('Unique Pages');
+            }
+
+            charts.timeline.drawLine(datasets, { colors, labels, title: 'Page Faults Over Time' });
+        }
+
+        showMajor.addEventListener('change', updateTimeline);
+        showUnique.addEventListener('change', updateTimeline);
+    }
+}
+
+function initHeatmap() {
     if (DATA.heatmap.data.length > 0) {
-        const heatmap = new HeatmapRenderer(document.getElementById('heatmap-canvas'));
-        heatmap.render(DATA.heatmap);
+        charts.heatmap = new HeatmapRenderer(document.getElementById('heatmap-canvas'));
+        charts.heatmap.render(DATA.heatmap);
 
         document.getElementById('heatmap-time-range').textContent =
             `Time: ${(DATA.heatmap.min_time_ms / 1000).toFixed(1)}s - ${(DATA.heatmap.max_time_ms / 1000).toFixed(1)}s`;
         document.getElementById('heatmap-offset-range').textContent =
-            `Offset: ${DATA.heatmap.min_offset_gb.toFixed(2)} - ${DATA.heatmap.max_offset_gb.toFixed(2)} GB`;
+            `Offset: ${DATA.heatmap.min_offset_gb.toFixed(2)} GB - ${DATA.heatmap.max_offset_gb.toFixed(2)} GB`;
     }
+}
 
-    // Tables
+function initTables() {
     if (DATA.tables.length > 0) {
-        const tablesPieChart = new SimpleChart(document.getElementById('tables-pie-chart'));
-        const topTables = DATA.tables.slice(0, 8);
-        const colors = ['#00d4ff', '#ff6b6b', '#51cf66', '#ffd43b', '#cc5de8', '#20c997', '#fd7e14', '#868e96'];
-        tablesPieChart.drawPie(topTables.map(t => t.faults), colors);
+        const topTables = DATA.tables.slice(0, 10);
+        const colors = ['#00d4ff', '#ff6b6b', '#51cf66', '#ffd43b', '#cc5de8', '#20c997', '#fd7e14', '#868e96', '#e599f7', '#74c0fc'];
 
-        const tablesBarChart = new SimpleChart(document.getElementById('tables-bar-chart'));
-        tablesBarChart.drawBar(
+        charts.tablesPie = new SimpleChart(document.getElementById('tables-pie-chart'));
+        charts.tablesPie.drawPie(
+            topTables.map(t => t.faults),
+            colors,
+            topTables.map(t => t.name)
+        );
+
+        charts.tablesBar = new SimpleChart(document.getElementById('tables-bar-chart'));
+        charts.tablesBar.drawBar(
             topTables.map(t => t.name),
             topTables.map(t => t.faults),
-            '#00d4ff'
+            '#00d4ff',
+            { title: 'Faults by Table' }
         );
 
         const tbody = document.querySelector('#tables-table tbody');
-        DATA.tables.forEach(t => {
+        DATA.tables.forEach((t, i) => {
             const row = document.createElement('tr');
             row.innerHTML = `
-                <td>${t.name}</td>
+                <td><span style="display:inline-block;width:10px;height:10px;background:${colors[i % colors.length]};margin-right:8px;border-radius:2px;"></span>${t.name}</td>
                 <td>${t.category}</td>
                 <td>${formatNumber(t.faults)}</td>
                 <td>${formatNumber(t.major_faults)}</td>
@@ -987,14 +1446,16 @@ function init() {
             tbody.appendChild(row);
         });
     }
+}
 
-    // Threads
+function initThreads() {
     if (DATA.threads.length > 0) {
-        const threadsChart = new SimpleChart(document.getElementById('threads-chart'));
-        threadsChart.drawBar(
+        charts.threads = new SimpleChart(document.getElementById('threads-chart'));
+        charts.threads.drawBar(
             DATA.threads.map(t => 'TID ' + t.tid),
             DATA.threads.map(t => t.faults),
-            '#51cf66'
+            '#51cf66',
+            { title: 'Faults by Thread' }
         );
 
         const tbody = document.querySelector('#threads-table tbody');
@@ -1008,9 +1469,11 @@ function init() {
             tbody.appendChild(row);
         });
     }
+}
 
-    // Hot pages
+function initHotPages() {
     let hotPagesData = [...DATA.hot_pages];
+
     function renderHotPages() {
         const filter = document.getElementById('page-filter').value.toLowerCase();
         const sort = document.getElementById('page-sort').value;
@@ -1026,13 +1489,15 @@ function init() {
 
         const tbody = document.querySelector('#hotpages-table tbody');
         tbody.innerHTML = '';
-        filtered.slice(0, 50).forEach(p => {
+        filtered.slice(0, 100).forEach((p, i) => {
             const row = document.createElement('tr');
+            const heatColor = p.major_faults > 0 ? `rgba(255, 107, 107, ${Math.min(p.major_faults / 100, 0.3)})` : 'transparent';
+            row.style.background = heatColor;
             row.innerHTML = `
-                <td>${p.page_number}</td>
+                <td>${p.page_number.toLocaleString()}</td>
                 <td>${p.offset_gb.toFixed(4)}</td>
                 <td>${formatNumber(p.accesses)}</td>
-                <td>${formatNumber(p.major_faults)}</td>
+                <td style="color: ${p.major_faults > 0 ? '#ff6b6b' : '#51cf66'}">${formatNumber(p.major_faults)}</td>
                 <td>${p.table}</td>
             `;
             tbody.appendChild(row);
@@ -1042,42 +1507,67 @@ function init() {
     document.getElementById('page-filter').addEventListener('input', renderHotPages);
     document.getElementById('page-sort').addEventListener('change', renderHotPages);
     renderHotPages();
+}
 
-    // Patterns
+function initPatterns() {
     document.getElementById('seq-ratio').textContent = (DATA.patterns.sequential_ratio * 100).toFixed(1) + '%';
     document.getElementById('rand-ratio').textContent = (DATA.patterns.random_ratio * 100).toFixed(1) + '%';
 
     if (DATA.patterns.stride_distribution.length > 0) {
-        const strideChart = new SimpleChart(document.getElementById('stride-chart'));
-        strideChart.drawBar(
+        charts.stride = new SimpleChart(document.getElementById('stride-chart'));
+        charts.stride.drawBar(
             DATA.patterns.stride_distribution.map(s => s.stride_pages + ' pg'),
             DATA.patterns.stride_distribution.map(s => s.count),
-            '#ffd43b'
+            '#ffd43b',
+            { title: 'Stride Distribution (pages between consecutive accesses)' }
         );
     }
 
-    document.getElementById('burst-median').textContent = DATA.patterns.burst_stats.median_events;
-    document.getElementById('burst-p95').textContent = DATA.patterns.burst_stats.p95_events;
-    document.getElementById('burst-max').textContent = DATA.patterns.burst_stats.max_events;
+    document.getElementById('burst-median').textContent = formatNumber(DATA.patterns.burst_stats.median_events);
+    document.getElementById('burst-p95').textContent = formatNumber(DATA.patterns.burst_stats.p95_events);
+    document.getElementById('burst-max').textContent = formatNumber(DATA.patterns.burst_stats.max_events);
+}
 
-    // Prefetch
-    const prefetchGauge = new SimpleChart(document.getElementById('prefetch-gauge'));
-    prefetchGauge.drawGauge(DATA.prefetch.prediction_hit_rate, 100, '#00d4ff');
+function initPrefetch() {
+    charts.prefetchGauge = new SimpleChart(document.getElementById('prefetch-gauge'));
+    charts.prefetchGauge.drawGauge(DATA.prefetch.prediction_hit_rate, 100, '#00d4ff');
 
-    const localityGauge = new SimpleChart(document.getElementById('locality-gauge'));
-    localityGauge.drawGauge(DATA.prefetch.locality_score * 100, 100, '#51cf66');
+    charts.localityGauge = new SimpleChart(document.getElementById('locality-gauge'));
+    charts.localityGauge.drawGauge(DATA.prefetch.locality_score * 100, 100, '#51cf66');
 
     const recBox = document.getElementById('recommendation');
-    recBox.textContent = DATA.prefetch.recommendation;
+    recBox.innerHTML = `<strong>Recommendation:</strong> ${DATA.prefetch.recommendation}`;
     if (DATA.prefetch.prediction_hit_rate > 30) recBox.classList.add('good');
     else if (DATA.prefetch.prediction_hit_rate > 15) recBox.classList.add('moderate');
     else recBox.classList.add('poor');
 
     document.getElementById('hit-rate').textContent = DATA.prefetch.prediction_hit_rate.toFixed(1) + '%';
     document.getElementById('locality-score').textContent = (DATA.prefetch.locality_score * 100).toFixed(1) + '%';
-    document.getElementById('prefetch-benefit').textContent = DATA.prefetch.prefetch_benefit_estimate.toFixed(1) + '% fault reduction';
+    document.getElementById('prefetch-benefit').textContent = DATA.prefetch.prefetch_benefit_estimate.toFixed(1) + '% potential fault reduction';
+}
+
+// Initialize the viewer
+function init() {
+    // Tab switching with lazy initialization
+    document.querySelectorAll('.tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+            tab.classList.add('active');
+            const panel = document.getElementById(tab.dataset.tab);
+            panel.classList.add('active');
+
+            // Initialize tab charts after panel is visible
+            requestAnimationFrame(() => {
+                initTab(tab.dataset.tab);
+            });
+        });
+    });
+
+    // Initialize summary tab (it's visible by default)
+    initTab('summary');
 }
 
 // Run on load
-init();
+document.addEventListener('DOMContentLoaded', init);
 "##;
