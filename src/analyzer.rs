@@ -27,10 +27,6 @@ struct Cli {
     #[arg(long)]
     mdbx_path: Option<PathBuf>,
 
-    /// Open the generated HTML in the default browser
-    #[arg(long, default_value = "true")]
-    open: bool,
-
     /// Output format: html (default), json (raw data), csv
     #[arg(short, long, default_value = "html")]
     format: String,
@@ -150,14 +146,6 @@ fn generate_html_viewer(
     eprintln!("Prefetch score:  {:.1}%", data.prefetch.prediction_hit_rate);
 
     eprintln!("\nViewer written to: {}", output_path.display());
-
-    // Open in browser if requested
-    if cli.open {
-        eprintln!("Opening in browser...");
-        if let Err(e) = viewer::open_in_browser(&output_path) {
-            eprintln!("Could not open browser: {}. Please open manually.", e);
-        }
-    }
 
     Ok(())
 }

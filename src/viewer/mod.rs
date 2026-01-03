@@ -743,27 +743,3 @@ pub fn write_html(data: &ViewerData, path: impl AsRef<Path>) -> std::io::Result<
     let html = generate_html(data);
     std::fs::write(path, html)
 }
-
-/// Open the HTML viewer in the default browser
-pub fn open_in_browser(path: impl AsRef<Path>) -> std::io::Result<()> {
-    let path = path.as_ref();
-
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open").arg(path).spawn()?;
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        std::process::Command::new("xdg-open").arg(path).spawn()?;
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", &path.display().to_string()])
-            .spawn()?;
-    }
-
-    Ok(())
-}
