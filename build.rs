@@ -8,7 +8,8 @@ fn main() {
 
         let src = PathBuf::from("bpf/mdbx_tracer.bpf.c");
         let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
-        let out = out_dir.join("mdbx_tracer.bpf.o");
+        // Use .bpf.o extension for the actual BPF object file
+        let obj_file = out_dir.join("mdbx_tracer.bpf.o");
 
         // Check if vmlinux.h exists
         let vmlinux = PathBuf::from("bpf/vmlinux.h");
@@ -20,10 +21,14 @@ fn main() {
             return;
         }
 
+        // Use build() instead of build_and_generate() to produce just the .bpf.o file.
+        // build_and_generate() creates a Rust skeleton file, but we load the BPF
+        // object dynamically at runtime using ObjectBuilder.
         SkeletonBuilder::new()
             .source(&src)
+            .obj(&obj_file)
             .clang_args(["-I", "bpf/", "-Wno-compare-distinct-pointer-types"])
-            .build_and_generate(&out)
+            .build()
             .expect("Failed to build BPF program");
 
         // Copy the BPF object file to the target directory so it can be found at runtime.
@@ -35,7 +40,7 @@ fn main() {
             .find(|p| p.ends_with("release") || p.ends_with("debug"))
         {
             let dest = target_dir.join("mdbx_tracer.bpf.o");
-            if let Err(e) = std::fs::copy(&out, &dest) {
+            if let Err(e) = std::fs::copy(&obj_file, &dest) {
                 println!(
                     "cargo:warning=Failed to copy BPF object to target dir: {}",
                     e
