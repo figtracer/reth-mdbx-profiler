@@ -260,6 +260,10 @@ pub struct PageAttribution {
     table_info: HashMap<RethTable, TableInfo>,
     /// Page size
     page_size: u32,
+    /// Total file size in bytes
+    file_size: u64,
+    /// Table stats from mdbx_stat (for proportion-based attribution)
+    mdbx_stats: Option<Vec<MdbxStatOutput>>,
 }
 
 impl PageAttribution {
@@ -300,20 +304,17 @@ impl PageAttribution {
         // MDBX layout heuristics based on typical Reth database structure:
         // - Pages 0-1: Meta pages
         // - Page 2: Free list
-        // - Pages 3-100: Main DB and small tables
-        // - The rest: Data tables, with trie tables often accessed during state root
+        // - Pages 3+: Data tables
 
         if page_num <= 1 {
-            RethTable::MdbxMainDb
+            return RethTable::MdbxMainDb;
         } else if page_num == 2 {
-            RethTable::MdbxFreeList
-        } else if page_num < 100 {
-            // Small pages are often metadata tables
-            RethTable::StageCheckpoints
-        } else {
-            // Default to unknown - will be refined with actual metadata
-            RethTable::Unknown(0)
+            return RethTable::MdbxFreeList;
         }
+
+        // If we have mdbx_stat data, we can't map exact pages but we know proportions.
+        // Return Unknown and let the caller use proportion-based attribution
+        RethTable::Unknown(0)
     }
 
     /// Register a page range for a table
@@ -352,46 +353,241 @@ impl PageAttribution {
             self.page_size
         }
     }
+
+    /// Set file size
+    pub fn set_file_size(&mut self, size: u64) {
+        self.file_size = size;
+    }
+
+    /// Get file size
+    pub fn file_size(&self) -> u64 {
+        self.file_size
+    }
+
+    /// Set table stats from mdbx_stat
+    pub fn set_table_stats(&mut self, stats: Vec<MdbxStatOutput>) {
+        self.mdbx_stats = Some(stats);
+    }
+
+    /// Get table stats
+    pub fn get_mdbx_stats(&self) -> Option<&Vec<MdbxStatOutput>> {
+        self.mdbx_stats.as_ref()
+    }
+
+    /// Check if we have real table statistics
+    pub fn has_table_stats(&self) -> bool {
+        self.mdbx_stats.is_some()
+    }
+
+    /// Get table proportions for weighted attribution
+    /// Returns (table_name, proportion) pairs sorted by size descending
+    pub fn get_table_proportions(&self) -> Vec<(String, f64)> {
+        let Some(stats) = &self.mdbx_stats else {
+            return Vec::new();
+        };
+
+        let total_pages: u64 = stats.iter().map(|s| s.total_pages).sum();
+        if total_pages == 0 {
+            return Vec::new();
+        }
+
+        let mut proportions: Vec<_> = stats
+            .iter()
+            .filter(|s| s.name != "@main" && s.total_pages > 0)
+            .map(|s| (s.name.clone(), s.total_pages as f64 / total_pages as f64))
+            .collect();
+
+        proportions.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        proportions
+    }
 }
 
-/// MDBX meta page structure (simplified)
-/// The actual structure is more complex, but we only need key fields
+/// MDBX page header flags
+const P_BRANCH: u16 = 0x01;
+const P_LEAF: u16 = 0x02;
+const P_OVERFLOW: u16 = 0x04;
+const P_META: u16 = 0x08;
+const P_DUPDATA: u16 = 0x10;
+const P_LEAF2: u16 = 0x20;
+const P_SUBP: u16 = 0x40;
+
+const MDBX_PAGE_SIZE_DEFAULT: u32 = 4096;
+
+/// MDBX page header (first 16 bytes of each page)
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-struct MdbxMetaPage {
-    magic: u64,
-    version: u32,
-    flags: u32,
-    page_size: u32,
-    // ... more fields
+struct PageHeader {
+    pgno: u64,     // Page number
+    flags: u16,    // Page flags
+    num_keys: u16, // Number of keys/entries
+    lower: u16,    // Lower bound of free space
+    upper: u16,    // Upper bound of free space
 }
 
-const MDBX_MAGIC: u64 = 0xBEEFC0DE;
-const MDBX_PAGE_SIZE_DEFAULT: u32 = 4096;
+/// Table info from mdbx_stat output
+#[derive(Debug, Clone)]
+pub struct MdbxStatOutput {
+    pub name: String,
+    pub entries: u64,
+    pub depth: u32,
+    pub branch_pages: u64,
+    pub leaf_pages: u64,
+    pub overflow_pages: u64,
+    pub total_pages: u64,
+}
+
+/// Run mdbx_stat to get real table statistics
+pub fn run_mdbx_stat(mdbx_path: impl AsRef<Path>) -> Option<Vec<MdbxStatOutput>> {
+    let path = mdbx_path.as_ref();
+
+    // Try to find mdbx_stat binary
+    let mdbx_stat_paths = [
+        "mdbx_stat",
+        "/usr/bin/mdbx_stat",
+        "/usr/local/bin/mdbx_stat",
+        "/opt/homebrew/bin/mdbx_stat",
+    ];
+
+    let mut mdbx_stat_bin = None;
+    for bin_path in &mdbx_stat_paths {
+        if std::process::Command::new(bin_path)
+            .arg("-V")
+            .output()
+            .is_ok()
+        {
+            mdbx_stat_bin = Some(*bin_path);
+            break;
+        }
+    }
+
+    let bin = mdbx_stat_bin?;
+
+    // Run mdbx_stat -a (all databases) on the mdbx file
+    let output = std::process::Command::new(bin)
+        .arg("-a")
+        .arg("-e") // Environment info
+        .arg(path)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        eprintln!(
+            "mdbx_stat failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_mdbx_stat_output(&stdout)
+}
+
+/// Parse mdbx_stat output to extract table information
+fn parse_mdbx_stat_output(output: &str) -> Option<Vec<MdbxStatOutput>> {
+    let mut tables = Vec::new();
+    let mut current_table: Option<String> = None;
+    let mut current_stats = MdbxStatOutput {
+        name: String::new(),
+        entries: 0,
+        depth: 0,
+        branch_pages: 0,
+        leaf_pages: 0,
+        overflow_pages: 0,
+        total_pages: 0,
+    };
+
+    for line in output.lines() {
+        let line = line.trim();
+
+        // Database name line: "Status of Main DB" or "Status of database 'TableName'"
+        if line.starts_with("Status of ") {
+            // Save previous table if exists
+            if current_table.is_some() && !current_stats.name.is_empty() {
+                tables.push(current_stats.clone());
+            }
+
+            if line.contains("Main DB") {
+                current_table = Some("@main".to_string());
+                current_stats.name = "@main".to_string();
+            } else if let Some(start) = line.find('\'') {
+                if let Some(end) = line.rfind('\'') {
+                    let name = &line[start + 1..end];
+                    current_table = Some(name.to_string());
+                    current_stats.name = name.to_string();
+                }
+            }
+
+            // Reset stats
+            current_stats.entries = 0;
+            current_stats.depth = 0;
+            current_stats.branch_pages = 0;
+            current_stats.leaf_pages = 0;
+            current_stats.overflow_pages = 0;
+            current_stats.total_pages = 0;
+        }
+
+        // Parse stat lines
+        if current_table.is_some() {
+            if let Some(value) = extract_stat_value(line, "Tree depth:") {
+                current_stats.depth = value as u32;
+            } else if let Some(value) = extract_stat_value(line, "Branch pages:") {
+                current_stats.branch_pages = value;
+            } else if let Some(value) = extract_stat_value(line, "Leaf pages:") {
+                current_stats.leaf_pages = value;
+            } else if let Some(value) = extract_stat_value(line, "Overflow pages:") {
+                current_stats.overflow_pages = value;
+            } else if let Some(value) = extract_stat_value(line, "Entries:") {
+                current_stats.entries = value;
+            }
+        }
+    }
+
+    // Save last table
+    if current_table.is_some() && !current_stats.name.is_empty() {
+        current_stats.total_pages =
+            current_stats.branch_pages + current_stats.leaf_pages + current_stats.overflow_pages;
+        tables.push(current_stats);
+    }
+
+    // Calculate total pages for all tables
+    for table in &mut tables {
+        table.total_pages = table.branch_pages + table.leaf_pages + table.overflow_pages;
+    }
+
+    if tables.is_empty() {
+        None
+    } else {
+        Some(tables)
+    }
+}
+
+fn extract_stat_value(line: &str, prefix: &str) -> Option<u64> {
+    if line.trim().starts_with(prefix) {
+        let value_part = line.trim().strip_prefix(prefix)?.trim();
+        // Handle values like "123" or "123 (some note)"
+        let value_str = value_part.split_whitespace().next()?;
+        value_str.parse().ok()
+    } else {
+        None
+    }
+}
 
 /// Read MDBX metadata from database file
 pub fn read_mdbx_metadata(path: impl AsRef<Path>) -> std::io::Result<PageAttribution> {
     let mut file = File::open(path.as_ref())?;
     let mut attribution = PageAttribution::new();
 
-    // Read meta page 0
-    let mut header = [0u8; 256];
+    // Read first page (meta page)
+    let mut header = [0u8; 4096];
     file.read_exact(&mut header)?;
 
-    // Check magic (at offset 0)
-    let magic = u64::from_le_bytes(header[0..8].try_into().unwrap());
-    if magic != MDBX_MAGIC {
-        // Try alternate magic location or assume defaults
-        attribution.set_page_size(MDBX_PAGE_SIZE_DEFAULT);
-        return Ok(attribution);
-    }
-
-    // Read page size (typically at offset 20 in MDBX header)
+    // MDBX stores page size at offset 20 in the header
+    // Try common page sizes if we can't read it
     let page_size = u32::from_le_bytes(header[20..24].try_into().unwrap());
-    let page_size = if page_size == 0 || page_size > 65536 {
-        MDBX_PAGE_SIZE_DEFAULT
-    } else {
+    let page_size = if page_size >= 256 && page_size <= 65536 && page_size.is_power_of_two() {
         page_size
+    } else {
+        MDBX_PAGE_SIZE_DEFAULT
     };
     attribution.set_page_size(page_size);
 
@@ -404,64 +600,101 @@ pub fn read_mdbx_metadata(path: impl AsRef<Path>) -> std::io::Result<PageAttribu
 }
 
 /// Try to extract table information by running mdbx_stat or parsing the file
-/// This is a best-effort approach since MDBX internal structure is complex
 pub fn extract_table_stats(path: impl AsRef<Path>) -> std::io::Result<PageAttribution> {
+    let path = path.as_ref();
+
     // Start with basic metadata
-    let mut attribution = read_mdbx_metadata(path.as_ref())?;
+    let mut attribution = read_mdbx_metadata(path)?;
 
     // Try to get file size for estimation
-    let metadata = std::fs::metadata(path.as_ref())?;
+    let metadata = std::fs::metadata(path)?;
     let file_size = metadata.len();
     let page_size = attribution.page_size() as u64;
     let total_pages = file_size / page_size;
 
-    // Without running mdbx_stat or parsing the B+ tree structure,
-    // we use file offset heuristics based on typical Reth database patterns.
-    // In a real implementation, we would:
-    // 1. Parse the main DB to find all named databases (tables)
-    // 2. Read each table's root page from the main DB
-    // 3. Traverse each table's B+ tree to build the page mapping
-    //
-    // For now, we provide size-based estimates that will be refined
-    // during trace analysis based on access patterns.
-
-    // Register all known tables with Unknown page ranges initially
-    // The actual attribution will be refined during analysis
-    let tables = [
-        RethTable::CanonicalHeaders,
-        RethTable::HeaderNumbers,
-        RethTable::Headers,
-        RethTable::BlockBodyIndices,
-        RethTable::Transactions,
-        RethTable::Receipts,
-        RethTable::PlainAccountState,
-        RethTable::PlainStorageState,
-        RethTable::HashedAccounts,
-        RethTable::HashedStorages,
-        RethTable::AccountsTrie,
-        RethTable::StoragesTrie,
-        RethTable::AccountsHistory,
-        RethTable::StoragesHistory,
-    ];
-
-    for table in tables {
-        attribution.add_table_info(TableInfo {
-            table,
-            dbi: 0,
-            root_page: 0,
-            depth: 0,
-            branch_pages: 0,
-            leaf_pages: 0,
-            overflow_pages: 0,
-            entries: 0,
-        });
-    }
-
-    // Log estimation
     eprintln!(
-        "MDBX file: {} pages ({} bytes), page size: {}",
-        total_pages, file_size, page_size
+        "MDBX file: {} pages ({:.2} GB), page size: {}",
+        total_pages,
+        file_size as f64 / 1024.0 / 1024.0 / 1024.0,
+        page_size
     );
+
+    // Try to run mdbx_stat for real table info
+    if let Some(stats) = run_mdbx_stat(path) {
+        eprintln!("Got table stats from mdbx_stat ({} tables):", stats.len());
+
+        let mut total_table_pages: u64 = 0;
+
+        for stat in &stats {
+            let table = RethTable::from_name(&stat.name);
+
+            eprintln!(
+                "  {}: {} pages ({} branch, {} leaf, {} overflow), {} entries, depth {}",
+                stat.name,
+                stat.total_pages,
+                stat.branch_pages,
+                stat.leaf_pages,
+                stat.overflow_pages,
+                stat.entries,
+                stat.depth
+            );
+
+            attribution.add_table_info(TableInfo {
+                table,
+                dbi: 0,
+                root_page: 0, // We don't know root page from mdbx_stat
+                depth: stat.depth,
+                branch_pages: stat.branch_pages,
+                leaf_pages: stat.leaf_pages,
+                overflow_pages: stat.overflow_pages,
+                entries: stat.entries,
+            });
+
+            total_table_pages += stat.total_pages;
+        }
+
+        // Store the stats for proportion-based attribution
+        attribution.set_table_stats(stats);
+
+        eprintln!(
+            "Total table pages: {} ({:.1}% of file)",
+            total_table_pages,
+            total_table_pages as f64 / total_pages as f64 * 100.0
+        );
+    } else {
+        eprintln!("mdbx_stat not available, using heuristic attribution");
+
+        // Register all known tables
+        let tables = [
+            RethTable::CanonicalHeaders,
+            RethTable::HeaderNumbers,
+            RethTable::Headers,
+            RethTable::BlockBodyIndices,
+            RethTable::Transactions,
+            RethTable::Receipts,
+            RethTable::PlainAccountState,
+            RethTable::PlainStorageState,
+            RethTable::HashedAccounts,
+            RethTable::HashedStorages,
+            RethTable::AccountsTrie,
+            RethTable::StoragesTrie,
+            RethTable::AccountsHistory,
+            RethTable::StoragesHistory,
+        ];
+
+        for table in tables {
+            attribution.add_table_info(TableInfo {
+                table,
+                dbi: 0,
+                root_page: 0,
+                depth: 0,
+                branch_pages: 0,
+                leaf_pages: 0,
+                overflow_pages: 0,
+                entries: 0,
+            });
+        }
+    }
 
     Ok(attribution)
 }
