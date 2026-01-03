@@ -85,7 +85,13 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Trace { pid, mdbx_path, output, duration, stats_interval } => {
+        Commands::Trace {
+            pid,
+            mdbx_path,
+            output,
+            duration,
+            stats_interval,
+        } => {
             let dur: Option<Duration> = duration.map(|d| d.into());
             run_trace(pid, mdbx_path, output, dur, stats_interval)?;
         }
@@ -107,7 +113,10 @@ fn run_trace(
     duration: Option<Duration>,
     stats_interval: u64,
 ) -> anyhow::Result<()> {
-    info!("Starting trace for PID {} on MDBX path {:?}", pid, mdbx_path);
+    info!(
+        "Starting trace for PID {} on MDBX path {:?}",
+        pid, mdbx_path
+    );
 
     // Get inode of MDBX file
     let metadata = std::fs::metadata(&mdbx_path)?;
@@ -116,7 +125,10 @@ fn run_trace(
     info!("MDBX file inode: {}", inode);
 
     // Load BPF program
-    let obj_path = std::env::current_exe()?.parent().unwrap().join("mdbx_tracer.bpf.o");
+    let obj_path = std::env::current_exe()?
+        .parent()
+        .unwrap()
+        .join("mdbx_tracer.bpf.o");
 
     info!("Loading BPF object from {:?}", obj_path);
 
@@ -177,8 +189,10 @@ fn run_trace(
     })?;
 
     // Set up ring buffer consumer
-    let events_map =
-        obj.maps().find(|m| m.name().to_string_lossy() == "events").expect("events map not found");
+    let events_map = obj
+        .maps()
+        .find(|m| m.name().to_string_lossy() == "events")
+        .expect("events map not found");
 
     let mut ring_builder = RingBufferBuilder::new();
 
@@ -231,7 +245,12 @@ fn run_trace(
         if last_stats.elapsed() >= Duration::from_secs(stats_interval) {
             let count = event_count.load(Ordering::Relaxed);
             let elapsed = start.elapsed().as_secs_f64();
-            info!("Events: {} ({:.1}/s), Elapsed: {:.1}s", count, count as f64 / elapsed, elapsed);
+            info!(
+                "Events: {} ({:.1}/s), Elapsed: {:.1}s",
+                count,
+                count as f64 / elapsed,
+                elapsed
+            );
             last_stats = Instant::now();
         }
     }
@@ -245,8 +264,10 @@ fn run_trace(
     }
 
     // Print final stats
-    let stats_map =
-        obj.maps().find(|m| m.name().to_string_lossy() == "stats").expect("stats map not found");
+    let stats_map = obj
+        .maps()
+        .find(|m| m.name().to_string_lossy() == "stats")
+        .expect("stats map not found");
     print_stats(&stats_map)?;
 
     let event_total = event_count.load(Ordering::Relaxed);
@@ -255,15 +276,38 @@ fn run_trace(
 }
 
 fn print_stats(stats_map: &libbpf_rs::Map) -> anyhow::Result<()> {
-    let stat_names = ["Total faults", "MDBX faults", "Major faults", "Events dropped"];
+    let stat_names = [
+        "Total faults",
+        "MDBX faults",
+        "Major faults",
+        "Events dropped",
+    ];
 
     info!("=== Statistics ===");
     for (i, name) in stat_names.iter().enumerate() {
         let key = (i as u32).to_ne_bytes();
-        if let Some(val_bytes) = stats_map.lookup(&key, MapFlags::ANY)? {
-            let arr: [u8; 8] = val_bytes.as_slice().try_into().unwrap_or([0; 8]);
-            let val = u64::from_ne_bytes(arr);
-            info!("{}: {}", name, val);
+        // Use lookup_percpu for per-cpu maps - returns a value per CPU
+        match stats_map.lookup_percpu(&key, MapFlags::ANY) {
+            Ok(Some(percpu_vals)) => {
+                // Sum values across all CPUs
+                let total: u64 = percpu_vals
+                    .iter()
+                    .map(|v| {
+                        if v.len() >= 8 {
+                            u64::from_ne_bytes(v[..8].try_into().unwrap_or([0; 8]))
+                        } else {
+                            0
+                        }
+                    })
+                    .sum();
+                info!("{}: {}", name, total);
+            }
+            Ok(None) => {
+                info!("{}: 0", name);
+            }
+            Err(e) => {
+                warn!("Failed to read stat {}: {}", name, e);
+            }
         }
     }
     Ok(())
@@ -291,7 +335,13 @@ fn find_mdbx_files(pid: u32) -> anyhow::Result<()> {
                     let size = end - start;
                     let path = parts[5..].join(" ");
 
-                    println!("0x{:016x} 0x{:016x} {:>10} {}", start, end, format_size(size), path);
+                    println!(
+                        "0x{:016x} 0x{:016x} {:>10} {}",
+                        start,
+                        end,
+                        format_size(size),
+                        path
+                    );
                 }
             }
         }
@@ -386,12 +436,28 @@ fn print_summary(events: &[PageFaultEvent]) {
     println!("Fault rate:      {:.1}/s", page_faults as f64 / duration_s);
     println!();
     println!("File offset range:");
-    println!("  Min: {} ({:.2} GB)", min_offset, min_offset as f64 / 1024.0 / 1024.0 / 1024.0);
-    println!("  Max: {} ({:.2} GB)", max_offset, max_offset as f64 / 1024.0 / 1024.0 / 1024.0);
+    println!(
+        "  Min: {} ({:.2} GB)",
+        min_offset,
+        min_offset as f64 / 1024.0 / 1024.0 / 1024.0
+    );
+    println!(
+        "  Max: {} ({:.2} GB)",
+        max_offset,
+        max_offset as f64 / 1024.0 / 1024.0 / 1024.0
+    );
     println!();
     println!("Access pattern:");
-    println!("  Sequential: {} ({:.1}%)", sequential, sequential as f64 / total as f64 * 100.0);
-    println!("  Random:     {} ({:.1}%)", random, random as f64 / total as f64 * 100.0);
+    println!(
+        "  Sequential: {} ({:.1}%)",
+        sequential,
+        sequential as f64 / total as f64 * 100.0
+    );
+    println!(
+        "  Random:     {} ({:.1}%)",
+        random,
+        random as f64 / total as f64 * 100.0
+    );
 
     // Thread distribution
     let mut thread_counts: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
@@ -404,7 +470,12 @@ fn print_summary(events: &[PageFaultEvent]) {
     let mut threads: Vec<_> = thread_counts.iter().collect();
     threads.sort_by(|a, b| b.1.cmp(a.1));
     for (tid, count) in threads.iter().take(5) {
-        println!("  TID {}: {} events ({:.1}%)", tid, count, **count as f64 / total as f64 * 100.0);
+        println!(
+            "  TID {}: {} events ({:.1}%)",
+            tid,
+            count,
+            **count as f64 / total as f64 * 100.0
+        );
     }
 }
 
