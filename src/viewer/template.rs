@@ -254,9 +254,9 @@ const CSS: &str = r##"
 }
 
 body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-    background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 50%, #0f0f1a 100%);
-    color: #eee;
+    font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, sans-serif;
+    background: #050508;
+    color: #e4e4e7;
     min-height: 100vh;
 }
 
@@ -269,15 +269,15 @@ body {
 header {
     text-align: center;
     padding: 40px 0;
-    border-bottom: 1px solid rgba(0, 212, 255, 0.2);
+    border-bottom: 1px solid #252530;
     margin-bottom: 30px;
-    background: linear-gradient(180deg, rgba(0, 212, 255, 0.05) 0%, transparent 100%);
+    background: linear-gradient(180deg, rgba(99, 102, 241, 0.05) 0%, transparent 100%);
 }
 
 header h1 {
     font-size: 2.2em;
     font-weight: 700;
-    background: linear-gradient(135deg, #00d4ff 0%, #00ff88 100%);
+    background: linear-gradient(135deg, #8b5cf6 0%, #6366f1 50%, #3b82f6 100%);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     background-clip: text;
@@ -286,7 +286,7 @@ header h1 {
 }
 
 .subtitle {
-    color: #666;
+    color: #71717a;
     font-size: 0.95em;
     font-weight: 500;
     letter-spacing: 2px;
@@ -298,17 +298,17 @@ header h1 {
     gap: 8px;
     margin-bottom: 25px;
     flex-wrap: wrap;
-    background: rgba(20, 20, 40, 0.5);
+    background: #0a0a0f;
     padding: 8px;
     border-radius: 12px;
-    border: 1px solid rgba(255, 255, 255, 0.05);
+    border: 1px solid #252530;
 }
 
 .tab {
     padding: 12px 24px;
     background: transparent;
     border: none;
-    color: #888;
+    color: #a1a1aa;
     cursor: pointer;
     border-radius: 8px;
     transition: all 0.2s ease;
@@ -317,24 +317,24 @@ header h1 {
 }
 
 .tab:hover {
-    background: rgba(0, 212, 255, 0.1);
-    color: #fff;
+    background: #16161f;
+    color: #e4e4e7;
 }
 
 .tab.active {
-    background: linear-gradient(135deg, #00d4ff 0%, #0088cc 100%);
+    background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
     color: #fff;
     font-weight: 600;
-    box-shadow: 0 4px 15px rgba(0, 212, 255, 0.3);
+    box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);
 }
 
 .panel {
     display: none;
-    background: linear-gradient(180deg, rgba(37, 37, 66, 0.8) 0%, rgba(30, 30, 50, 0.9) 100%);
+    background: #0e0e14;
     border-radius: 16px;
     padding: 30px;
     animation: fadeIn 0.3s ease;
-    border: 1px solid rgba(255, 255, 255, 0.05);
+    border: 1px solid #252530;
     box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
 }
 
@@ -355,22 +355,23 @@ header h1 {
 }
 
 .stat-card {
-    background: linear-gradient(135deg, rgba(26, 26, 46, 0.9) 0%, rgba(20, 20, 35, 0.9) 100%);
+    background: #0a0a0f;
     padding: 24px 20px;
     border-radius: 12px;
     text-align: center;
-    border: 1px solid rgba(255, 255, 255, 0.05);
+    border: 1px solid #252530;
     transition: transform 0.2s ease, box-shadow 0.2s ease;
 }
 
 .stat-card:hover {
     transform: translateY(-2px);
     box-shadow: 0 8px 25px rgba(0, 0, 0, 0.3);
+    border-color: #2a2a38;
 }
 
 .stat-label {
     font-size: 0.8em;
-    color: #888;
+    color: #a1a1aa;
     margin-bottom: 10px;
     text-transform: uppercase;
     letter-spacing: 0.5px;
@@ -380,18 +381,18 @@ header h1 {
 .stat-value {
     font-size: 1.6em;
     font-weight: 700;
-    color: #00d4ff;
-    text-shadow: 0 0 20px rgba(0, 212, 255, 0.3);
+    color: #6366f1;
+    text-shadow: 0 0 20px rgba(99, 102, 241, 0.3);
 }
 
 .stat-value.major {
-    color: #ff6b6b;
-    text-shadow: 0 0 20px rgba(255, 107, 107, 0.3);
+    color: #f87171;
+    text-shadow: 0 0 20px rgba(248, 113, 113, 0.3);
 }
 
 .stat-value.minor {
-    color: #51cf66;
-    text-shadow: 0 0 20px rgba(81, 207, 102, 0.3);
+    color: #34d399;
+    text-shadow: 0 0 20px rgba(52, 211, 153, 0.3);
 }
 
 .summary-charts {
@@ -401,10 +402,10 @@ header h1 {
 }
 
 .chart-container {
-    background: linear-gradient(135deg, rgba(26, 26, 46, 0.9) 0%, rgba(20, 20, 35, 0.9) 100%);
+    background: #0a0a0f;
     padding: 24px;
     border-radius: 12px;
-    border: 1px solid rgba(255, 255, 255, 0.05);
+    border: 1px solid #252530;
     min-height: 280px;
 }
 
@@ -416,18 +417,18 @@ header h1 {
 .chart-container h3 {
     margin-bottom: 20px;
     font-size: 1em;
-    color: #aaa;
+    color: #a1a1aa;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.5px;
 }
 
 .chart-full {
-    background: linear-gradient(135deg, rgba(26, 26, 46, 0.9) 0%, rgba(20, 20, 35, 0.9) 100%);
+    background: #0a0a0f;
     padding: 24px;
     border-radius: 12px;
     margin-bottom: 20px;
-    border: 1px solid rgba(255, 255, 255, 0.05);
+    border: 1px solid #252530;
 }
 
 .chart-full canvas {
@@ -440,7 +441,7 @@ header h1 {
     gap: 30px;
     justify-content: center;
     padding: 15px;
-    background: rgba(26, 26, 46, 0.5);
+    background: #0a0a0f;
     border-radius: 8px;
 }
 
@@ -449,27 +450,27 @@ header h1 {
     align-items: center;
     gap: 8px;
     cursor: pointer;
-    color: #aaa;
+    color: #a1a1aa;
     font-size: 0.9em;
     transition: color 0.2s;
 }
 
 .timeline-controls label:hover {
-    color: #fff;
+    color: #e4e4e7;
 }
 
 .timeline-controls input[type="checkbox"] {
     width: 18px;
     height: 18px;
-    accent-color: #00d4ff;
+    accent-color: #6366f1;
 }
 
 .heatmap-container {
     position: relative;
-    background: linear-gradient(135deg, rgba(26, 26, 46, 0.9) 0%, rgba(20, 20, 35, 0.9) 100%);
+    background: #0a0a0f;
     padding: 24px;
     border-radius: 12px;
-    border: 1px solid rgba(255, 255, 255, 0.05);
+    border: 1px solid #252530;
 }
 
 #heatmap-canvas {
@@ -486,21 +487,21 @@ header h1 {
     gap: 15px;
     margin-top: 20px;
     padding: 15px;
-    background: rgba(0, 0, 0, 0.2);
+    background: #050508;
     border-radius: 8px;
 }
 
 .legend-gradient {
     width: 250px;
     height: 24px;
-    background: linear-gradient(to right, #1e2850, #0066ff, #00d4ff, #32ff96, #ffff00, #ff9600, #ff3232, #ff64a0);
+    background: linear-gradient(to right, #12121a, #3b82f6, #6366f1, #8b5cf6, #a78bfa, #c4b5fd);
     border-radius: 4px;
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    border: 1px solid #252530;
 }
 
 .legend-label {
     font-size: 0.85em;
-    color: #888;
+    color: #a1a1aa;
     font-weight: 500;
 }
 
@@ -509,7 +510,7 @@ header h1 {
     justify-content: space-between;
     margin-top: 15px;
     font-size: 0.9em;
-    color: #888;
+    color: #a1a1aa;
     padding: 0 10px;
 }
 
@@ -523,23 +524,23 @@ header h1 {
 .data-table {
     width: 100%;
     border-collapse: collapse;
-    background: linear-gradient(135deg, rgba(26, 26, 46, 0.9) 0%, rgba(20, 20, 35, 0.9) 100%);
+    background: #0a0a0f;
     border-radius: 12px;
     overflow: hidden;
-    border: 1px solid rgba(255, 255, 255, 0.05);
+    border: 1px solid #252530;
 }
 
 .data-table th,
 .data-table td {
     padding: 14px 18px;
     text-align: left;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    border-bottom: 1px solid #252530;
 }
 
 .data-table th {
-    background: rgba(0, 212, 255, 0.1);
+    background: rgba(99, 102, 241, 0.1);
     font-weight: 600;
-    color: #00d4ff;
+    color: #6366f1;
     cursor: pointer;
     text-transform: uppercase;
     font-size: 0.8em;
@@ -547,7 +548,7 @@ header h1 {
 }
 
 .data-table th:hover {
-    background: rgba(0, 212, 255, 0.2);
+    background: rgba(99, 102, 241, 0.2);
 }
 
 .data-table tr {
@@ -555,7 +556,7 @@ header h1 {
 }
 
 .data-table tr:hover {
-    background: rgba(0, 212, 255, 0.05);
+    background: #16161f;
 }
 
 .data-table tbody tr:last-child td {
@@ -575,10 +576,10 @@ header h1 {
 .filter-bar input,
 .filter-bar select {
     padding: 12px 18px;
-    background: rgba(26, 26, 46, 0.9);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: #0a0a0f;
+    border: 1px solid #252530;
     border-radius: 8px;
-    color: #eee;
+    color: #e4e4e7;
     font-size: 0.9em;
     transition: border-color 0.2s, box-shadow 0.2s;
 }
@@ -590,8 +591,8 @@ header h1 {
 .filter-bar input:focus,
 .filter-bar select:focus {
     outline: none;
-    border-color: #00d4ff;
-    box-shadow: 0 0 15px rgba(0, 212, 255, 0.2);
+    border-color: #6366f1;
+    box-shadow: 0 0 15px rgba(99, 102, 241, 0.2);
 }
 
 .filter-bar select {
@@ -636,67 +637,67 @@ header h1 {
 
 .gauge-label {
     margin-top: 15px;
-    color: #888;
+    color: #a1a1aa;
     font-weight: 500;
     font-size: 0.95em;
 }
 
 .recommendation-box {
-    background: linear-gradient(135deg, rgba(26, 26, 46, 0.9) 0%, rgba(20, 20, 35, 0.9) 100%);
+    background: #0a0a0f;
     padding: 24px;
     border-radius: 12px;
-    border-left: 4px solid #00d4ff;
+    border-left: 4px solid #6366f1;
     margin-bottom: 24px;
     line-height: 1.6;
 }
 
 .recommendation-box.good {
-    border-left-color: #51cf66;
-    background: linear-gradient(135deg, rgba(26, 46, 36, 0.9) 0%, rgba(20, 35, 25, 0.9) 100%);
+    border-left-color: #34d399;
+    background: linear-gradient(135deg, rgba(52, 211, 153, 0.05) 0%, #0a0a0f 100%);
 }
 
 .recommendation-box.moderate {
-    border-left-color: #ffd43b;
-    background: linear-gradient(135deg, rgba(46, 40, 26, 0.9) 0%, rgba(35, 30, 20, 0.9) 100%);
+    border-left-color: #fbbf24;
+    background: linear-gradient(135deg, rgba(251, 191, 36, 0.05) 0%, #0a0a0f 100%);
 }
 
 .recommendation-box.poor {
-    border-left-color: #ff6b6b;
-    background: linear-gradient(135deg, rgba(46, 26, 26, 0.9) 0%, rgba(35, 20, 20, 0.9) 100%);
+    border-left-color: #f87171;
+    background: linear-gradient(135deg, rgba(248, 113, 113, 0.05) 0%, #0a0a0f 100%);
 }
 
 .prefetch-details {
-    background: linear-gradient(135deg, rgba(26, 26, 46, 0.9) 0%, rgba(20, 20, 35, 0.9) 100%);
+    background: #0a0a0f;
     padding: 24px;
     border-radius: 12px;
-    border: 1px solid rgba(255, 255, 255, 0.05);
+    border: 1px solid #252530;
 }
 
 .prefetch-details h3 {
     margin-bottom: 20px;
-    color: #aaa;
+    color: #a1a1aa;
     font-weight: 600;
 }
 
 .prefetch-details p {
     margin-bottom: 12px;
-    color: #ccc;
+    color: #e4e4e7;
 }
 
 .prefetch-details strong {
-    color: #00d4ff;
+    color: #6366f1;
 }
 
 h2 {
     margin-bottom: 25px;
-    color: #00d4ff;
+    color: #6366f1;
     font-size: 1.4em;
     font-weight: 600;
 }
 
 h3 {
     margin: 25px 0 20px;
-    color: #aaa;
+    color: #a1a1aa;
     font-size: 1.1em;
     font-weight: 600;
 }
@@ -708,17 +709,17 @@ h3 {
 }
 
 ::-webkit-scrollbar-track {
-    background: rgba(0, 0, 0, 0.2);
+    background: #0a0a0f;
     border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb {
-    background: rgba(0, 212, 255, 0.3);
+    background: rgba(99, 102, 241, 0.3);
     border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-    background: rgba(0, 212, 255, 0.5);
+    background: rgba(99, 102, 241, 0.5);
 }
 
 @media (max-width: 768px) {
@@ -966,7 +967,7 @@ class SimpleChart {
         const chartHeight = Math.max(1, this.height - padding.top - padding.bottom);
 
         const datasets = Array.isArray(data[0]) ? data : [data];
-        const colors = options.colors || ['#00d4ff', '#ff6b6b', '#51cf66'];
+        const colors = options.colors || ['#6366f1', '#f87171', '#34d399'];
         const labels = options.labels || [];
 
         let allValues = datasets.flat();
@@ -1168,7 +1169,7 @@ class HeatmapRenderer {
         const cellHeight = (height - padding.top - padding.bottom) / offset_buckets;
 
         // Background
-        this.ctx.fillStyle = '#1a1a2e';
+        this.ctx.fillStyle = '#0a0a0f';
         this.ctx.fillRect(0, 0, width, height);
 
         // Draw cells with smooth interpolation
@@ -1238,18 +1239,16 @@ class HeatmapRenderer {
     }
 
     getHeatColor(intensity) {
-        if (intensity === 0) return '#1a1a2e';
-
-        // More vibrant color scale
+        if (intensity === 0) return '#0a0a0f';
         const colors = [
-            [30, 40, 80],     // Dark blue
-            [0, 102, 255],    // Blue
-            [0, 212, 255],    // Cyan
-            [50, 255, 150],   // Teal
-            [255, 255, 0],    // Yellow
-            [255, 150, 0],    // Orange
-            [255, 50, 50],    // Red
-            [255, 100, 150]   // Pink/hot
+            [18, 18, 26],     // Dark (#12121a)
+            [59, 130, 246],   // Blue (#3b82f6)
+            [99, 102, 241],   // Indigo (#6366f1)
+            [139, 92, 246],   // Violet (#8b5cf6)
+            [167, 139, 250],  // Light purple (#a78bfa)
+            [196, 181, 253],  // Lavender (#c4b5fd)
+            [248, 113, 113],  // Red for hot spots (#f87171)
+            [251, 191, 36]    // Yellow for hottest (#fbbf24)
         ];
 
         const idx = Math.pow(intensity, 0.7) * (colors.length - 1); // Gamma correction for better visibility
@@ -1344,7 +1343,7 @@ function initSummary() {
     charts.faultType = new SimpleChart(document.getElementById('fault-type-chart'));
     charts.faultType.drawPie(
         [DATA.summary.major_faults, DATA.summary.minor_faults],
-        ['#ff6b6b', '#51cf66'],
+        ['#f87171', '#34d399'],
         ['Major (Disk I/O)', 'Minor (Cache)']
     );
 
@@ -1352,7 +1351,7 @@ function initSummary() {
     charts.accessPattern = new SimpleChart(document.getElementById('access-pattern-chart'));
     charts.accessPattern.drawPie(
         [DATA.patterns.sequential_ratio, DATA.patterns.random_ratio],
-        ['#00d4ff', '#ffd43b'],
+        ['#6366f1', '#fbbf24'],
         ['Sequential', 'Random']
     );
 }
@@ -1363,7 +1362,7 @@ function initTimeline() {
         const faults = DATA.timeline.map(t => t.faults);
         const major = DATA.timeline.map(t => t.major_faults);
         charts.timeline.drawLine([faults, major], {
-            colors: ['#00d4ff', '#ff6b6b'],
+            colors: ['#6366f1', '#f87171'],
             labels: ['Total Faults', 'Major Faults'],
             title: 'Page Faults Over Time'
         });
@@ -1378,18 +1377,18 @@ function initTimeline() {
             const labels = [];
 
             datasets.push(DATA.timeline.map(t => t.faults));
-            colors.push('#00d4ff');
+            colors.push('#6366f1');
             labels.push('Total Faults');
 
             if (showMajor.checked) {
                 datasets.push(DATA.timeline.map(t => t.major_faults));
-                colors.push('#ff6b6b');
+                colors.push('#f87171');
                 labels.push('Major Faults');
             }
 
             if (showUnique.checked) {
                 datasets.push(DATA.timeline.map(t => t.unique_pages));
-                colors.push('#51cf66');
+                colors.push('#34d399');
                 labels.push('Unique Pages');
             }
 
@@ -1416,7 +1415,7 @@ function initHeatmap() {
 function initTables() {
     if (DATA.tables.length > 0) {
         const topTables = DATA.tables.slice(0, 10);
-        const colors = ['#00d4ff', '#ff6b6b', '#51cf66', '#ffd43b', '#cc5de8', '#20c997', '#fd7e14', '#868e96', '#e599f7', '#74c0fc'];
+        const colors = ['#8b5cf6', '#6366f1', '#3b82f6', '#0ea5e9', '#06b6d4', '#14b8a6', '#10b981', '#84cc16', '#eab308', '#f59e0b'];
 
         charts.tablesPie = new SimpleChart(document.getElementById('tables-pie-chart'));
         charts.tablesPie.drawPie(
@@ -1429,7 +1428,7 @@ function initTables() {
         charts.tablesBar.drawBar(
             topTables.map(t => t.name),
             topTables.map(t => t.faults),
-            '#00d4ff',
+            '#6366f1',
             { title: 'Faults by Table' }
         );
 
@@ -1454,7 +1453,7 @@ function initThreads() {
         charts.threads.drawBar(
             DATA.threads.map(t => 'TID ' + t.tid),
             DATA.threads.map(t => t.faults),
-            '#51cf66',
+            '#34d399',
             { title: 'Faults by Thread' }
         );
 
@@ -1491,13 +1490,13 @@ function initHotPages() {
         tbody.innerHTML = '';
         filtered.slice(0, 100).forEach((p, i) => {
             const row = document.createElement('tr');
-            const heatColor = p.major_faults > 0 ? `rgba(255, 107, 107, ${Math.min(p.major_faults / 100, 0.3)})` : 'transparent';
+            const heatColor = p.major_faults > 0 ? `rgba(248, 113, 113, ${Math.min(p.major_faults / 100, 0.3)})` : 'transparent';
             row.style.background = heatColor;
             row.innerHTML = `
                 <td>${p.page_number.toLocaleString()}</td>
                 <td>${p.offset_gb.toFixed(4)}</td>
                 <td>${formatNumber(p.accesses)}</td>
-                <td style="color: ${p.major_faults > 0 ? '#ff6b6b' : '#51cf66'}">${formatNumber(p.major_faults)}</td>
+                <td style="color: ${p.major_faults > 0 ? '#f87171' : '#34d399'}">${formatNumber(p.major_faults)}</td>
                 <td>${p.table}</td>
             `;
             tbody.appendChild(row);
@@ -1518,7 +1517,7 @@ function initPatterns() {
         charts.stride.drawBar(
             DATA.patterns.stride_distribution.map(s => s.stride_pages + ' pg'),
             DATA.patterns.stride_distribution.map(s => s.count),
-            '#ffd43b',
+            '#fbbf24',
             { title: 'Stride Distribution (pages between consecutive accesses)' }
         );
     }
@@ -1530,10 +1529,10 @@ function initPatterns() {
 
 function initPrefetch() {
     charts.prefetchGauge = new SimpleChart(document.getElementById('prefetch-gauge'));
-    charts.prefetchGauge.drawGauge(DATA.prefetch.prediction_hit_rate, 100, '#00d4ff');
+    charts.prefetchGauge.drawGauge(DATA.prefetch.prediction_hit_rate, 100, '#6366f1');
 
     charts.localityGauge = new SimpleChart(document.getElementById('locality-gauge'));
-    charts.localityGauge.drawGauge(DATA.prefetch.locality_score * 100, 100, '#51cf66');
+    charts.localityGauge.drawGauge(DATA.prefetch.locality_score * 100, 100, '#34d399');
 
     const recBox = document.getElementById('recommendation');
     recBox.innerHTML = `<strong>Recommendation:</strong> ${DATA.prefetch.recommendation}`;

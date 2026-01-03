@@ -49,11 +49,11 @@ sudo ./target/release/mdbx-profiler trace \
 ### 3. analyze the trace
 
 ```bash
-# generate interactive HTML viewer (opens in browser)
-./target/release/mdbx-trace-analyzer --input trace.jsonl
+# generate interactive HTML viewer
+./target/release/mdbx-trace-analyzer --input trace.jsonl --mdbx-path ../reth_data/db/mdbx.dat
 
 # or export as CSV
-./target/release/mdbx-trace-analyzer --input trace.jsonl --format csv
+./target/release/mdbx-trace-analyzer --input trace.jsonl --mdbx-path ../reth_data/db/mdbx.dat --format csv
 ```
 
 the analyzer runs on macOS/Linux and doesn't require eBPF - you can collect traces on your node and analyze them locally.
