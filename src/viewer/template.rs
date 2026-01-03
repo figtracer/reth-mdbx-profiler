@@ -647,12 +647,14 @@ class SimpleChart {
     }
 
     drawPie(data, colors) {
+        this.resize();
         this.clear();
         const cx = this.width / 2;
         const cy = this.height / 2;
-        const radius = Math.min(cx, cy) - 20;
+        const radius = Math.max(10, Math.min(cx, cy) - 20);
 
         const total = data.reduce((a, b) => a + b, 0);
+        if (total === 0 || radius <= 0) return;
         let startAngle = -Math.PI / 2;
 
         data.forEach((value, i) => {
@@ -670,10 +672,12 @@ class SimpleChart {
     }
 
     drawBar(labels, data, color) {
+        this.resize();
         this.clear();
+        if (!data.length) return;
         const padding = { top: 20, right: 20, bottom: 60, left: 60 };
-        const chartWidth = this.width - padding.left - padding.right;
-        const chartHeight = this.height - padding.top - padding.bottom;
+        const chartWidth = Math.max(1, this.width - padding.left - padding.right);
+        const chartHeight = Math.max(1, this.height - padding.top - padding.bottom);
         const barWidth = chartWidth / data.length * 0.8;
         const barGap = chartWidth / data.length * 0.2;
         const maxValue = Math.max(...data);
@@ -708,10 +712,11 @@ class SimpleChart {
     }
 
     drawLine(data, options = {}) {
+        this.resize();
         this.clear();
         const padding = { top: 20, right: 20, bottom: 40, left: 60 };
-        const chartWidth = this.width - padding.left - padding.right;
-        const chartHeight = this.height - padding.top - padding.bottom;
+        const chartWidth = Math.max(1, this.width - padding.left - padding.right);
+        const chartHeight = Math.max(1, this.height - padding.top - padding.bottom);
 
         const datasets = Array.isArray(data[0]) ? data : [data];
         const colors = options.colors || ['#00d4ff', '#ff6b6b', '#51cf66'];
@@ -760,10 +765,12 @@ class SimpleChart {
     }
 
     drawGauge(value, maxValue, color) {
+        this.resize();
         this.clear();
         const cx = this.width / 2;
         const cy = this.height / 2 + 20;
-        const radius = Math.min(cx, cy) - 30;
+        const radius = Math.max(10, Math.min(cx, cy) - 30);
+        if (radius <= 0 || maxValue === 0) return;
 
         // Background arc
         this.ctx.beginPath();
