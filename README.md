@@ -35,12 +35,19 @@ sudo ./scripts/setup-node.sh
 cargo build --release
 ```
 
-### 2. Find your MDBX file
+### 2. Find your MDBX file (optional)
+
+The `find-mdbx` command is a **discovery tool** that shows all MDBX memory mappings for a process. This is useful if you don't know where your MDBX database file is located.
 
 ```bash
-# Find MDBX memory mappings for your application
-sudo ./target/release/mdbx-profiler find-mdbx --pid $(pgrep your-app)
+# First, find your application's PID
+pgrep reth   # or your application name
+
+# Then find MDBX mappings for that PID
+sudo ./target/release/mdbx-profiler find-mdbx --pid 12345
 ```
+
+**Note**: If you're using the `collect-trace.sh` script, this step is automatic - the script auto-discovers both the PID and MDBX path.
 
 ### 3. Collect a trace
 
