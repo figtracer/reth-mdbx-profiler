@@ -463,22 +463,31 @@ pub fn run_mdbx_stat(mdbx_path: impl AsRef<Path>) -> Option<Vec<MdbxStatOutput>>
     let bin = mdbx_stat_bin?;
 
     // Run mdbx_stat -a (all databases) on the mdbx file
+    // Note: mdbx_stat outputs info messages to stderr even on success
     let output = std::process::Command::new(bin)
         .arg("-a")
-        .arg("-e") // Environment info
         .arg(path)
         .output()
         .ok()?;
 
-    if !output.status.success() {
-        eprintln!(
-            "mdbx_stat failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Check if we got useful output (contains "Status of" lines)
+    // mdbx_stat may output info to stderr but still produce valid output
+    if stdout.contains("Status of") {
+        return parse_mdbx_stat_output(&stdout);
+    }
+
+    // If no useful output and command failed, report error
+    if !output.status.success() || stdout.is_empty() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Only show error if it's not just info messages
+        if !stderr.contains("MADV_DONTNEED") && !stderr.contains("readahead") {
+            eprintln!("mdbx_stat failed: {}", stderr);
+        }
         return None;
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
     parse_mdbx_stat_output(&stdout)
 }
 
@@ -499,23 +508,33 @@ fn parse_mdbx_stat_output(output: &str) -> Option<Vec<MdbxStatOutput>> {
     for line in output.lines() {
         let line = line.trim();
 
-        // Database name line: "Status of Main DB" or "Status of database 'TableName'"
+        // Database name line: "Status of Main DB" or "Status of TableName"
         if line.starts_with("Status of ") {
             // Save previous table if exists
             if current_table.is_some() && !current_stats.name.is_empty() {
+                current_stats.total_pages = current_stats.branch_pages
+                    + current_stats.leaf_pages
+                    + current_stats.overflow_pages;
                 tables.push(current_stats.clone());
             }
 
-            if line.contains("Main DB") {
-                current_table = Some("@main".to_string());
-                current_stats.name = "@main".to_string();
-            } else if let Some(start) = line.find('\'') {
-                if let Some(end) = line.rfind('\'') {
-                    let name = &line[start + 1..end];
-                    current_table = Some(name.to_string());
-                    current_stats.name = name.to_string();
-                }
-            }
+            // Extract table name - handle various formats:
+            // "Status of Main DB"
+            // "Status of TableName"
+            // "Status of database 'TableName'"
+            let name_part = &line["Status of ".len()..];
+            let table_name = if name_part == "Main DB" {
+                "@main".to_string()
+            } else if name_part.starts_with("database '") && name_part.ends_with('\'') {
+                // Format: database 'TableName'
+                name_part["database '".len()..name_part.len() - 1].to_string()
+            } else {
+                // Format: just TableName
+                name_part.to_string()
+            };
+
+            current_table = Some(table_name.clone());
+            current_stats.name = table_name;
 
             // Reset stats
             current_stats.entries = 0;
