@@ -1,0 +1,45 @@
+[package]
+name = "mdbx-profiler"
+version = "0.1.0"
+edition = "2021"
+description = "eBPF-based profiler for MDBX page fault patterns - analyze memory-mapped database I/O behavior"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/gustavo-neto/reth-mdbx-profiler"
+keywords = ["ebpf", "mdbx", "profiler", "performance", "tracing"]
+categories = ["development-tools::profiling", "database"]
+readme = "README.md"
+
+[dependencies]
+# eBPF userspace library
+libbpf-rs = "0.24"
+
+# CLI and config
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async runtime for event processing
+tokio = { version = "1", features = ["full"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+
+# Utilities
+ctrlc = "3"
+humantime = "2"
+humansize = "2"
+
+[build-dependencies]
+libbpf-cargo = "0.24"
+
+[[bin]]
+name = "mdbx-profiler"
+path = "src/main.rs"
+
+[[bin]]
+name = "mdbx-trace-analyzer"
+path = "src/analyzer.rs"

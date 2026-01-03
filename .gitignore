@@ -1,0 +1,21 @@
+# Build artifacts
+/target/
+**/*.rs.bk
+
+# Generated files
+*.jsonl
+bpf/vmlinux.h
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Debug
+*.log
