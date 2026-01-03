@@ -179,8 +179,8 @@ int BPF_KPROBE(trace_page_fault,
     // Calculate file offset from virtual address
     __u64 file_offset = offset_base_val + (address - vm_start);
     
-    // Save context for kretprobe to use
-    struct fault_context ctx = {
+    // Save context for kretprobe to emit event with major fault info
+    struct fault_context fctx = {
         .timestamp_ns = bpf_ktime_get_ns(),
         .address = address,
         .file_offset = file_offset,
@@ -191,21 +191,20 @@ int BPF_KPROBE(trace_page_fault,
         .fault_flags = flags,
         .should_trace = 1,
     };
-    
-    bpf_map_update_elem(&pending_faults, &pid_tgid, &ctx, BPF_ANY);
+    bpf_map_update_elem(&pending_faults, &pid_tgid, &fctx, BPF_ANY);
     
     return 0;
 }
 
-// Trace page fault return - detect major faults from return value
+// Trace page fault return - emit event with major fault info from return value
 SEC("kretprobe/handle_mm_fault")
 int BPF_KRETPROBE(trace_page_fault_ret, vm_fault_t ret)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     
     // Look up the saved context
-    struct fault_context *ctx = bpf_map_lookup_elem(&pending_faults, &pid_tgid);
-    if (!ctx || !ctx->should_trace) {
+    struct fault_context *fctx = bpf_map_lookup_elem(&pending_faults, &pid_tgid);
+    if (!fctx || !fctx->should_trace) {
         return 0;
     }
     
@@ -218,7 +217,7 @@ int BPF_KRETPROBE(trace_page_fault_ret, vm_fault_t ret)
     
     // Calculate latency
     __u64 now = bpf_ktime_get_ns();
-    __u64 latency = now - ctx->timestamp_ns;
+    __u64 latency = now - fctx->timestamp_ns;
     
     // Reserve space in ring buffer
     struct page_fault_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
@@ -229,15 +228,15 @@ int BPF_KRETPROBE(trace_page_fault_ret, vm_fault_t ret)
     }
     
     // Fill event with saved context and return info
-    e->timestamp_ns = ctx->timestamp_ns;
-    e->address = ctx->address;
-    e->file_offset = ctx->file_offset;
-    e->vma_start = ctx->vma_start;
-    e->vma_end = ctx->vma_end;
-    e->pid = ctx->pid;
-    e->tid = ctx->tid;
+    e->timestamp_ns = fctx->timestamp_ns;
+    e->address = fctx->address;
+    e->file_offset = fctx->file_offset;
+    e->vma_start = fctx->vma_start;
+    e->vma_end = fctx->vma_end;
+    e->pid = fctx->pid;
+    e->tid = fctx->tid;
     e->event_type = EVENT_PAGE_FAULT;
-    e->fault_flags = ctx->fault_flags;
+    e->fault_flags = fctx->fault_flags;
     e->latency_ns = latency;
     e->is_major = is_major;
     
