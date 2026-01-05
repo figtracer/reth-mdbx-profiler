@@ -24,6 +24,53 @@ the profiler uses ebpf to trace memory-mapped file accesses in the linux kernel.
                                          └──────────────┘
 ```
 
+## the table attribution problem
+
+mdbx stores all tables in a single file (mdbx.dat) as interleaved b+ tree pages. unlike databases with separate files per table, you **cannot** map a file offset directly to a table - page 1000 might belong to HashedStorages, page 1001 to AccountsTrie.
+
+### why proportional estimation fails
+
+an early approach was to attribute faults proportionally by table size:
+
+```
+table_faults = total_faults × (table_pages / total_pages)
+```
+
+this is **wrong**. a table that's 32% of disk gets 32% of faults attributed, even if it was never accessed. we discovered this when TransactionHashNumbers (32% of disk) showed 32% of faults despite having 0 cursor operations.
+
+### the solution: timestamp correlation
+
+we correlate page faults with cursor operations using **thread id + timestamp matching**:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ thread 1234                                                      │
+│                                                                  │
+│  cursor_get(HashedStorages) ─────────────────────>              │
+│  [start]                    [fault!]              [end]          │
+│  t=1000                     t=1050               t=1200          │
+│                                                                  │
+│  the fault at t=1050 is attributed to HashedStorages            │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+for each page fault, we find cursor operations on the **same thread** where:
+
+```
+cursor_start <= fault_timestamp <= cursor_start + latency
+```
+
+this gives us accurate per-table attribution for faults that occur during cursor operations.
+
+### correlation rate
+
+typically 50-70% of faults can be correlated. the remainder are:
+
+- **kernel readahead/prefetch**: linux speculatively reads ahead, causing faults outside cursor windows
+- **mmap page-ins**: initial page mappings before cursor operations
+- **background i/o**: faults in non-cursor code paths
+- **cursor open/close overhead**: faults during setup, not during get operations
+
 ## ebpf tracer (bpf/mdbx_tracer.bpf.c)
 
 ### what is ebpf?
@@ -87,6 +134,12 @@ user-space probes that attach to libmdbx functions to trace database operations:
 SEC("uprobe/mdbx_cursor_get")
 int BPF_UPROBE(trace_cursor_get, void *cursor, struct mdbx_val *key, 
                void *data, int op)
+
+SEC("uprobe/mdbx_cursor_open")
+int BPF_UPROBE(trace_cursor_open, void *txn, __u32 dbi, void **cursor_ptr)
+
+SEC("uprobe/mdbx_get")
+int BPF_UPROBE(trace_direct_get, void *txn, __u32 dbi, struct mdbx_val *key, void *data)
 ```
 
 these require the reth binary to have symbols (not stripped).
@@ -119,18 +172,31 @@ struct {
 
 userspace registers the mdbx.dat file's inode here. the bpf program only traces page faults for files in this map.
 
-#### vma tracking (`vma_to_offset`)
+#### cursor to dbi mapping (`cursor_to_dbi`)
 
 ```c
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 256);
-    __type(key, __u64);    // vma->vm_start
-    __type(value, __u64);  // file offset base
-} vma_to_offset SEC(".maps");
+    __uint(max_entries, 10240);
+    __type(key, __u64);    // cursor pointer address
+    __type(value, __u32);  // dbi (table id)
+} cursor_to_dbi SEC(".maps");
 ```
 
-caches the mapping from virtual memory areas to file offsets. when we see a new vma for a tracked inode, we calculate its file offset base (`vm_pgoff * PAGE_SIZE`) and store it here.
+maps cursor pointers to their table id. populated by `mdbx_cursor_open` uprobe, used by `mdbx_cursor_get` to know which table is being accessed.
+
+#### profiler config (`profiler_config`)
+
+```c
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u32);  // target PID (0 = trace all)
+} profiler_config SEC(".maps");
+```
+
+stores the target pid. updated dynamically when using `--process-name` and the process restarts.
 
 #### pending contexts
 
@@ -144,19 +210,6 @@ struct {
 ```
 
 correlates kprobe entry with kretprobe return. since bpf programs are stateless between calls, we save context on entry and retrieve it on return using the thread id as key.
-
-#### statistics (`stats`)
-
-```c
-struct {
-    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-    __uint(max_entries, 8);
-    __type(key, __u32);
-    __type(value, __u64);
-} stats SEC(".maps");
-```
-
-per-cpu counters for statistics. percpu avoids lock contention - each cpu has its own counter array, userspace sums them.
 
 ### event structures
 
@@ -185,7 +238,7 @@ struct cursor_event {
     __u64 timestamp_ns;
     __u32 pid;
     __u32 tid;
-    __u32 event_type;        // 3=cursor_get, 4=cursor_put
+    __u32 event_type;        // 3=cursor_get, 4=cursor_put, 5=direct_get
     __u32 cursor_op;         // MDBX_SET_RANGE, MDBX_NEXT, etc.
     __u32 dbi;               // database index (table id)
     __u32 key_size;
@@ -227,7 +280,7 @@ offset_base_val = pgoff * 4096;  // PAGE_SIZE
 __u64 file_offset = offset_base_val + (address - vm_start);
 ```
 
-this tells us exactly which byte of mdbx.dat was accessed, which we later map to mdbx tables.
+this tells us exactly which byte of mdbx.dat was accessed.
 
 ## userspace components
 
@@ -235,106 +288,80 @@ this tells us exactly which byte of mdbx.dat was accessed, which we later map to
 
 1. **loads bpf object**: compiled bpf program from `mdbx_tracer.bpf.o`
 2. **configures maps**: sets target pid, registers mdbx inode
-3. **attaches probes**: kprobe/kretprobe on `handle_mm_fault`
+3. **attaches probes**: kprobe/kretprobe on `handle_mm_fault`, uprobes on mdbx functions
 4. **polls ring buffer**: reads events and writes to jsonl file
+5. **monitors process**: if using `--process-name`, detects restarts and updates pid
 
 ```rust
-let mut ring_builder = RingBufferBuilder::new();
-ring_builder.add(&events_map, move |data: &[u8]| {
-    // deserialize event from raw bytes
-    let event: PageFaultEvent = unsafe { 
-        std::ptr::read_unaligned(data.as_ptr() as *const PageFaultEvent) 
-    };
-    // write as json line
-    writeln!(writer, "{}", serde_json::to_string(&event)?);
-    0
-})?;
-```
-
-### event.rs
-
-defines rust structs matching the bpf event layouts. must be `#[repr(C)]` with exact same memory layout:
-
-```rust
-#[repr(C)]
-pub struct PageFaultEvent {
-    pub timestamp_ns: u64,
-    pub address: u64,
-    pub file_offset: u64,
-    // ... must match C struct exactly
+// process restart detection
+if !is_process_running(current_pid) {
+    info!("Process exited. Waiting for restart...");
+    current_pid = 0;
+    update_target_pid(&mut obj, 0)?;
+    clear_cursor_to_dbi_map(&mut obj)?;  // clear stale cursor mappings
 }
-```
 
-also provides:
-- `dbi_to_table_name()`: maps mdbx database index to reth table name
-- `CursorOp`: enum for mdbx cursor operations with helper methods
-
-### analyzer.rs
-
-standalone tool that processes trace files:
-
-1. parses jsonl events
-2. loads mdbx metadata (optional, via `mdbx_stat`)
-3. generates statistics and visualizations
-4. outputs html viewer or csv/json
-
-### mdbx_metadata.rs
-
-handles mdbx file structure and table attribution:
-
-#### mdbx file layout
-
-```
-page 0-1:  meta pages (alternating for atomic updates)
-page 2:    free list (garbage collector)
-page 3+:   b+ tree nodes and data for all tables
-```
-
-#### table attribution
-
-since mdbx doesn't store per-page table ownership in the file header, we use:
-
-1. **mdbx_stat**: external tool that reads mdbx internal structures
-2. **proportional attribution**: distribute faults based on table sizes
-3. **heuristics**: use access patterns to guess table
-
-```rust
-pub fn run_mdbx_stat(path: &Path) -> Option<Vec<MdbxStatOutput>> {
-    let output = Command::new("mdbx_stat")
-        .arg("-a")
-        .arg(path)
-        .output()?;
-    parse_mdbx_stat_output(&output.stdout)
+let pids = find_pids_by_name(&name);
+if !pids.is_empty() {
+    current_pid = pids[0];
+    update_target_pid(&mut obj, current_pid)?;
+    info!("Process restarted with PID {}. Tracing resumed.", current_pid);
 }
-```
-
-#### dbi (database index) mapping
-
-mdbx assigns dbi numbers dynamically when tables are opened. reth opens tables in a specific order:
-
-```rust
-// dbi 0: @main (mdbx internal)
-// dbi 1: @free (free list)
-// dbi 2: CanonicalHeaders
-// dbi 3: HeaderTerminalDifficulties
-// ...
-// dbi 21: AccountsTrie
-// dbi 22: StoragesTrie
 ```
 
 ### viewer/mod.rs
 
-generates interactive html visualization:
+generates interactive html visualization with:
 
-1. **timeline**: page faults over time, bucketed by 100ms
+1. **timeline**: page faults and cursor ops over time
 2. **heatmap**: 2d grid of time vs file offset
-3. **table breakdown**: faults per mdbx table
-4. **thread distribution**: which threads cause most faults
-5. **hot pages**: most frequently accessed pages
-6. **pattern analysis**: sequential vs random access ratio
-7. **prefetch analysis**: predictability score
+3. **table breakdown**: faults per mdbx table (correlated)
+4. **cursor operations**: ops by table, by type, latency distribution
+5. **slow operations**: operations >100μs, likely page faults
+6. **slow keys**: frequently accessed keys with high latency
+7. **thread distribution**: which threads cause most faults
+8. **pattern analysis**: sequential vs random access ratio
 
-the html is self-contained with embedded javascript and css.
+#### correlation implementation
+
+```rust
+pub fn correlate_faults_with_cursors(
+    page_faults: &[&PageFaultEvent],
+    cursor_events: &[CursorEvent],
+) -> FaultCorrelation {
+    // build index of cursor operations by thread id
+    // for each cursor: (start_time, end_time, dbi, table_name)
+    let mut cursor_windows_by_tid: HashMap<u32, Vec<(u64, u64, u32, String)>> = HashMap::new();
+    
+    for cursor in cursor_events {
+        let start_time = cursor.timestamp_ns;
+        let end_time = cursor.timestamp_ns + cursor.latency_ns;
+        cursor_windows_by_tid
+            .entry(cursor.tid)
+            .or_default()
+            .push((start_time, end_time, cursor.dbi, table_name));
+    }
+    
+    // sort by start time for binary search
+    for windows in cursor_windows_by_tid.values_mut() {
+        windows.sort_by_key(|w| w.0);
+    }
+    
+    // correlate each fault
+    for fault in page_faults {
+        if let Some(windows) = cursor_windows_by_tid.get(&fault.tid) {
+            // binary search for matching window
+            for (start, end, dbi, table_name) in windows {
+                if fault.timestamp_ns >= start && fault.timestamp_ns <= end {
+                    // fault occurred during this cursor operation
+                    correlated_faults.entry(table_name).or_insert((0, 0)).0 += 1;
+                    break;
+                }
+            }
+        }
+    }
+}
+```
 
 ## data flow
 
@@ -356,22 +383,25 @@ the html is self-contained with embedded javascript and css.
 6. kretprobe fires:
    - retrieves saved context
    - checks return value for major/minor
-   - reserves space in ring buffer
-   - writes event
+   - writes event to ring buffer
    
-7. userspace polls ring buffer:
+7. simultaneously, uprobes trace cursor operations:
+   - mdbx_cursor_open: maps cursor pointer -> dbi
+   - mdbx_cursor_get: records operation with dbi, key, latency
+   - mdbx_get: records direct get with dbi, key, latency
+   
+8. userspace polls ring buffer:
    - deserializes events
    - writes to jsonl file
    
-8. analyzer processes trace:
-   - loads mdbx metadata
-   - computes statistics
-   - generates visualization
+9. analyzer processes trace:
+   - correlates page faults with cursor ops by tid + timestamp
+   - generates visualization with accurate table attribution
 ```
 
 ## mdbx cursor operations
 
-when `--trace-cursors` is enabled, we also trace mdbx api calls:
+when `--trace-cursors` is enabled, we trace mdbx api calls:
 
 ### mdbx_cursor_get
 
@@ -382,9 +412,19 @@ int mdbx_cursor_get(MDBX_cursor *cursor, MDBX_val *key,
 
 cursor operations we track:
 - `MDBX_SET_RANGE` (17): seek to key >= given key (b+ tree traversal)
-- `MDBX_NEXT` (8): move to next entry (sequential scan)
-- `MDBX_FIRST` (0): move to first entry
 - `MDBX_SET` (15): seek to exact key
+- `MDBX_GET_BOTH_RANGE` (4): seek in dupsort table
+- `MDBX_NEXT` (8): move to next entry (sequential scan)
+- `MDBX_PREV` (12): move to previous entry
+- `MDBX_FIRST` (0): move to first entry
+
+### mdbx_get (direct lookup)
+
+```c
+int mdbx_get(MDBX_txn *txn, MDBX_dbi dbi, MDBX_val *key, MDBX_val *data);
+```
+
+direct key lookup without cursor. we trace these as `event_type=5` (DIRECT_GET).
 
 ### dbi tracking
 
@@ -394,7 +434,9 @@ we capture which table each cursor operates on:
 SEC("uprobe/mdbx_cursor_open")
 int BPF_UPROBE(trace_cursor_open, void *txn, __u32 dbi, void **cursor_ptr)
 {
-    // save dbi for this cursor pointer
+    // save dbi and cursor_ptr location for return probe
+    struct cursor_open_context ctx = { .dbi = dbi, .cursor_ptr = cursor_ptr };
+    bpf_map_update_elem(&pending_cursor_opens, &pid_tgid, &ctx, BPF_ANY);
 }
 
 SEC("uretprobe/mdbx_cursor_open")
@@ -402,10 +444,17 @@ int BPF_URETPROBE(trace_cursor_open_ret, int ret)
 {
     // read cursor pointer from output param
     // map cursor address -> dbi
+    void *cursor;
+    bpf_probe_read_user(&cursor, sizeof(cursor), ctx->cursor_ptr);
+    bpf_map_update_elem(&cursor_to_dbi, &cursor, &ctx->dbi, BPF_ANY);
 }
 ```
 
 when we later see `mdbx_cursor_get`, we look up the cursor address to find its dbi.
+
+### pre-trace cursors
+
+cursors opened before tracing started won't be in our `cursor_to_dbi` map. these show as "Unknown (pre-trace cursors)" in the output. using `--process-name` and restarting the node after the profiler starts avoids this issue.
 
 ## performance considerations
 
@@ -464,6 +513,15 @@ stripped binaries won't work for cursor tracing.
 ### ring buffer drops
 
 under extreme load, the ring buffer may fill before userspace can drain it. the `STAT_EVENTS_DROPPED` counter tracks this.
+
+### correlation coverage
+
+not all page faults can be correlated:
+- kernel prefetch/readahead
+- faults during cursor open/close
+- faults in non-cursor code paths
+
+expect 50-70% correlation rate in typical workloads.
 
 ## building the bpf program
 

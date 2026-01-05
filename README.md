@@ -1,6 +1,13 @@
 # reth-mdbx-profiler
 
-ebpf-based profiler for analyzing mdbx page fault patterns in reth.
+ebpf-based profiler for analyzing mdbx page fault patterns and cursor operations in reth.
+
+## what it does
+
+- traces page faults on mdbx memory-mapped regions
+- traces mdbx cursor operations (seeks, gets, navigation)
+- correlates page faults with cursor operations to attribute faults to specific tables
+- generates interactive html visualizations
 
 ## requirements
 
@@ -18,9 +25,19 @@ cargo build --release
 
 ### trace
 
-trace page faults on mdbx regions.
+trace page faults and cursor operations on mdbx regions.
 
 ```bash
+# using process name (recommended - survives process restarts)
+sudo ./target/release/mdbx-profiler trace \
+    --process-name reth \
+    --mdbx-path /data/reth/db/mdbx.dat \
+    --duration 60s \
+    --output trace.jsonl \
+    --trace-cursors \
+    --reth-binary /path/to/reth
+
+# using pid (if you know it won't restart)
 sudo ./target/release/mdbx-profiler trace \
     --pid $(pgrep reth) \
     --mdbx-path /data/reth/db/mdbx.dat \
@@ -29,12 +46,13 @@ sudo ./target/release/mdbx-profiler trace \
 ```
 
 options:
-- `--pid`: target process id
+- `--pid`: target process id (use this OR --process-name)
+- `--process-name`: process name to trace (e.g., "reth"). automatically detects restarts and updates tracking
 - `--mdbx-path`: path to mdbx.dat file
 - `--duration`: how long to trace (e.g., 30s, 5m)
 - `--output`: output file (default: trace.jsonl)
-- `--trace-cursors`: also trace cursor operations
-- `--reth-binary`: path to reth binary (for cursor tracing)
+- `--trace-cursors`: also trace cursor operations (required for accurate table attribution)
+- `--reth-binary`: path to reth binary (required for cursor tracing)
 
 ### analyze
 
@@ -58,13 +76,54 @@ generate interactive html visualizations from traces:
 
 the analyzer runs on macos/linux without ebpf - collect traces on your node and analyze locally.
 
+## how table attribution works
+
+mdbx stores all tables interleaved in a single file - you can't map file offsets directly to tables. we solve this by correlating page faults with cursor operations:
+
+1. **page faults** are captured with: `timestamp_ns`, `tid`, `file_offset`
+2. **cursor operations** are captured with: `timestamp_ns`, `tid`, `dbi` (table id), `latency_ns`
+
+for each page fault, we find cursor operations on the **same thread** where the fault timestamp falls within the cursor's execution window:
+
+```
+cursor_start <= fault_timestamp <= cursor_start + latency
+```
+
+if a fault occurs while thread 1234 is inside `mdbx_cursor_get()` on HashedStorages, that fault is attributed to HashedStorages.
+
+### why --process-name matters
+
+when using `--pid`, if you restart reth, the profiler keeps filtering for the old pid. cursors opened before tracing started can't be attributed to tables (they show as "pre-trace cursors").
+
+with `--process-name`:
+1. start the profiler first
+2. restart your node
+3. the profiler detects the new pid and captures all cursor opens from the start
+4. 100% of cursor operations can be attributed to tables
+
+## example output
+
+```
+Table Breakdown
+Correlated 59.1% of page faults (207698 of 351526) with cursor operations.
+
+Table              Category      Faults    Major     %
+HashedStorages     HashedState   46.5K     11.4K     13.2%
+StoragesTrie       Trie          41.5K     8.0K      11.8%
+HashedAccounts     HashedState   39.9K     7.9K      11.3%
+PlainStorageState  State         20.7K     5.1K      5.9%
+AccountsTrie       Trie          18.5K     3.4K      5.3%
+```
+
+the ~40% uncorrelated faults are kernel readahead/prefetch, background mmap page-ins, or faults outside cursor windows.
+
 ## known limitations
 
 - only works with 4kb page sizes (standard on most linux systems)
 - requires btf support in the kernel (`/sys/kernel/btf/vmlinux` must exist)
 - cursor tracing requires symbols in the reth binary (not stripped)
 - page fault tracing may miss faults during very high load due to ring buffer drops
-- table attribution relies on mdbx file structure and may not work with non-standard configurations
+- correlation rate depends on how much i/o happens inside vs outside cursor operations
 
 ## license
 
