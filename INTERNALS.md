@@ -404,7 +404,7 @@ int mdbx_cursor_get(MDBX_cursor *cursor, MDBX_val *key,
 cursor operations we track:
 - `MDBX_SET_RANGE` (17): seek to key >= given key (b+ tree traversal)
 - `MDBX_SET` (15): seek to exact key
-- `MDBX_GET_BOTH_RANGE` (4): seek in dupsort table
+- `MDBX_GET_BOTH_RANGE` (3): seek in dupsort table
 - `MDBX_NEXT` (8): move to next entry (sequential scan)
 - `MDBX_PREV` (12): move to previous entry
 - `MDBX_FIRST` (0): move to first entry
