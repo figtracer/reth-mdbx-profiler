@@ -36,9 +36,15 @@ struct Cli {
 enum Commands {
     /// Trace a running process (page faults only)
     Trace {
-        /// PID of the process to trace
-        #[arg(short, long)]
-        pid: u32,
+        /// PID of the process to trace (use this OR --process-name)
+        #[arg(short, long, required_unless_present = "process_name")]
+        pid: Option<u32>,
+
+        /// Process name to trace (e.g., "reth"). Allows restarting the process.
+        /// The profiler will automatically detect when the process restarts and
+        /// update tracking to the new PID.
+        #[arg(long, conflicts_with = "pid")]
+        process_name: Option<String>,
 
         /// Path to MDBX data directory (e.g., /data/reth/db/mdbx.dat)
         #[arg(short, long)]
@@ -91,6 +97,7 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Trace {
             pid,
+            process_name,
             mdbx_path,
             output,
             duration,
@@ -101,6 +108,7 @@ fn main() -> anyhow::Result<()> {
             let dur: Option<Duration> = duration.map(|d| d.into());
             run_trace(
                 pid,
+                process_name,
                 mdbx_path,
                 output,
                 dur,
@@ -115,6 +123,33 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Find PID(s) by process name
+fn find_pids_by_name(name: &str) -> Vec<u32> {
+    let mut pids = Vec::new();
+
+    // Read /proc to find matching processes
+    if let Ok(entries) = std::fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let file_name_str = file_name.to_string_lossy();
+
+            // Check if this is a PID directory (numeric name)
+            if let Ok(pid) = file_name_str.parse::<u32>() {
+                // Read the comm file to get process name
+                let comm_path = format!("/proc/{}/comm", pid);
+                if let Ok(comm) = std::fs::read_to_string(&comm_path) {
+                    let comm = comm.trim();
+                    if comm == name {
+                        pids.push(pid);
+                    }
+                }
+            }
+        }
+    }
+
+    pids
 }
 
 /// Find the libmdbx shared library in the process's memory mappings
@@ -174,8 +209,52 @@ fn find_symbol_offset(binary_path: &PathBuf, symbol: &str) -> Option<u64> {
     None
 }
 
+/// Update the target PID in the BPF config map
+fn update_target_pid(obj: &mut libbpf_rs::Object, pid: u32) -> anyhow::Result<()> {
+    let config_map = obj
+        .maps_mut()
+        .find(|m| m.name().to_string_lossy() == "profiler_config")
+        .expect("profiler_config map not found");
+    let key: u32 = 0;
+    config_map.update(&key.to_ne_bytes(), &pid.to_ne_bytes(), MapFlags::ANY)?;
+    Ok(())
+}
+
+/// Clear the cursor_to_dbi map (needed when process restarts to capture fresh cursor opens)
+fn clear_cursor_to_dbi_map(obj: &mut libbpf_rs::Object) -> anyhow::Result<()> {
+    let cursor_map = obj
+        .maps_mut()
+        .find(|m| m.name().to_string_lossy() == "cursor_to_dbi");
+
+    if let Some(map) = cursor_map {
+        // Iterate and delete all keys
+        let mut keys_to_delete = Vec::new();
+
+        // First collect all keys
+        let mut key = vec![0u8; 8]; // cursor pointer is u64
+        while let Ok(Some(next_key)) = map.lookup(&key, MapFlags::ANY) {
+            keys_to_delete.push(next_key.clone());
+            key = next_key;
+        }
+
+        // Delete all keys
+        for k in keys_to_delete {
+            let _ = map.delete(&k);
+        }
+
+        info!("Cleared cursor_to_dbi map");
+    }
+    Ok(())
+}
+
+/// Check if a process with the given PID is still running
+fn is_process_running(pid: u32) -> bool {
+    std::path::Path::new(&format!("/proc/{}", pid)).exists()
+}
+
 fn run_trace(
-    pid: u32,
+    pid: Option<u32>,
+    process_name: Option<String>,
     mdbx_path: PathBuf,
     output: PathBuf,
     duration: Option<Duration>,
@@ -183,9 +262,40 @@ fn run_trace(
     trace_cursors: bool,
     reth_binary: Option<PathBuf>,
 ) -> anyhow::Result<()> {
+    // Determine initial PID
+    let initial_pid = if let Some(pid) = pid {
+        pid
+    } else if let Some(ref name) = process_name {
+        let pids = find_pids_by_name(name);
+        match pids.len() {
+            0 => {
+                info!("Process '{}' not found. Waiting for it to start...", name);
+                0 // Will be updated when process starts
+            }
+            1 => {
+                info!("Found process '{}' with PID {}", name, pids[0]);
+                pids[0]
+            }
+            _ => {
+                warn!(
+                    "Found multiple processes named '{}': {:?}. Using first one.",
+                    name, pids
+                );
+                pids[0]
+            }
+        }
+    } else {
+        anyhow::bail!("Either --pid or --process-name must be specified");
+    };
+
     info!(
-        "Starting trace for PID {} on MDBX path {:?}",
-        pid, mdbx_path
+        "Starting trace for {} on MDBX path {:?}",
+        if let Some(ref name) = process_name {
+            format!("process '{}'", name)
+        } else {
+            format!("PID {}", initial_pid)
+        },
+        mdbx_path
     );
 
     // Get inode of MDBX file
@@ -206,15 +316,13 @@ fn run_trace(
     let open_obj = builder.open_file(&obj_path)?;
     let mut obj = open_obj.load()?;
 
-    // Configure target PID
-    {
-        let config_map = obj
-            .maps_mut()
-            .find(|m| m.name().to_string_lossy() == "profiler_config")
-            .expect("profiler_config map not found");
-        let key: u32 = 0;
-        config_map.update(&key.to_ne_bytes(), &pid.to_ne_bytes(), MapFlags::ANY)?;
-        info!("Configured target PID: {}", pid);
+    // Configure target PID (use initial_pid, will be updated if process restarts)
+    let mut current_pid = initial_pid;
+    update_target_pid(&mut obj, current_pid)?;
+    if current_pid > 0 {
+        info!("Configured target PID: {}", current_pid);
+    } else {
+        info!("No target PID yet, waiting for process to start");
     }
 
     // Register MDBX inode for tracking
@@ -251,18 +359,21 @@ fn run_trace(
                 // Find the binary to attach to
                 let binary = if let Some(ref bin) = reth_binary {
                     bin.clone()
-                } else {
+                } else if current_pid > 0 {
                     // Try to find libmdbx in the process
-                    match find_libmdbx_path(pid) {
+                    match find_libmdbx_path(current_pid) {
                         Some(p) => p,
                         None => {
                             warn!(
                                 "Could not find libmdbx for PID {}. Use --reth-binary to specify.",
-                                pid
+                                current_pid
                             );
                             continue;
                         }
                     }
+                } else {
+                    warn!("No process running yet and --reth-binary not specified. Skipping uprobe {}.", name);
+                    continue;
                 };
 
                 info!("Attaching uprobe {} to {:?}", name, binary);
@@ -442,6 +553,8 @@ fn run_trace(
     // Main loop
     let start = Instant::now();
     let mut last_stats = Instant::now();
+    let mut last_process_check = Instant::now();
+    let process_check_interval = Duration::from_secs(1);
 
     info!("Tracing started. Press Ctrl+C to stop.");
 
@@ -457,18 +570,54 @@ fn run_trace(
         // Poll ring buffer
         let _ = ring.poll(Duration::from_millis(100));
 
+        // Check for process restart if using --process-name
+        if let Some(ref name) = process_name {
+            if last_process_check.elapsed() >= process_check_interval {
+                last_process_check = Instant::now();
+
+                if current_pid > 0 && !is_process_running(current_pid) {
+                    // Process died, look for new one
+                    info!(
+                        "Process {} (PID {}) exited. Waiting for restart...",
+                        name, current_pid
+                    );
+                    current_pid = 0;
+                    update_target_pid(&mut obj, 0)?;
+                    clear_cursor_to_dbi_map(&mut obj)?;
+                }
+
+                if current_pid == 0 {
+                    // Look for new process
+                    let pids = find_pids_by_name(name);
+                    if !pids.is_empty() {
+                        current_pid = pids[0];
+                        update_target_pid(&mut obj, current_pid)?;
+                        info!(
+                            "Process '{}' started with PID {}. Tracing resumed.",
+                            name, current_pid
+                        );
+                    }
+                }
+            }
+        }
+
         // Print stats periodically
         if last_stats.elapsed() >= Duration::from_secs(stats_interval) {
             let pf_count = event_count.load(Ordering::Relaxed);
             let cur_count = cursor_count.load(Ordering::Relaxed);
             let elapsed = start.elapsed().as_secs_f64();
             info!(
-                "Page faults: {} ({:.1}/s), Cursor ops: {} ({:.1}/s), Elapsed: {:.1}s",
+                "Page faults: {} ({:.1}/s), Cursor ops: {} ({:.1}/s), Elapsed: {:.1}s{}",
                 pf_count,
                 pf_count as f64 / elapsed,
                 cur_count,
                 cur_count as f64 / elapsed,
-                elapsed
+                elapsed,
+                if current_pid == 0 {
+                    " [waiting for process]"
+                } else {
+                    ""
+                }
             );
             last_stats = Instant::now();
         }
