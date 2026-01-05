@@ -7,21 +7,95 @@ this document explains how the profiler works in depth, focusing on the ebpf tra
 the profiler uses ebpf to trace memory-mapped file accesses in the linux kernel. when reth accesses its mdbx database, the kernel handles page faults for memory-mapped regions. we hook into these page fault handlers to capture every access pattern.
 
 ```
-┌─────────────┐     ┌──────────────┐     ┌─────────────┐
-│   reth      │────>│ linux kernel │────>│ ebpf probes │
-│  (mdbx)     │     │ page faults  │     │             │
-└─────────────┘     └──────────────┘     └──────┬──────┘
-                                                │
-                                                v
-                                         ┌──────────────┐
-                                         │ ring buffer  │
-                                         └──────┬───────┘
-                                                │
-                                                v
-                                         ┌──────────────┐
-                                         │  userspace   │
-                                         │  collector   │
-                                         └──────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 1. RETH PROCESS                                                             │
+│                                                                             │
+│    reth accesses mdbx.dat via mmap'd memory                                 │
+│    → cpu triggers page fault (page not in tlb or not present)               │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 2. KERNEL PAGE FAULT HANDLER                                                │
+│                                                                             │
+│    handle_mm_fault(vma, address, flags)                                     │
+│    │                                                                        │
+│    ├─► kprobe fires                                                         │
+│    │   • check pid filter                                                   │
+│    │   • check inode filter                                                 │
+│    │   • calculate file offset                                              │
+│    │   • save context to pending_faults                                     │
+│    │                                                                        │
+│    ├─► kernel handles fault                                                 │
+│    │   • minor: map page from cache                                         │
+│    │   • major: read from disk, then map                                    │
+│    │                                                                        │
+│    └─► kretprobe fires                                                      │
+│        • retrieve saved context                                             │
+│        • check VM_FAULT_MAJOR bit                                           │
+│        • calculate latency                                                  │
+│        • emit page_fault_event to ring buffer                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 3. MDBX CURSOR OPERATIONS (concurrent)                                      │
+│                                                                             │
+│    mdbx_cursor_open(txn, dbi, &cursor)                                      │
+│    │                                                                        │
+│    ├─► uprobe: save (cursor_ptr_ptr, dbi)                                   │
+│    └─► uretprobe: map cursor_addr → dbi                                     │
+│                                                                             │
+│    mdbx_cursor_get(cursor, key, data, op)                                   │
+│    │                                                                        │
+│    ├─► uprobe: lookup dbi, save context                                     │
+│    │   • reads key data via bpf_probe_read_user                             │
+│    │   • page faults may occur here! ◄──────────────────────────────────────┤
+│    │                                                                        │
+│    └─► uretprobe: emit cursor_event to ring buffer                          │
+│                                                                             │
+│    mdbx_cursor_close(cursor)                                                │
+│    └─► uprobe: remove cursor from cursor_to_dbi map                         │  
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 4. RING BUFFER (16MB)                                                       │
+│                                                                             │
+│    [event][event][event][event][event]...                                   │
+│    ▲                                  │                                     │
+│    │ bpf writes                       │ userspace reads                     │
+│    │ (lock-free)                      ▼                                     │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 5. USERSPACE TRACER                                                         │
+│                                                                             │
+│    loop {                                                                   │
+│        ring.poll(100ms)                                                     │
+│        for event in new_events {                                            │
+│            let json = serde_json::to_string(&event)?;                       │
+│            writeln!(file, "{}", json)?;                                     │
+│        }                                                                    │
+│        check_process_restart();                                             │
+│    }                                                                        │
+│                                                                             │
+│    output: trace.jsonl                                                      │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ 6. ANALYZER (post-processing)                                               │
+│                                                                             │
+│    • load events from jsonl                                                 │
+│    • correlate faults with cursor ops (tid + timestamp)                     │
+│    • calculate statistics                                                   │
+│    • generate html visualization                                            │
+│                                                                             │
+│    output: trace.html                                                       │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## the table attribution problem
