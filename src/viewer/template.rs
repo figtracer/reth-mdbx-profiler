@@ -19,11 +19,6 @@ pub fn generate_html(data: &ViewerData) -> String {
 </head>
 <body>
     <div id="app">
-        <header>
-            <h1>MDBX Page Fault Trace Analysis</h1>
-            <div class="subtitle">Reth Database Profiler</div>
-        </header>
-
         <nav class="tabs">
             <button class="tab active" data-tab="summary">Summary</button>
             <button class="tab" data-tab="timeline">Timeline</button>
@@ -357,33 +352,6 @@ body {
     max-width: 1600px;
     margin: 0 auto;
     padding: 20px 30px;
-}
-
-header {
-    text-align: center;
-    padding: 40px 0;
-    border-bottom: 1px solid #252530;
-    margin-bottom: 30px;
-    background: linear-gradient(180deg, rgba(99, 102, 241, 0.05) 0%, transparent 100%);
-}
-
-header h1 {
-    font-size: 2.2em;
-    font-weight: 700;
-    background: linear-gradient(135deg, #8b5cf6 0%, #6366f1 50%, #3b82f6 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-    margin-bottom: 8px;
-    letter-spacing: -0.5px;
-}
-
-.subtitle {
-    color: #71717a;
-    font-size: 0.95em;
-    font-weight: 500;
-    letter-spacing: 2px;
-    text-transform: uppercase;
 }
 
 .tabs {
