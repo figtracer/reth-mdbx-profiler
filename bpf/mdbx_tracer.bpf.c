@@ -411,8 +411,8 @@ int BPF_UPROBE(trace_cursor_get, void *cursor, struct mdbx_val *key,
         inc_stat(STAT_CURSOR_NEXTS);
     }
     
-    // Build cursor context
-    struct cursor_context ctx = {
+    // Build cursor context (named cctx to avoid conflict with BPF_UPROBE's ctx)
+    struct cursor_context cctx = {
         .timestamp_ns = bpf_ktime_get_ns(),
         .pid = pid,
         .tid = (__u32)pid_tgid,
@@ -433,25 +433,25 @@ int BPF_UPROBE(trace_cursor_get, void *cursor, struct mdbx_val *key,
         // This is version-dependent; we use a common offset
         __u32 dbi = 0;
         bpf_probe_read_user(&dbi, sizeof(dbi), cursor + 16);
-        ctx.dbi = dbi;
+        cctx.dbi = dbi;
     }
     
     // Read key data if available (for seek operations)
     if (key) {
         struct mdbx_val key_val = {};
         if (bpf_probe_read_user(&key_val, sizeof(key_val), key) == 0) {
-            ctx.key_size = key_val.iov_len;
-            if (ctx.key_size > MAX_KEY_SIZE) {
-                ctx.key_size = MAX_KEY_SIZE;
+            cctx.key_size = key_val.iov_len;
+            if (cctx.key_size > MAX_KEY_SIZE) {
+                cctx.key_size = MAX_KEY_SIZE;
             }
-            if (key_val.iov_base && ctx.key_size > 0) {
-                bpf_probe_read_user(ctx.key_data, ctx.key_size, key_val.iov_base);
+            if (key_val.iov_base && cctx.key_size > 0) {
+                bpf_probe_read_user(cctx.key_data, cctx.key_size, key_val.iov_base);
             }
         }
     }
     
     // Save context for uretprobe
-    bpf_map_update_elem(&pending_cursors, &pid_tgid, &ctx, BPF_ANY);
+    bpf_map_update_elem(&pending_cursors, &pid_tgid, &cctx, BPF_ANY);
     
     return 0;
 }
@@ -462,9 +462,9 @@ int BPF_URETPROBE(trace_cursor_get_ret, int ret)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     
-    // Look up the saved context
-    struct cursor_context *ctx = bpf_map_lookup_elem(&pending_cursors, &pid_tgid);
-    if (!ctx) {
+    // Look up the saved context (named cctx to avoid conflict with BPF_URETPROBE's ctx)
+    struct cursor_context *cctx = bpf_map_lookup_elem(&pending_cursors, &pid_tgid);
+    if (!cctx) {
         return 0;
     }
     
@@ -475,7 +475,7 @@ int BPF_URETPROBE(trace_cursor_get_ret, int ret)
     
     // Calculate latency
     __u64 now = bpf_ktime_get_ns();
-    __u64 latency = now - ctx->timestamp_ns;
+    __u64 latency = now - cctx->timestamp_ns;
     
     // Reserve space in ring buffer for cursor event
     struct cursor_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
@@ -486,13 +486,13 @@ int BPF_URETPROBE(trace_cursor_get_ret, int ret)
     }
     
     // Fill event
-    e->timestamp_ns = ctx->timestamp_ns;
-    e->pid = ctx->pid;
-    e->tid = ctx->tid;
+    e->timestamp_ns = cctx->timestamp_ns;
+    e->pid = cctx->pid;
+    e->tid = cctx->tid;
     e->event_type = EVENT_CURSOR_GET;
-    e->cursor_op = ctx->cursor_op;
-    e->dbi = ctx->dbi;
-    e->key_size = ctx->key_size;
+    e->cursor_op = cctx->cursor_op;
+    e->dbi = cctx->dbi;
+    e->key_size = cctx->key_size;
     e->return_code = ret;
     e->latency_ns = latency;
     
@@ -500,7 +500,7 @@ int BPF_URETPROBE(trace_cursor_get_ret, int ret)
     // Use a loop that the verifier can understand
     #pragma unroll
     for (int i = 0; i < MAX_KEY_SIZE; i++) {
-        e->key_data[i] = ctx->key_data[i];
+        e->key_data[i] = cctx->key_data[i];
     }
     
     bpf_ringbuf_submit(e, 0);
