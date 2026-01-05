@@ -36,25 +36,6 @@ options:
 - `--trace-cursors`: also trace cursor operations
 - `--reth-binary`: path to reth binary (for cursor tracing)
 
-### trace-cursors
-
-trace mdbx cursor operations and page faults.
-
-```bash
-sudo ./target/release/mdbx-profiler trace-cursors \
-    --pid $(pgrep reth) \
-    --binary /path/to/reth \
-    --duration 30s \
-    --print-logs
-```
-
-options:
-- `--pid`: target process id
-- `--binary`: path to reth binary
-- `--duration`: how long to trace
-- `--output`: output file (default: cursor-trace.jsonl)
-- `--print-logs`: print events to stdout in log format
-
 ### analyze
 
 analyze a trace file.
