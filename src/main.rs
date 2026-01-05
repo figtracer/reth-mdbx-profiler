@@ -314,10 +314,15 @@ fn run_trace(
 
                 info!("Attaching uprobe {} to {:?}", name, binary);
 
-                // Find the symbol offset
+                // Find the symbol offset based on program name
                 let func_name = if name.contains("cursor_get") {
                     "mdbx_cursor_get"
+                } else if name.contains("cursor_open") {
+                    "mdbx_cursor_open"
+                } else if name.contains("cursor_close") {
+                    "mdbx_cursor_close"
                 } else {
+                    debug!("Skipping unknown cursor probe: {}", name);
                     continue;
                 };
 
@@ -553,10 +558,11 @@ fn run_cursor_trace(
         anyhow::bail!("Binary not found: {:?}", binary);
     }
 
-    // Find mdbx_cursor_get symbol
-    let offset = find_symbol_offset(&binary, "mdbx_cursor_get")
-        .ok_or_else(|| anyhow::anyhow!("Could not find mdbx_cursor_get in {:?}", binary))?;
-    info!("Found mdbx_cursor_get at offset 0x{:x}", offset);
+    // Verify mdbx_cursor_get symbol exists
+    if find_symbol_offset(&binary, "mdbx_cursor_get").is_none() {
+        anyhow::bail!("Could not find mdbx_cursor_get in {:?}", binary);
+    }
+    info!("Found mdbx cursor symbols in {:?}", binary);
 
     // Load BPF program
     let obj_path = std::env::current_exe()?
@@ -593,31 +599,48 @@ fn run_cursor_trace(
             continue;
         }
 
+        // Determine function name based on probe name
+        let func_name = if name.contains("cursor_get") {
+            "mdbx_cursor_get"
+        } else if name.contains("cursor_open") {
+            "mdbx_cursor_open"
+        } else if name.contains("cursor_close") {
+            "mdbx_cursor_close"
+        } else {
+            debug!("Skipping unknown cursor probe: {}", name);
+            continue;
+        };
+
         let is_ret = name.contains("uretprobe") || name.contains("_ret");
-        info!("Attaching {} (retprobe: {})", name, is_ret);
+        info!(
+            "Attaching {} for {} (retprobe: {})",
+            name, func_name, is_ret
+        );
 
         // Use pid=-1 to attach globally, then filter by PID in BPF
         // This is more reliable than per-process uprobe attachment
         let opts = libbpf_rs::UprobeOpts {
             retprobe: is_ret,
-            func_name: "mdbx_cursor_get".to_string(),
+            func_name: func_name.to_string(),
             ..Default::default()
         };
         match prog.attach_uprobe_with_opts(-1, &binary, 0, opts) {
             Ok(link) => {
-                info!("Attached {} successfully using func_name", name);
+                info!("Attached {} successfully", name);
                 _links.push(link);
             }
             Err(e) => {
                 warn!("Failed to attach {} with opts: {:?}", name, e);
-                // Fallback to offset-based attachment
-                match prog.attach_uprobe(is_ret, -1, &binary, offset as usize) {
-                    Ok(link) => {
-                        info!("Attached {} at offset 0x{:x} (fallback)", name, offset);
-                        _links.push(link);
-                    }
-                    Err(e2) => {
-                        warn!("Failed to attach {} with offset: {:?}", name, e2);
+                // Try to find offset as fallback
+                if let Some(offset) = find_symbol_offset(&binary, func_name) {
+                    match prog.attach_uprobe(is_ret, -1, &binary, offset as usize) {
+                        Ok(link) => {
+                            info!("Attached {} at offset 0x{:x} (fallback)", name, offset);
+                            _links.push(link);
+                        }
+                        Err(e2) => {
+                            warn!("Failed to attach {} with offset: {:?}", name, e2);
+                        }
                     }
                 }
             }

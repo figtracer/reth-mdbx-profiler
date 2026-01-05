@@ -168,6 +168,29 @@ struct {
     __type(value, struct cursor_context);
 } pending_cursors SEC(".maps");
 
+// Map cursor address to DBI - populated by mdbx_cursor_open uprobe
+// Key: cursor pointer (lower 64 bits), Value: DBI (u32)
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 10240);
+    __type(key, __u64);    // cursor address
+    __type(value, __u32);  // DBI
+} cursor_to_dbi SEC(".maps");
+
+// Context for cursor_open to get the cursor pointer from return probe
+struct cursor_open_context {
+    __u64 cursor_ptr_ptr;  // Address of MDBX_cursor** argument
+    __u32 dbi;             // DBI being opened
+};
+
+// Per-task context for mdbx_cursor_open
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 1024);
+    __type(key, __u64);    // pid_tgid
+    __type(value, struct cursor_open_context);
+} pending_cursor_opens SEC(".maps");
+
 #define STAT_TOTAL_FAULTS     0
 #define STAT_MDBX_FAULTS      1
 #define STAT_MAJOR_FAULTS     2
@@ -425,13 +448,17 @@ int BPF_UPROBE(trace_cursor_get, void *cursor, struct mdbx_val *key,
         .key_size = 0,
     };
     
-    // Note: The DBI is not directly stored in MDBX_cursor struct.
-    // The struct contains pointers to tree_t, clc2_t etc which hold DBI info.
-    // Dereferencing these pointers in BPF is complex, so we skip DBI for now.
-    // The cursor address itself can be used to correlate operations from the same cursor.
+    // Look up the DBI from cursor_to_dbi map (populated by mdbx_cursor_open uprobe)
     if (cursor) {
-        // Store lower 32 bits of cursor address as a pseudo-DBI for grouping
-        cctx.dbi = (__u32)((__u64)cursor & 0xFFFFFFFF);
+        __u64 cursor_addr = (__u64)cursor;
+        __u32 *dbi_ptr = bpf_map_lookup_elem(&cursor_to_dbi, &cursor_addr);
+        if (dbi_ptr) {
+            cctx.dbi = *dbi_ptr;
+        } else {
+            // Fallback: use lower 32 bits of cursor address for grouping
+            // This happens if cursor was opened before tracing started
+            cctx.dbi = (__u32)(cursor_addr & 0xFFFFFFFF);
+        }
     }
     
     // Read key data if available (for seek operations)
@@ -506,6 +533,79 @@ int BPF_URETPROBE(trace_cursor_get_ret, int ret)
     
     // Clean up
     bpf_map_delete_elem(&pending_cursors, &pid_tgid);
+    
+    return 0;
+}
+
+// ============================================================================
+// MDBX Cursor Open Tracing - captures DBI for each cursor
+// ============================================================================
+//
+// Signature: int mdbx_cursor_open(MDBX_txn *txn, MDBX_dbi dbi, MDBX_cursor **cursor)
+//
+// We capture the DBI on entry and the cursor pointer on return,
+// then store the mapping in cursor_to_dbi map.
+
+SEC("uprobe/mdbx_cursor_open")
+int BPF_UPROBE(trace_cursor_open, void *txn, __u32 dbi, void **cursor_ptr)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 pid = pid_tgid >> 32;
+    
+    if (!should_trace_pid(pid)) {
+        return 0;
+    }
+    
+    // Save context for uretprobe
+    struct cursor_open_context octx = {
+        .cursor_ptr_ptr = (__u64)cursor_ptr,
+        .dbi = dbi,
+    };
+    bpf_map_update_elem(&pending_cursor_opens, &pid_tgid, &octx, BPF_ANY);
+    
+    return 0;
+}
+
+SEC("uretprobe/mdbx_cursor_open")
+int BPF_URETPROBE(trace_cursor_open_ret, int ret)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    
+    struct cursor_open_context *octx = bpf_map_lookup_elem(&pending_cursor_opens, &pid_tgid);
+    if (!octx) {
+        return 0;
+    }
+    
+    // Only record if open succeeded
+    if (ret == 0 && octx->cursor_ptr_ptr) {
+        // Read the cursor pointer from the output parameter
+        void *cursor = NULL;
+        if (bpf_probe_read_user(&cursor, sizeof(cursor), (void *)octx->cursor_ptr_ptr) == 0 && cursor) {
+            __u64 cursor_addr = (__u64)cursor;
+            bpf_map_update_elem(&cursor_to_dbi, &cursor_addr, &octx->dbi, BPF_ANY);
+        }
+    }
+    
+    bpf_map_delete_elem(&pending_cursor_opens, &pid_tgid);
+    return 0;
+}
+
+// Also track cursor close to clean up the map
+// Signature: void mdbx_cursor_close(MDBX_cursor *cursor)
+SEC("uprobe/mdbx_cursor_close")
+int BPF_UPROBE(trace_cursor_close, void *cursor)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 pid = pid_tgid >> 32;
+    
+    if (!should_trace_pid(pid)) {
+        return 0;
+    }
+    
+    if (cursor) {
+        __u64 cursor_addr = (__u64)cursor;
+        bpf_map_delete_elem(&cursor_to_dbi, &cursor_addr);
+    }
     
     return 0;
 }
