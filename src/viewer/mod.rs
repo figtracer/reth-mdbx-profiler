@@ -107,6 +107,10 @@ pub struct CursorSummary {
     pub nav_count: u64,
     pub error_count: u64,
     pub duration_secs: f64,
+    /// Number of direct mdbx_get() calls (not cursor-based)
+    pub direct_get_count: u64,
+    /// Percentage of operations that are direct gets
+    pub direct_get_ratio: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -409,40 +413,59 @@ fn generate_cursor_data(events: &[CursorEvent]) -> CursorData {
     let mut nav_count = 0u64;
     let mut error_count = 0u64;
     let mut pre_trace_cursor_ops = 0u64;
+    let mut direct_get_count = 0u64;
 
-    // Count by DBI/table
-    let mut dbi_stats: HashMap<u32, (u64, u64, u64, u64)> = HashMap::new(); // (ops, seeks, navs, total_latency)
+    // Count by DBI/table - now includes direct_gets count
+    let mut dbi_stats: HashMap<u32, (u64, u64, u64, u64, u64)> = HashMap::new(); // (ops, seeks, navs, total_latency, direct_gets)
 
     for event in events {
-        // Track pre-trace cursor operations
-        if is_pre_trace_cursor(event.dbi) {
+        // Track pre-trace cursor operations (only for cursor ops, not direct gets)
+        if !event.is_direct_get() && is_pre_trace_cursor(event.dbi) {
             pre_trace_cursor_ops += 1;
         }
-        let op = event.cursor_op();
-        let op_name = op.to_string();
 
-        let entry = op_counts.entry(op_name).or_insert((0, 0));
-        entry.0 += 1;
-        entry.1 += event.latency_ns;
-
-        if op.is_seek() {
+        // Handle direct gets specially
+        if event.is_direct_get() {
+            direct_get_count += 1;
+            let entry = op_counts.entry("DIRECT_GET".to_string()).or_insert((0, 0));
+            entry.0 += 1;
+            entry.1 += event.latency_ns;
+            // Direct gets count as seeks (point lookups)
             seek_count += 1;
+        } else {
+            let op = event.cursor_op();
+            let op_name = op.to_string();
+
+            let entry = op_counts.entry(op_name).or_insert((0, 0));
+            entry.0 += 1;
+            entry.1 += event.latency_ns;
+
+            if op.is_seek() {
+                seek_count += 1;
+            }
+            if op.is_navigation() {
+                nav_count += 1;
+            }
         }
-        if op.is_navigation() {
-            nav_count += 1;
-        }
+
         if !event.is_success() && !event.is_not_found() {
             error_count += 1;
         }
 
         // DBI stats
-        let dbi_entry = dbi_stats.entry(event.dbi).or_insert((0, 0, 0, 0));
+        let dbi_entry = dbi_stats.entry(event.dbi).or_insert((0, 0, 0, 0, 0));
         dbi_entry.0 += 1;
-        if op.is_seek() {
-            dbi_entry.1 += 1;
-        }
-        if op.is_navigation() {
-            dbi_entry.2 += 1;
+        if event.is_direct_get() {
+            dbi_entry.4 += 1; // direct_gets
+            dbi_entry.1 += 1; // count as seek too
+        } else {
+            let op = event.cursor_op();
+            if op.is_seek() {
+                dbi_entry.1 += 1;
+            }
+            if op.is_navigation() {
+                dbi_entry.2 += 1;
+            }
         }
         dbi_entry.3 += event.latency_ns;
     }
@@ -460,6 +483,7 @@ fn generate_cursor_data(events: &[CursorEvent]) -> CursorData {
                     | "SET_UPPERBOUND"
                     | "GET_BOTH"
                     | "GET_BOTH_RANGE"
+                    | "DIRECT_GET"
             );
             OperationStats {
                 name,
@@ -473,8 +497,9 @@ fn generate_cursor_data(events: &[CursorEvent]) -> CursorData {
     operations.sort_by(|a, b| b.count.cmp(&a.count));
 
     // Build table stats - group pre-trace cursors together
-    let mut pre_trace_total: (u64, u64, u64, u64) = (0, 0, 0, 0);
-    let mut known_dbi_stats: HashMap<u32, (u64, u64, u64, u64)> = HashMap::new();
+    // Tuple: (ops, seeks, navs, total_latency, direct_gets)
+    let mut pre_trace_total: (u64, u64, u64, u64, u64) = (0, 0, 0, 0, 0);
+    let mut known_dbi_stats: HashMap<u32, (u64, u64, u64, u64, u64)> = HashMap::new();
 
     for (dbi, stats) in dbi_stats {
         if is_pre_trace_cursor(dbi) {
@@ -482,6 +507,7 @@ fn generate_cursor_data(events: &[CursorEvent]) -> CursorData {
             pre_trace_total.1 += stats.1;
             pre_trace_total.2 += stats.2;
             pre_trace_total.3 += stats.3;
+            pre_trace_total.4 += stats.4;
         } else {
             known_dbi_stats.insert(dbi, stats);
         }
@@ -489,15 +515,17 @@ fn generate_cursor_data(events: &[CursorEvent]) -> CursorData {
 
     let mut table_stats: Vec<CursorTableStats> = known_dbi_stats
         .into_iter()
-        .map(|(dbi, (ops, seeks, navs, total_lat))| CursorTableStats {
-            dbi,
-            name: dbi_to_table_name(dbi).to_string(),
-            ops,
-            percentage: ops as f64 / total as f64 * 100.0,
-            seeks,
-            navs,
-            avg_latency_us: (total_lat as f64 / ops as f64) / 1000.0,
-        })
+        .map(
+            |(dbi, (ops, seeks, navs, total_lat, _direct_gets))| CursorTableStats {
+                dbi,
+                name: dbi_to_table_name(dbi).to_string(),
+                ops,
+                percentage: ops as f64 / total as f64 * 100.0,
+                seeks,
+                navs,
+                avg_latency_us: (total_lat as f64 / ops as f64) / 1000.0,
+            },
+        )
         .collect();
 
     // Add pre-trace cursors as a single group if any exist
@@ -557,10 +585,15 @@ fn generate_cursor_data(events: &[CursorEvent]) -> CursorData {
             } else {
                 format!("Cursor_{:x}", e.dbi)
             };
+            let operation = if e.is_direct_get() {
+                "DIRECT_GET".to_string()
+            } else {
+                e.cursor_op().to_string()
+            };
             CursorOpSample {
                 timestamp_ms: (e.timestamp_ns - min_ts) / 1_000_000,
                 table: table_name,
-                operation: e.cursor_op().to_string(),
+                operation,
                 key_hex: if e.key_size > 0 {
                     format!("0x{}", e.key_hex())
                 } else {
@@ -584,7 +617,11 @@ fn generate_cursor_data(events: &[CursorEvent]) -> CursorData {
     for event in events {
         let dbi = event.dbi;
         let latency = event.latency_ns;
-        let op_name = event.cursor_op().to_string();
+        let op_name = if event.is_direct_get() {
+            "DIRECT_GET".to_string()
+        } else {
+            event.cursor_op().to_string()
+        };
 
         // Track total count per table
         let table_entry = slow_by_table.entry(dbi).or_insert((0, 0, 0, 0));
@@ -662,7 +699,11 @@ fn generate_cursor_data(events: &[CursorEvent]) -> CursorData {
         let dbi = event.dbi;
         let key_hex = event.key_hex();
         let latency = event.latency_ns;
-        let op_name = event.cursor_op().to_string();
+        let op_name = if event.is_direct_get() {
+            "DIRECT_GET".to_string()
+        } else {
+            event.cursor_op().to_string()
+        };
 
         let entry = key_stats
             .entry((dbi, key_hex))
@@ -748,6 +789,8 @@ fn generate_cursor_data(events: &[CursorEvent]) -> CursorData {
             nav_count,
             error_count,
             duration_secs,
+            direct_get_count,
+            direct_get_ratio: direct_get_count as f64 / total as f64 * 100.0,
         },
         operations,
         table_stats,

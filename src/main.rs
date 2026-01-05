@@ -273,6 +273,8 @@ fn run_trace(
                     "mdbx_cursor_open"
                 } else if name.contains("cursor_close") {
                     "mdbx_cursor_close"
+                } else if name.contains("direct_get") {
+                    "mdbx_get"
                 } else {
                     debug!("Skipping unknown cursor probe: {}", name);
                     continue;
@@ -389,8 +391,11 @@ fn run_trace(
                 .unwrap_or([0; 4]),
         );
 
-        // Check if this is a cursor event (event_type 3 or 4 at offset 16)
-        if (cursor_event_type == 3 || cursor_event_type == 4) && data.len() >= CURSOR_EVENT_SIZE {
+        // Check if this is a cursor event (event_type 3, 4, or 5 at offset 16)
+        // 3 = CursorGet, 4 = CursorPut, 5 = DirectGet (mdbx_get)
+        if (cursor_event_type == 3 || cursor_event_type == 4 || cursor_event_type == 5)
+            && data.len() >= CURSOR_EVENT_SIZE
+        {
             let event: CursorEvent =
                 unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CursorEvent) };
 

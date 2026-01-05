@@ -75,6 +75,7 @@ pub enum EventType {
     Mmap = 2,
     CursorGet = 3,
     CursorPut = 4,
+    DirectGet = 5,
 }
 
 /// MDBX cursor operations matching libmdbx MDBX_cursor_op enum
@@ -263,6 +264,7 @@ impl PageFaultEvent {
             2 => Some(EventType::Mmap),
             3 => Some(EventType::CursorGet),
             4 => Some(EventType::CursorPut),
+            5 => Some(EventType::DirectGet),
             _ => None,
         }
     }
@@ -310,7 +312,7 @@ pub struct CursorEvent {
     pub pid: u32,
     /// Thread ID
     pub tid: u32,
-    /// Event type (EVENT_CURSOR_GET or EVENT_CURSOR_PUT)
+    /// Event type (EVENT_CURSOR_GET=3, EVENT_CURSOR_PUT=4, or EVENT_DIRECT_GET=5)
     pub event_type: u32,
     /// MDBX cursor operation (SET_RANGE, NEXT, etc.)
     pub cursor_op: u32,
@@ -422,6 +424,11 @@ impl CursorEvent {
         self.return_code == -30798
     }
 
+    /// Returns true if this is a direct get (mdbx_get) rather than a cursor operation
+    pub fn is_direct_get(&self) -> bool {
+        self.event_type == 5
+    }
+
     /// Get the latency in microseconds
     pub fn latency_us(&self) -> f64 {
         self.latency_ns as f64 / 1000.0
@@ -470,6 +477,8 @@ pub struct TraceStats {
     pub cursor_seeks: u64,
     pub cursor_nexts: u64,
     pub cursor_errors: u64,
+    // Direct get stats (mdbx_get calls, not cursor-based)
+    pub direct_gets: u64,
 }
 
 impl TraceStats {

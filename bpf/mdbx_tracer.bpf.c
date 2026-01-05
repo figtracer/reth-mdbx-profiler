@@ -24,6 +24,7 @@
 #define EVENT_MMAP           2
 #define EVENT_CURSOR_GET     3
 #define EVENT_CURSOR_PUT     4
+#define EVENT_DIRECT_GET     5
 
 // MDBX cursor operations (from libmdbx mdbx.h MDBX_cursor_op enum)
 // These are the numeric values for the cursor operations
@@ -145,7 +146,7 @@ struct {
 // Statistics counters
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-    __uint(max_entries, 8);
+    __uint(max_entries, 16);
     __type(key, __u32);
     __type(value, __u64);
 } stats SEC(".maps");
@@ -191,6 +192,26 @@ struct {
     __type(value, struct cursor_open_context);
 } pending_cursor_opens SEC(".maps");
 
+// Context for correlating uprobe entry with uretprobe return for direct get ops
+// mdbx_get signature: int mdbx_get(const MDBX_txn *txn, MDBX_dbi dbi, 
+//                                   const MDBX_val *key, MDBX_val *data)
+struct direct_get_context {
+    __u64 timestamp_ns;      // Entry timestamp for latency calculation
+    __u32 pid;
+    __u32 tid;
+    __u32 dbi;               // Database index (passed directly as parameter)
+    __u32 key_size;          // Key size
+    __u8  key_data[MAX_KEY_SIZE];  // Key data
+};
+
+// Per-task context for mdbx_get
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 10240);
+    __type(key, __u64);    // pid_tgid
+    __type(value, struct direct_get_context);
+} pending_direct_gets SEC(".maps");
+
 #define STAT_TOTAL_FAULTS     0
 #define STAT_MDBX_FAULTS      1
 #define STAT_MAJOR_FAULTS     2
@@ -199,6 +220,7 @@ struct {
 #define STAT_CURSOR_SEEKS     5
 #define STAT_CURSOR_NEXTS     6
 #define STAT_CURSOR_ERRORS    7
+#define STAT_DIRECT_GETS      8
 
 static __always_inline void inc_stat(__u32 idx) {
     __u64 *val = bpf_map_lookup_elem(&stats, &idx);
@@ -659,6 +681,115 @@ int BPF_UPROBE(trace_cursor_close, void *cursor)
         __u64 cursor_addr = (__u64)cursor;
         bpf_map_delete_elem(&cursor_to_dbi, &cursor_addr);
     }
+    
+    return 0;
+}
+
+// ============================================================================
+// MDBX Direct Get Tracing (uprobes)
+// ============================================================================
+//
+// These uprobes attach to mdbx_get to trace direct key lookups.
+// This is separate from cursor operations - it's used for single key lookups.
+//
+// Signature: int mdbx_get(const MDBX_txn *txn, MDBX_dbi dbi, 
+//                          const MDBX_val *key, MDBX_val *data)
+//
+// Unlike cursor operations, the DBI is passed directly as a parameter,
+// making attribution straightforward.
+
+SEC("uprobe/mdbx_get")
+int BPF_UPROBE(trace_direct_get, void *txn, __u32 dbi, struct mdbx_val *key, void *data)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 pid = pid_tgid >> 32;
+    
+    // Filter by PID
+    if (!should_trace_pid(pid)) {
+        return 0;
+    }
+    
+    inc_stat(STAT_DIRECT_GETS);
+    
+    // Build direct get context
+    struct direct_get_context dctx = {
+        .timestamp_ns = bpf_ktime_get_ns(),
+        .pid = pid,
+        .tid = (__u32)pid_tgid,
+        .dbi = dbi,
+        .key_size = 0,
+    };
+    
+    // Read key data if available
+    if (key) {
+        struct mdbx_val key_val = {};
+        if (bpf_probe_read_user(&key_val, sizeof(key_val), key) == 0) {
+            dctx.key_size = key_val.iov_len;
+            if (dctx.key_size > MAX_KEY_SIZE) {
+                dctx.key_size = MAX_KEY_SIZE;
+            }
+            if (key_val.iov_base && dctx.key_size > 0) {
+                bpf_probe_read_user(dctx.key_data, dctx.key_size, key_val.iov_base);
+            }
+        }
+    }
+    
+    // Save context for uretprobe
+    bpf_map_update_elem(&pending_direct_gets, &pid_tgid, &dctx, BPF_ANY);
+    
+    return 0;
+}
+
+SEC("uretprobe/mdbx_get")
+int BPF_URETPROBE(trace_direct_get_ret, int ret)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    
+    // Look up the saved context
+    struct direct_get_context *dctx = bpf_map_lookup_elem(&pending_direct_gets, &pid_tgid);
+    if (!dctx) {
+        return 0;
+    }
+    
+    // Track errors
+    if (ret != 0) {
+        inc_stat(STAT_CURSOR_ERRORS);  // Reuse error counter
+    }
+    
+    // Calculate latency
+    __u64 now = bpf_ktime_get_ns();
+    __u64 latency = now - dctx->timestamp_ns;
+    
+    // Reserve space in ring buffer for cursor event (reuse same struct)
+    struct cursor_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (!e) {
+        inc_stat(STAT_EVENTS_DROPPED);
+        bpf_map_delete_elem(&pending_direct_gets, &pid_tgid);
+        return 0;
+    }
+    
+    // Fill event - use EVENT_DIRECT_GET type
+    e->timestamp_ns = dctx->timestamp_ns;
+    e->pid = dctx->pid;
+    e->tid = dctx->tid;
+    e->event_type = EVENT_DIRECT_GET;
+    e->cursor_op = 0;  // Not applicable for direct get
+    e->dbi = dctx->dbi;
+    e->key_size = dctx->key_size;
+    e->return_code = ret;
+    e->_pad = 0;
+    e->latency_ns = latency;
+    
+    // Copy key data
+    #pragma unroll
+    for (int i = 0; i < MAX_KEY_SIZE; i++) {
+        e->key_data[i] = dctx->key_data[i];
+    }
+    
+    bpf_ringbuf_submit(e, 0);
+    
+    // Clean up
+    bpf_map_delete_elem(&pending_direct_gets, &pid_tgid);
     
     return 0;
 }
