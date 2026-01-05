@@ -269,15 +269,18 @@ fn run_trace(
     // Attach kprobes for page fault tracing
     for prog in obj.progs_mut() {
         let name = prog.name().to_string_lossy().to_string();
+        let section = prog.section().to_string_lossy().to_string();
 
-        // Skip uprobe programs in this mode unless trace_cursors is enabled
-        if name.contains("cursor") && !trace_cursors {
-            debug!("Skipping cursor probe: {}", name);
+        // Skip uprobe programs (cursor tracing) unless trace_cursors is enabled
+        // Check both program name and section name
+        let is_uprobe = section.contains("uprobe") || name.contains("cursor");
+        if is_uprobe && !trace_cursors {
+            debug!("Skipping cursor probe: {} (section: {})", name, section);
             continue;
         }
 
-        // Handle uprobes separately
-        if name.contains("uprobe") {
+        // Handle uprobes separately - they need manual attachment
+        if is_uprobe {
             if trace_cursors {
                 // Find the binary to attach to
                 let binary = if let Some(ref bin) = reth_binary {
