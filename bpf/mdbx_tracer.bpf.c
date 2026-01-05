@@ -425,19 +425,13 @@ int BPF_UPROBE(trace_cursor_get, void *cursor, struct mdbx_val *key,
         .key_size = 0,
     };
     
-    // Try to read the DBI from the cursor structure
-    // In libmdbx, MDBX_cursor has mc_dbi at a specific offset
-    // This offset may vary by version, but typically it's early in the struct
-    // We'll try offset 8 (after the first pointer which is mc_signature or similar)
-    // Offset for mc_dbi in MDBX_cursor: typically at byte 16 or 24
-    // Let's try to read it - if it fails, we'll get 0
+    // Note: The DBI is not directly stored in MDBX_cursor struct.
+    // The struct contains pointers to tree_t, clc2_t etc which hold DBI info.
+    // Dereferencing these pointers in BPF is complex, so we skip DBI for now.
+    // The cursor address itself can be used to correlate operations from the same cursor.
     if (cursor) {
-        // mc_dbi is typically a uint32_t at offset 16 in the cursor struct
-        // (after mc_signature:4, mc_flags:4, and one pointer:8)
-        // This is version-dependent; we use a common offset
-        __u32 dbi = 0;
-        bpf_probe_read_user(&dbi, sizeof(dbi), cursor + 16);
-        cctx.dbi = dbi;
+        // Store lower 32 bits of cursor address as a pseudo-DBI for grouping
+        cctx.dbi = (__u32)((__u64)cursor & 0xFFFFFFFF);
     }
     
     // Read key data if available (for seek operations)
