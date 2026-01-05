@@ -3,9 +3,17 @@
 use serde::{Deserialize, Serialize};
 
 /// Map DBI number to reth table name
-/// These are based on reth's table definitions in reth/crates/storage/db/src/tables/mod.rs
-/// The order matches the order tables are created in the database.
-/// Note: DBI 0 and 1 are reserved for MDBX internal use (FREE_DBI, MAIN_DBI)
+///
+/// These are based on reth's table definitions in:
+/// https://github.com/paradigmxyz/reth/blob/main/crates/storage/db-api/src/tables/mod.rs
+///
+/// The order matches the `tables!` macro definition order, which determines DBI assignment.
+/// DBI 0 and 1 are reserved for MDBX internal use (FREE_DBI, MAIN_DBI).
+///
+/// **IMPORTANT**: This mapping must match your reth version. If reth adds/removes/reorders
+/// tables, this will be wrong. Verify against your reth version's tables/mod.rs.
+///
+/// Last verified against: reth main branch (2025-01)
 pub fn dbi_to_table_name(dbi: u32) -> &'static str {
     match dbi {
         0 => "FREE_DBI (internal)",
@@ -16,27 +24,31 @@ pub fn dbi_to_table_name(dbi: u32) -> &'static str {
         5 => "Headers",
         6 => "BlockBodyIndices",
         7 => "BlockOmmers",
-        8 => "TransactionHashNumbers",
+        8 => "BlockWithdrawals",
         9 => "Transactions",
-        10 => "TxSenders",
-        11 => "SyncStage",
-        12 => "SyncStageProgress",
-        13 => "PruneCheckpoints",
-        14 => "Bytecodes",
-        15 => "PlainAccountState",
-        16 => "PlainStorageState",
-        17 => "AccountChangeSets",
-        18 => "StorageChangeSets",
-        19 => "HashedAccounts",
-        20 => "HashedStorages",
-        21 => "AccountsTrie",
-        22 => "StoragesTrie",
-        23 => "TransactionBlocks",
-        24 => "BlockWithdrawals",
-        25 => "BlockRequests",
-        26 => "VersionHistory",
-        27 => "ChainState",
-        // Add more as needed - DBI order may vary by reth version
+        10 => "TransactionHashNumbers",
+        11 => "TransactionBlocks",
+        12 => "Receipts",
+        13 => "Bytecodes",
+        14 => "PlainAccountState",
+        15 => "PlainStorageState",
+        16 => "AccountsHistory",
+        17 => "StoragesHistory",
+        18 => "AccountChangeSets",
+        19 => "StorageChangeSets",
+        20 => "HashedAccounts",
+        21 => "HashedStorages",
+        22 => "AccountsTrie",
+        23 => "StoragesTrie",
+        24 => "AccountsTrieChangeSets",
+        25 => "StoragesTrieChangeSets",
+        26 => "TransactionSenders",
+        27 => "StageCheckpoints",
+        28 => "StageCheckpointProgresses",
+        29 => "PruneCheckpoints",
+        30 => "VersionHistory",
+        31 => "ChainState",
+        32 => "Metadata",
         _ => "Unknown",
     }
 }
