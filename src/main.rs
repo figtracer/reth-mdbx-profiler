@@ -325,7 +325,9 @@ fn run_trace(
                     Some(offset) => {
                         // Check both section name and program name for return probe
                         let is_ret = section.contains("uretprobe") || name.ends_with("_ret");
-                        match prog.attach_uprobe(is_ret, pid as i32, &binary, offset as usize) {
+                        // Use pid=-1 to attach globally, then filter by PID in BPF
+                        // This is more reliable than per-process uprobe attachment
+                        match prog.attach_uprobe(is_ret, -1, &binary, offset as usize) {
                             Ok(link) => {
                                 info!("Attached {} at offset 0x{:x}", name, offset);
                                 _links.push(link);
@@ -573,7 +575,9 @@ fn run_cursor_trace(
         let is_ret = name.contains("uretprobe") || name.contains("_ret");
         info!("Attaching {} (retprobe: {})", name, is_ret);
 
-        match prog.attach_uprobe(is_ret, pid as i32, &binary, offset as usize) {
+        // Use pid=-1 to attach globally, then filter by PID in BPF
+        // This is more reliable than per-process uprobe attachment
+        match prog.attach_uprobe(is_ret, -1, &binary, offset as usize) {
             Ok(link) => {
                 info!("Attached {} successfully", name);
                 _links.push(link);
