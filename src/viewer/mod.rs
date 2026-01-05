@@ -49,6 +49,46 @@ pub struct CursorData {
     pub timeline: Vec<CursorTimelinePoint>,
     /// Sample of recent operations for the log view
     pub recent_ops: Vec<CursorOpSample>,
+    /// Slow operations (>100μs) grouped by table - likely page faults
+    pub slow_ops_by_table: Vec<SlowOpsTableStats>,
+    /// Slow keys - frequently accessed keys with high latency
+    pub slow_keys: Vec<SlowKeyStats>,
+}
+
+/// Statistics for slow operations (>100μs) per table
+#[derive(Debug, Serialize)]
+pub struct SlowOpsTableStats {
+    pub table: String,
+    pub dbi: u32,
+    pub slow_op_count: u64,
+    pub total_op_count: u64,
+    pub slow_op_percentage: f64,
+    pub avg_slow_latency_us: f64,
+    pub max_latency_us: f64,
+    pub total_slow_time_ms: f64,
+    /// Breakdown by operation type
+    pub by_operation: Vec<SlowOpBreakdown>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SlowOpBreakdown {
+    pub operation: String,
+    pub count: u64,
+    pub avg_latency_us: f64,
+    pub max_latency_us: f64,
+}
+
+/// Statistics for keys that are frequently slow
+#[derive(Debug, Serialize)]
+pub struct SlowKeyStats {
+    pub table: String,
+    pub key_hex: String,
+    pub key_prefix: String,
+    pub slow_access_count: u64,
+    pub total_access_count: u64,
+    pub avg_latency_us: f64,
+    pub max_latency_us: f64,
+    pub operations: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -502,6 +542,151 @@ fn generate_cursor_data(events: &[CursorEvent]) -> CursorData {
         })
         .collect();
 
+    // Analyze slow operations (>100μs) - likely page faults
+    let slow_threshold_ns = 100_000u64; // 100μs
+
+    // Group slow ops by table and operation
+    // Key: (dbi, op_name), Value: (count, total_latency, max_latency)
+    let mut slow_by_table_op: HashMap<(u32, String), (u64, u64, u64)> = HashMap::new();
+    // Key: dbi, Value: (slow_count, total_count, total_slow_latency, max_latency)
+    let mut slow_by_table: HashMap<u32, (u64, u64, u64, u64)> = HashMap::new();
+
+    for event in events {
+        let dbi = event.dbi;
+        let latency = event.latency_ns;
+        let op_name = event.cursor_op().to_string();
+
+        // Track total count per table
+        let table_entry = slow_by_table.entry(dbi).or_insert((0, 0, 0, 0));
+        table_entry.1 += 1;
+
+        if latency >= slow_threshold_ns {
+            // Slow operation
+            table_entry.0 += 1;
+            table_entry.2 += latency;
+            table_entry.3 = table_entry.3.max(latency);
+
+            let op_entry = slow_by_table_op.entry((dbi, op_name)).or_insert((0, 0, 0));
+            op_entry.0 += 1;
+            op_entry.1 += latency;
+            op_entry.2 = op_entry.2.max(latency);
+        }
+    }
+
+    // Build slow ops by table stats
+    let mut slow_ops_by_table: Vec<SlowOpsTableStats> = slow_by_table
+        .iter()
+        .filter(|(_, (slow_count, _, _, _))| *slow_count > 0)
+        .map(
+            |(dbi, (slow_count, total_count, total_slow_latency, max_latency))| {
+                let table_name = if *dbi < 100 {
+                    dbi_to_table_name(*dbi).to_string()
+                } else {
+                    format!("Cursor_{:x}", dbi)
+                };
+
+                // Get breakdown by operation for this table
+                let mut by_operation: Vec<SlowOpBreakdown> = slow_by_table_op
+                    .iter()
+                    .filter(|((d, _), _)| *d == *dbi)
+                    .map(
+                        |((_, op_name), (count, total_lat, max_lat))| SlowOpBreakdown {
+                            operation: op_name.clone(),
+                            count: *count,
+                            avg_latency_us: (*total_lat as f64 / *count as f64) / 1000.0,
+                            max_latency_us: *max_lat as f64 / 1000.0,
+                        },
+                    )
+                    .collect();
+                by_operation.sort_by(|a, b| b.count.cmp(&a.count));
+
+                SlowOpsTableStats {
+                    table: table_name,
+                    dbi: *dbi,
+                    slow_op_count: *slow_count,
+                    total_op_count: *total_count,
+                    slow_op_percentage: *slow_count as f64 / *total_count as f64 * 100.0,
+                    avg_slow_latency_us: (*total_slow_latency as f64 / *slow_count as f64) / 1000.0,
+                    max_latency_us: *max_latency as f64 / 1000.0,
+                    total_slow_time_ms: *total_slow_latency as f64 / 1_000_000.0,
+                    by_operation,
+                }
+            },
+        )
+        .collect();
+    slow_ops_by_table.sort_by(|a, b| {
+        b.total_slow_time_ms
+            .partial_cmp(&a.total_slow_time_ms)
+            .unwrap()
+    });
+
+    // Analyze slow keys - keys that are frequently accessed with high latency
+    // Key: (dbi, key_hex), Value: (slow_count, total_count, total_latency, max_latency, operations)
+    let mut key_stats: HashMap<(u32, String), (u64, u64, u64, u64, Vec<String>)> = HashMap::new();
+
+    for event in events {
+        if event.key_size == 0 {
+            continue;
+        }
+
+        let dbi = event.dbi;
+        let key_hex = event.key_hex();
+        let latency = event.latency_ns;
+        let op_name = event.cursor_op().to_string();
+
+        let entry = key_stats
+            .entry((dbi, key_hex))
+            .or_insert((0, 0, 0, 0, Vec::new()));
+        entry.1 += 1; // total count
+
+        if latency >= slow_threshold_ns {
+            entry.0 += 1; // slow count
+            entry.2 += latency; // total latency (only slow ops)
+            entry.3 = entry.3.max(latency); // max latency
+            if !entry.4.contains(&op_name) {
+                entry.4.push(op_name);
+            }
+        }
+    }
+
+    // Build slow keys stats - only keys with multiple slow accesses
+    let mut slow_keys: Vec<SlowKeyStats> = key_stats
+        .into_iter()
+        .filter(|(_, (slow_count, _, _, _, _))| *slow_count >= 2) // At least 2 slow accesses
+        .map(
+            |(
+                (dbi, key_hex),
+                (slow_count, total_count, total_latency, max_latency, operations),
+            )| {
+                let table_name = if dbi < 100 {
+                    dbi_to_table_name(dbi).to_string()
+                } else {
+                    format!("Cursor_{:x}", dbi)
+                };
+
+                // Create a readable prefix (first 8 bytes or less)
+                let key_prefix = if key_hex.len() > 16 {
+                    format!("0x{}...", &key_hex[..16])
+                } else {
+                    format!("0x{}", key_hex)
+                };
+
+                SlowKeyStats {
+                    table: table_name,
+                    key_hex: format!("0x{}", key_hex),
+                    key_prefix,
+                    slow_access_count: slow_count,
+                    total_access_count: total_count,
+                    avg_latency_us: (total_latency as f64 / slow_count as f64) / 1000.0,
+                    max_latency_us: max_latency as f64 / 1000.0,
+                    operations,
+                }
+            },
+        )
+        .collect();
+    slow_keys.sort_by(|a, b| b.slow_access_count.cmp(&a.slow_access_count));
+    slow_keys.truncate(50); // Top 50 slow keys
+
     CursorData {
         has_data: true,
         summary: CursorSummary {
@@ -524,6 +709,8 @@ fn generate_cursor_data(events: &[CursorEvent]) -> CursorData {
         table_stats,
         timeline,
         recent_ops,
+        slow_ops_by_table,
+        slow_keys,
     }
 }
 

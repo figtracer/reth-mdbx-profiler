@@ -300,6 +300,43 @@ pub fn generate_html(data: &ViewerData) -> String {
                         <tbody></tbody>
                     </table>
 
+                    <h3>Slow Operations by Table (>100μs - Likely Page Faults)</h3>
+                    <div id="slow-ops-section">
+                        <table class="data-table" id="slow-ops-table">
+                            <thead>
+                                <tr>
+                                    <th>Table</th>
+                                    <th>Slow Ops</th>
+                                    <th>Total Ops</th>
+                                    <th>Slow %</th>
+                                    <th>Avg Slow Latency</th>
+                                    <th>Max Latency</th>
+                                    <th>Total Slow Time</th>
+                                    <th>Top Slow Operations</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+
+                    <h3>Slow Keys (Frequently Slow Accesses)</h3>
+                    <div id="slow-keys-section">
+                        <table class="data-table" id="slow-keys-table">
+                            <thead>
+                                <tr>
+                                    <th>Table</th>
+                                    <th>Key</th>
+                                    <th>Slow Accesses</th>
+                                    <th>Total Accesses</th>
+                                    <th>Avg Latency</th>
+                                    <th>Max Latency</th>
+                                    <th>Operations</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+
                     <h3>Operation Log (Sample)</h3>
                     <div class="cursor-log-container" style="max-height:400px; overflow-y:auto; background:#0a0a0f; border-radius:8px; border:1px solid #252530;">
                         <table class="data-table" id="cursor-log-table">
@@ -1686,6 +1723,62 @@ function initCursors() {
         `;
         tablesBody.appendChild(row);
     });
+
+    // Slow operations by table
+    const slowOpsBody = document.querySelector('#slow-ops-table tbody');
+    if (cursorData.slow_ops_by_table && cursorData.slow_ops_by_table.length > 0) {
+        cursorData.slow_ops_by_table.forEach(t => {
+            const row = document.createElement('tr');
+            // Format top operations breakdown
+            const topOps = t.by_operation.slice(0, 3).map(op =>
+                `${op.operation}: ${op.count} (avg ${op.avg_latency_us.toFixed(0)}μs)`
+            ).join(', ');
+
+            // Color code by severity (percentage of slow ops)
+            const sevColor = t.slow_op_percentage > 5 ? '#f87171' :
+                            t.slow_op_percentage > 1 ? '#fbbf24' : '#34d399';
+
+            row.innerHTML = `
+                <td><strong>${t.table}</strong></td>
+                <td style="color: ${sevColor}">${formatNumber(t.slow_op_count)}</td>
+                <td>${formatNumber(t.total_op_count)}</td>
+                <td style="color: ${sevColor}">${t.slow_op_percentage.toFixed(2)}%</td>
+                <td>${t.avg_slow_latency_us.toFixed(1)} μs</td>
+                <td style="color: #f87171">${t.max_latency_us.toFixed(1)} μs</td>
+                <td>${t.total_slow_time_ms.toFixed(1)} ms</td>
+                <td style="font-size: 0.85em">${topOps}</td>
+            `;
+            slowOpsBody.appendChild(row);
+        });
+    } else {
+        const row = document.createElement('tr');
+        row.innerHTML = '<td colspan="8" style="text-align:center;color:#888;">No slow operations detected</td>';
+        slowOpsBody.appendChild(row);
+    }
+
+    // Slow keys table
+    const slowKeysBody = document.querySelector('#slow-keys-table tbody');
+    if (cursorData.slow_keys && cursorData.slow_keys.length > 0) {
+        cursorData.slow_keys.forEach(k => {
+            const row = document.createElement('tr');
+            const opsDisplay = k.operations.join(', ');
+
+            row.innerHTML = `
+                <td>${k.table}</td>
+                <td style="font-family: monospace; font-size: 0.85em;" title="${k.key_hex}">${k.key_prefix}</td>
+                <td style="color: #f87171">${k.slow_access_count}</td>
+                <td>${k.total_access_count}</td>
+                <td>${k.avg_latency_us.toFixed(1)} μs</td>
+                <td style="color: #f87171">${k.max_latency_us.toFixed(1)} μs</td>
+                <td style="font-size: 0.85em">${opsDisplay}</td>
+            `;
+            slowKeysBody.appendChild(row);
+        });
+    } else {
+        const row = document.createElement('tr');
+        row.innerHTML = '<td colspan="7" style="text-align:center;color:#888;">No frequently slow keys detected</td>';
+        slowKeysBody.appendChild(row);
+    }
 
     // Log table
     const logBody = document.querySelector('#cursor-log-table tbody');
