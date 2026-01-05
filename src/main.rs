@@ -327,13 +327,34 @@ fn run_trace(
                         let is_ret = section.contains("uretprobe") || name.ends_with("_ret");
                         // Use pid=-1 to attach globally, then filter by PID in BPF
                         // This is more reliable than per-process uprobe attachment
-                        match prog.attach_uprobe(is_ret, -1, &binary, offset as usize) {
+                        let opts = libbpf_rs::UprobeOpts {
+                            retprobe: is_ret,
+                            func_name: func_name.to_string(),
+                            ..Default::default()
+                        };
+                        match prog.attach_uprobe_with_opts(-1, &binary, 0, opts) {
                             Ok(link) => {
-                                info!("Attached {} at offset 0x{:x}", name, offset);
+                                info!(
+                                    "Attached {} for {} (retprobe={}) at offset 0x{:x}",
+                                    name, func_name, is_ret, offset
+                                );
                                 _links.push(link);
                             }
                             Err(e) => {
-                                warn!("Failed to attach {}: {}", name, e);
+                                warn!("Failed to attach {} with opts: {:?}", name, e);
+                                // Fallback to offset-based attachment
+                                match prog.attach_uprobe(is_ret, -1, &binary, offset as usize) {
+                                    Ok(link) => {
+                                        info!(
+                                            "Attached {} at offset 0x{:x} (fallback)",
+                                            name, offset
+                                        );
+                                        _links.push(link);
+                                    }
+                                    Err(e2) => {
+                                        warn!("Failed to attach {} with offset: {:?}", name, e2);
+                                    }
+                                }
                             }
                         }
                     }
@@ -577,13 +598,28 @@ fn run_cursor_trace(
 
         // Use pid=-1 to attach globally, then filter by PID in BPF
         // This is more reliable than per-process uprobe attachment
-        match prog.attach_uprobe(is_ret, -1, &binary, offset as usize) {
+        let opts = libbpf_rs::UprobeOpts {
+            retprobe: is_ret,
+            func_name: "mdbx_cursor_get".to_string(),
+            ..Default::default()
+        };
+        match prog.attach_uprobe_with_opts(-1, &binary, 0, opts) {
             Ok(link) => {
-                info!("Attached {} successfully", name);
+                info!("Attached {} successfully using func_name", name);
                 _links.push(link);
             }
             Err(e) => {
-                warn!("Failed to attach {}: {}", name, e);
+                warn!("Failed to attach {} with opts: {:?}", name, e);
+                // Fallback to offset-based attachment
+                match prog.attach_uprobe(is_ret, -1, &binary, offset as usize) {
+                    Ok(link) => {
+                        info!("Attached {} at offset 0x{:x} (fallback)", name, offset);
+                        _links.push(link);
+                    }
+                    Err(e2) => {
+                        warn!("Failed to attach {} with offset: {:?}", name, e2);
+                    }
+                }
             }
         }
     }
