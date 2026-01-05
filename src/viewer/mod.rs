@@ -11,6 +11,122 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
 
+/// Result of correlating page faults with cursor operations
+#[derive(Debug, Default)]
+pub struct FaultCorrelation {
+    /// Map from table name to (total_faults, major_faults) that were correlated
+    pub correlated_faults: HashMap<String, (u64, u64)>,
+    /// Number of faults that couldn't be correlated to any cursor operation
+    pub uncorrelated_faults: u64,
+    /// Number of uncorrelated major faults
+    pub uncorrelated_major_faults: u64,
+    /// Total faults processed
+    pub total_faults: u64,
+}
+
+/// Correlate page faults with cursor operations by matching thread ID and timestamp windows.
+///
+/// A page fault is attributed to a cursor operation if:
+/// 1. It occurred on the same thread (tid matches)
+/// 2. The fault timestamp falls within the cursor operation's time window
+///    (between cursor start and cursor start + latency)
+///
+/// This gives us accurate per-table fault attribution instead of proportional estimates.
+pub fn correlate_faults_with_cursors(
+    page_faults: &[&PageFaultEvent],
+    cursor_events: &[CursorEvent],
+) -> FaultCorrelation {
+    let mut result = FaultCorrelation::default();
+    result.total_faults = page_faults.len() as u64;
+
+    if cursor_events.is_empty() {
+        result.uncorrelated_faults = page_faults.len() as u64;
+        result.uncorrelated_major_faults =
+            page_faults.iter().filter(|e| e.is_major_fault()).count() as u64;
+        return result;
+    }
+
+    // Build an index of cursor operations by thread ID for faster lookup
+    // Each entry is (start_time, end_time, dbi, table_name)
+    let mut cursor_windows_by_tid: HashMap<u32, Vec<(u64, u64, u32, String)>> = HashMap::new();
+
+    for cursor in cursor_events {
+        let start_time = cursor.timestamp_ns;
+        let end_time = cursor.timestamp_ns + cursor.latency_ns;
+        let table_name = if cursor.dbi < 100 {
+            dbi_to_table_name(cursor.dbi).to_string()
+        } else {
+            format!("Unknown (pre-trace cursor)")
+        };
+
+        cursor_windows_by_tid
+            .entry(cursor.tid)
+            .or_default()
+            .push((start_time, end_time, cursor.dbi, table_name));
+    }
+
+    // Sort each thread's cursor windows by start time for binary search
+    for windows in cursor_windows_by_tid.values_mut() {
+        windows.sort_by_key(|w| w.0);
+    }
+
+    // Now correlate each page fault
+    for fault in page_faults {
+        let fault_time = fault.timestamp_ns;
+        let fault_tid = fault.tid;
+        let is_major = fault.is_major_fault();
+
+        // Look up cursor windows for this thread
+        let mut correlated = false;
+        if let Some(windows) = cursor_windows_by_tid.get(&fault_tid) {
+            // Binary search to find potential matching windows
+            // Find first window that could contain this fault (start_time <= fault_time)
+            let search_result = windows.binary_search_by(|w| {
+                if w.1 < fault_time {
+                    std::cmp::Ordering::Less
+                } else if w.0 > fault_time {
+                    std::cmp::Ordering::Greater
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            });
+
+            // Check windows around the search point
+            let check_start = match search_result {
+                Ok(idx) => idx.saturating_sub(5),
+                Err(idx) => idx.saturating_sub(5),
+            };
+            let check_end = (check_start + 15).min(windows.len());
+
+            for i in check_start..check_end {
+                let (start, end, _dbi, ref table_name) = windows[i];
+                if fault_time >= start && fault_time <= end {
+                    // Found a match!
+                    let entry = result
+                        .correlated_faults
+                        .entry(table_name.clone())
+                        .or_insert((0, 0));
+                    entry.0 += 1;
+                    if is_major {
+                        entry.1 += 1;
+                    }
+                    correlated = true;
+                    break;
+                }
+            }
+        }
+
+        if !correlated {
+            result.uncorrelated_faults += 1;
+            if is_major {
+                result.uncorrelated_major_faults += 1;
+            }
+        }
+    }
+
+    result
+}
+
 /// Data structure for the web viewer
 #[derive(Debug, Serialize)]
 pub struct ViewerData {
@@ -183,10 +299,12 @@ pub struct TableStats {
     pub faults: u64,
     pub major_faults: u64,
     pub percentage: f64,
-    /// Whether this table had actual cursor operations (true = real data, false = proportional estimate)
+    /// Whether this table had actual cursor operations
     pub has_cursor_ops: bool,
     /// Number of cursor operations on this table (0 if no cursor data)
     pub cursor_ops: u64,
+    /// Whether faults are directly correlated (true) or proportionally estimated (false)
+    pub faults_correlated: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -368,12 +486,15 @@ pub fn generate_viewer_data(
     // Generate timeline (bucket by 100ms intervals, sample if too many)
     let timeline = generate_timeline(&page_faults, min_ts, duration_ns);
 
-    // Table breakdown - pass cursor ops info for accurate attribution
-    let (tables, page_fault_attribution_warning) = generate_table_stats(
+    // Correlate page faults with cursor operations by timestamp + thread matching
+    let correlation = correlate_faults_with_cursors(&page_faults, cursor_events);
+
+    // Table breakdown - use correlation data for accurate attribution
+    let (tables, page_fault_attribution_warning) = generate_table_stats_correlated(
         &page_faults,
-        attribution,
-        &tables_with_ops,
+        &correlation,
         &cursor_ops_by_table,
+        attribution,
     );
 
     // Thread distribution
@@ -866,6 +987,68 @@ fn generate_timeline(
         .collect()
 }
 
+/// Generate table stats using direct correlation between page faults and cursor operations.
+///
+/// This is the preferred method - it uses timestamp + thread matching to attribute
+/// each page fault to the cursor operation that caused it.
+fn generate_table_stats_correlated(
+    events: &[&PageFaultEvent],
+    correlation: &FaultCorrelation,
+    cursor_ops_by_table: &HashMap<String, u64>,
+    _attribution: Option<&PageAttribution>,
+) -> (Vec<TableStats>, Option<String>) {
+    let total_faults = events.len() as u64;
+
+    // If no faults were correlated, return empty with warning
+    if correlation.correlated_faults.is_empty() {
+        let warning = if correlation.total_faults > 0 {
+            Some(format!(
+                "Could not correlate any page faults with cursor operations. \
+                 {} faults occurred outside of cursor operation windows.",
+                correlation.uncorrelated_faults
+            ))
+        } else {
+            None
+        };
+        return (vec![], warning);
+    }
+
+    // Build stats from correlated faults
+    let correlated_total: u64 = correlation.correlated_faults.values().map(|(f, _)| f).sum();
+
+    let mut stats: Vec<_> = correlation
+        .correlated_faults
+        .iter()
+        .map(|(table_name, (faults, major_faults))| {
+            let table = RethTable::from_name(table_name);
+            let ops = cursor_ops_by_table.get(table_name).copied().unwrap_or(0);
+            TableStats {
+                name: table_name.clone(),
+                category: table.category().to_string(),
+                faults: *faults,
+                major_faults: *major_faults,
+                percentage: *faults as f64 / total_faults as f64 * 100.0,
+                has_cursor_ops: ops > 0,
+                cursor_ops: ops,
+                faults_correlated: true,
+            }
+        })
+        .collect();
+
+    stats.sort_by(|a, b| b.faults.cmp(&a.faults));
+
+    // Generate informative message about correlation
+    let correlation_rate = correlated_total as f64 / total_faults as f64 * 100.0;
+    let warning = Some(format!(
+        "Correlated {:.1}% of page faults ({} of {}) with cursor operations. \
+         {} faults occurred outside cursor windows (background I/O, prefetch, or kernel activity).",
+        correlation_rate, correlated_total, total_faults, correlation.uncorrelated_faults
+    ));
+
+    (stats, warning)
+}
+
+#[allow(dead_code)]
 fn generate_table_stats(
     events: &[&PageFaultEvent],
     attribution: Option<&PageAttribution>,
@@ -920,6 +1103,7 @@ fn generate_table_stats(
                 percentage: faults as f64 / total * 100.0,
                 has_cursor_ops: tables_with_ops.contains(&name),
                 cursor_ops: ops,
+                faults_correlated: false,
             }
         })
         .collect();
@@ -972,6 +1156,7 @@ fn generate_table_stats_from_mdbx(
                 percentage: 100.0,
                 has_cursor_ops: false,
                 cursor_ops: 0,
+                faults_correlated: false,
             }],
             None,
         );
@@ -1050,6 +1235,7 @@ fn generate_table_stats_from_mdbx(
                 percentage: proportion * 100.0,
                 has_cursor_ops: tables_with_ops.contains(&s.name),
                 cursor_ops: ops,
+                faults_correlated: false, // These are proportional estimates, not correlated
             }
         })
         .collect();
