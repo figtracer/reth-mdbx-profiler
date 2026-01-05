@@ -33,6 +33,7 @@ pub fn generate_html(data: &ViewerData) -> String {
             <button class="tab" data-tab="hotpages">Hot Pages</button>
             <button class="tab" data-tab="patterns">Patterns</button>
             <button class="tab" data-tab="prefetch">Prefetch</button>
+            <button class="tab" data-tab="cursors">Cursor Ops</button>
         </nav>
 
         <main>
@@ -228,6 +229,98 @@ pub fn generate_html(data: &ViewerData) -> String {
                     <p><strong>Hit Rate:</strong> <span id="hit-rate"></span></p>
                     <p><strong>Locality Score:</strong> <span id="locality-score"></span></p>
                     <p><strong>Estimated Benefit:</strong> <span id="prefetch-benefit"></span></p>
+                </div>
+            </section>
+
+            <section id="cursors" class="panel">
+                <h2>MDBX Cursor Operations</h2>
+                <div id="cursor-no-data" style="display:none; text-align:center; padding:40px; color:#888;">
+                    No cursor operation data available. Run trace with --trace-cursors flag.
+                </div>
+                <div id="cursor-content">
+                    <div class="summary-grid">
+                        <div class="stat-card">
+                            <div class="stat-label">Total Operations</div>
+                            <div class="stat-value" id="cursor-total-ops"></div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Op Rate</div>
+                            <div class="stat-value" id="cursor-op-rate"></div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Avg Latency</div>
+                            <div class="stat-value" id="cursor-avg-latency"></div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">P99 Latency</div>
+                            <div class="stat-value major" id="cursor-p99-latency"></div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Seeks</div>
+                            <div class="stat-value" id="cursor-seeks"></div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Seek Ratio</div>
+                            <div class="stat-value" id="cursor-seek-ratio"></div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Navigation</div>
+                            <div class="stat-value minor" id="cursor-navs"></div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Errors</div>
+                            <div class="stat-value" id="cursor-errors"></div>
+                        </div>
+                    </div>
+
+                    <div class="table-charts">
+                        <div class="chart-container">
+                            <h3>Operations by Type</h3>
+                            <canvas id="cursor-ops-chart"></canvas>
+                        </div>
+                        <div class="chart-container">
+                            <h3>Operations by Table</h3>
+                            <canvas id="cursor-tables-chart"></canvas>
+                        </div>
+                    </div>
+
+                    <h3>Cursor Timeline</h3>
+                    <div class="chart-full">
+                        <canvas id="cursor-timeline-chart"></canvas>
+                    </div>
+
+                    <h3>Table Access Details</h3>
+                    <table class="data-table" id="cursor-tables-table">
+                        <thead>
+                            <tr>
+                                <th>Table</th>
+                                <th>DBI</th>
+                                <th>Operations</th>
+                                <th>Seeks</th>
+                                <th>Nav</th>
+                                <th>Avg Latency</th>
+                                <th>%</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+
+                    <h3>Operation Log (Sample)</h3>
+                    <div class="cursor-log-container" style="max-height:400px; overflow-y:auto; background:#0a0a0f; border-radius:8px; border:1px solid #252530;">
+                        <table class="data-table" id="cursor-log-table">
+                            <thead>
+                                <tr>
+                                    <th>Time (ms)</th>
+                                    <th>Table</th>
+                                    <th>Operation</th>
+                                    <th>Key</th>
+                                    <th>Latency</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
                 </div>
             </section>
         </main>
@@ -1325,6 +1418,9 @@ function initTab(tabName) {
         case 'prefetch':
             initPrefetch();
             break;
+        case 'cursors':
+            initCursors();
+            break;
     }
 }
 
@@ -1543,6 +1639,102 @@ function initPrefetch() {
     document.getElementById('hit-rate').textContent = DATA.prefetch.prediction_hit_rate.toFixed(1) + '%';
     document.getElementById('locality-score').textContent = (DATA.prefetch.locality_score * 100).toFixed(1) + '%';
     document.getElementById('prefetch-benefit').textContent = DATA.prefetch.prefetch_benefit_estimate.toFixed(1) + '% potential fault reduction';
+}
+
+function initCursors() {
+    const cursorData = DATA.cursor_data;
+
+    if (!cursorData || !cursorData.has_data) {
+        document.getElementById('cursor-no-data').style.display = 'block';
+        document.getElementById('cursor-content').style.display = 'none';
+        return;
+    }
+
+    document.getElementById('cursor-no-data').style.display = 'none';
+    document.getElementById('cursor-content').style.display = 'block';
+
+    // Summary stats
+    document.getElementById('cursor-total-ops').textContent = formatNumber(cursorData.summary.total_ops);
+    document.getElementById('cursor-op-rate').textContent = formatNumber(cursorData.summary.op_rate_per_sec) + '/s';
+    document.getElementById('cursor-avg-latency').textContent = cursorData.summary.avg_latency_us.toFixed(1) + ' μs';
+    document.getElementById('cursor-p99-latency').textContent = cursorData.summary.p99_latency_us.toFixed(1) + ' μs';
+    document.getElementById('cursor-seeks').textContent = formatNumber(cursorData.summary.seek_count);
+    document.getElementById('cursor-seek-ratio').textContent = cursorData.summary.seek_ratio.toFixed(1) + '%';
+    document.getElementById('cursor-navs').textContent = formatNumber(cursorData.summary.nav_count);
+    document.getElementById('cursor-errors').textContent = formatNumber(cursorData.summary.error_count);
+
+    // Operations chart
+    if (cursorData.operations.length > 0) {
+        const topOps = cursorData.operations.slice(0, 10);
+        const colors = topOps.map(op => op.is_seek ? '#f59e0b' : '#34d399');
+
+        charts.cursorOps = new SimpleChart(document.getElementById('cursor-ops-chart'));
+        charts.cursorOps.drawBar(
+            topOps.map(o => o.name),
+            topOps.map(o => o.count),
+            '#6366f1',
+            { title: '' }
+        );
+    }
+
+    // Tables chart
+    if (cursorData.table_stats.length > 0) {
+        const topTables = cursorData.table_stats.slice(0, 10);
+        const colors = ['#8b5cf6', '#6366f1', '#3b82f6', '#0ea5e9', '#06b6d4', '#14b8a6', '#10b981', '#84cc16', '#eab308', '#f59e0b'];
+
+        charts.cursorTables = new SimpleChart(document.getElementById('cursor-tables-chart'));
+        charts.cursorTables.drawPie(
+            topTables.map(t => t.ops),
+            colors,
+            topTables.map(t => t.name)
+        );
+    }
+
+    // Timeline chart
+    if (cursorData.timeline.length > 0) {
+        charts.cursorTimeline = new SimpleChart(document.getElementById('cursor-timeline-chart'));
+        charts.cursorTimeline.drawLine(
+            [cursorData.timeline.map(t => t.ops), cursorData.timeline.map(t => t.seeks)],
+            {
+                colors: ['#6366f1', '#f59e0b'],
+                labels: ['Total Ops', 'Seeks'],
+                title: 'Cursor Operations Over Time'
+            }
+        );
+    }
+
+    // Tables table
+    const tablesBody = document.querySelector('#cursor-tables-table tbody');
+    cursorData.table_stats.forEach(t => {
+        const row = document.createElement('tr');
+        row.innerHTML = `
+            <td>${t.name}</td>
+            <td>${t.dbi}</td>
+            <td>${formatNumber(t.ops)}</td>
+            <td>${formatNumber(t.seeks)}</td>
+            <td>${formatNumber(t.navs)}</td>
+            <td>${t.avg_latency_us.toFixed(1)} μs</td>
+            <td>${t.percentage.toFixed(1)}%</td>
+        `;
+        tablesBody.appendChild(row);
+    });
+
+    // Log table
+    const logBody = document.querySelector('#cursor-log-table tbody');
+    cursorData.recent_ops.forEach(op => {
+        const row = document.createElement('tr');
+        const statusColor = op.success ? '#34d399' : '#f87171';
+        const keyDisplay = op.key_hex.length > 40 ? op.key_hex.substring(0, 40) + '...' : op.key_hex;
+        row.innerHTML = `
+            <td>${op.timestamp_ms}</td>
+            <td>${op.table}</td>
+            <td style="color: ${op.operation.includes('SET') || op.operation.includes('GET_BOTH') ? '#f59e0b' : '#34d399'}">${op.operation}</td>
+            <td style="font-family: monospace; font-size: 0.85em;">${keyDisplay}</td>
+            <td>${op.latency_us.toFixed(1)} μs</td>
+            <td style="color: ${statusColor}">${op.success ? 'OK' : 'ERR'}</td>
+        `;
+        logBody.appendChild(row);
+    });
 }
 
 // Initialize the viewer

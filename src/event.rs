@@ -2,6 +2,45 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Map DBI number to reth table name
+/// These are based on reth's table definitions in reth/crates/storage/db/src/tables/mod.rs
+/// The order matches the order tables are created in the database.
+/// Note: DBI 0 and 1 are reserved for MDBX internal use (FREE_DBI, MAIN_DBI)
+pub fn dbi_to_table_name(dbi: u32) -> &'static str {
+    match dbi {
+        0 => "FREE_DBI (internal)",
+        1 => "MAIN_DBI (internal)",
+        2 => "CanonicalHeaders",
+        3 => "HeaderTerminalDifficulties",
+        4 => "HeaderNumbers",
+        5 => "Headers",
+        6 => "BlockBodyIndices",
+        7 => "BlockOmmers",
+        8 => "TransactionHashNumbers",
+        9 => "Transactions",
+        10 => "TxSenders",
+        11 => "SyncStage",
+        12 => "SyncStageProgress",
+        13 => "PruneCheckpoints",
+        14 => "Bytecodes",
+        15 => "PlainAccountState",
+        16 => "PlainStorageState",
+        17 => "AccountChangeSets",
+        18 => "StorageChangeSets",
+        19 => "HashedAccounts",
+        20 => "HashedStorages",
+        21 => "AccountsTrie",
+        22 => "StoragesTrie",
+        23 => "TransactionBlocks",
+        24 => "BlockWithdrawals",
+        25 => "BlockRequests",
+        26 => "VersionHistory",
+        27 => "ChainState",
+        // Add more as needed - DBI order may vary by reth version
+        _ => "Unknown",
+    }
+}
+
 /// Maximum key size captured in cursor events (must match BPF MAX_KEY_SIZE)
 pub const MAX_KEY_SIZE: usize = 64;
 

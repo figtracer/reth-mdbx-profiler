@@ -92,13 +92,6 @@ enum Commands {
         print_logs: bool,
     },
 
-    /// Find MDBX files for a process
-    FindMdbx {
-        /// PID of the process
-        #[arg(short, long)]
-        pid: u32,
-    },
-
     /// Analyze a trace file
     Analyze {
         /// Input trace file
@@ -154,9 +147,7 @@ fn main() -> anyhow::Result<()> {
             let dur: Option<Duration> = duration.map(|d| d.into());
             run_cursor_trace(pid, binary, output, dur, stats_interval, print_logs)?;
         }
-        Commands::FindMdbx { pid } => {
-            find_mdbx_files(pid)?;
-        }
+
         Commands::Analyze { input, format } => {
             analyze_trace(input, format)?;
         }
@@ -876,43 +867,6 @@ fn print_cursor_stats(stats_map: &libbpf_rs::Map) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn find_mdbx_files(pid: u32) -> anyhow::Result<()> {
-    info!("Finding MDBX files for PID {}", pid);
-
-    let maps_path = format!("/proc/{}/maps", pid);
-    let content = std::fs::read_to_string(&maps_path)?;
-
-    println!("Memory-mapped files for PID {}:", pid);
-    println!("{:<20} {:<20} {:<10} {}", "Start", "End", "Size", "Path");
-    println!("{}", "-".repeat(80));
-
-    for line in content.lines() {
-        // Look for mdbx-related mappings
-        if line.contains("mdbx") || line.contains(".dat") {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 6 {
-                let addr_range: Vec<&str> = parts[0].split('-').collect();
-                if addr_range.len() == 2 {
-                    let start = u64::from_str_radix(addr_range[0], 16).unwrap_or(0);
-                    let end = u64::from_str_radix(addr_range[1], 16).unwrap_or(0);
-                    let size = end - start;
-                    let path = parts[5..].join(" ");
-
-                    println!(
-                        "0x{:016x} 0x{:016x} {:>10} {}",
-                        start,
-                        end,
-                        format_size(size),
-                        path
-                    );
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
 fn format_size(bytes: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
@@ -988,8 +942,8 @@ fn analyze_trace(input: PathBuf, format: String) -> anyhow::Result<()> {
         "logs" => {
             // Print cursor events in issue 14558 log format
             for event in &cursor_events {
-                let table_name = format!("DBI_{}", event.dbi);
-                println!("{}", event.format_log(&table_name));
+                let table_name = event::dbi_to_table_name(event.dbi);
+                println!("{}", event.format_log(table_name));
             }
         }
         other => anyhow::bail!("Unknown format: {}", other),
@@ -1149,12 +1103,14 @@ fn print_cursor_summary(events: &[CursorEvent]) {
     }
 
     println!();
-    println!("Top DBIs (tables):");
+    println!("Top tables:");
     let mut dbis: Vec<_> = dbi_counts.iter().collect();
     dbis.sort_by(|a, b| b.1.cmp(a.1));
     for (dbi, count) in dbis.iter().take(10) {
+        let table_name = event::dbi_to_table_name(**dbi);
         println!(
-            "  DBI {}: {} ({:.1}%)",
+            "  {:30} (DBI {:2}): {:6} ({:.1}%)",
+            table_name,
             dbi,
             count,
             **count as f64 / total as f64 * 100.0

@@ -7,7 +7,7 @@ mod event;
 mod mdbx_metadata;
 mod viewer;
 
-use event::PageFaultEvent;
+use event::{CursorEvent, PageFaultEvent};
 use mdbx_metadata::PageAttribution;
 
 /// Analyze MDBX page fault traces and generate interactive visualizations
@@ -45,29 +45,41 @@ fn main() -> anyhow::Result<()> {
     let reader = std::io::BufReader::new(file);
 
     let mut events: Vec<PageFaultEvent> = Vec::new();
+    let mut cursor_events: Vec<CursorEvent> = Vec::new();
     let mut parse_errors = 0;
 
     for line in reader.lines() {
         let line = line?;
-        match serde_json::from_str::<PageFaultEvent>(&line) {
-            Ok(event) => events.push(event),
-            Err(_) => parse_errors += 1,
+        // Try to parse as page fault event first
+        if let Ok(event) = serde_json::from_str::<PageFaultEvent>(&line) {
+            if event.event_type == 1 || event.event_type == 2 {
+                events.push(event);
+                continue;
+            }
         }
+        // Try to parse as cursor event
+        if let Ok(event) = serde_json::from_str::<CursorEvent>(&line) {
+            cursor_events.push(event);
+            continue;
+        }
+        parse_errors += 1;
     }
 
     eprintln!(
-        "Loaded {} events ({} parse errors)",
+        "Loaded {} page fault events, {} cursor events ({} parse errors)",
         events.len(),
+        cursor_events.len(),
         parse_errors
     );
 
-    if events.is_empty() {
+    if events.is_empty() && cursor_events.is_empty() {
         eprintln!("No events to analyze");
         return Ok(());
     }
 
     // Sort by timestamp
     events.sort_by_key(|e| e.timestamp_ns);
+    cursor_events.sort_by_key(|e| e.timestamp_ns);
 
     // Load MDBX metadata if path provided
     let attribution = if let Some(mdbx_path) = &cli.mdbx_path {
@@ -87,10 +99,10 @@ fn main() -> anyhow::Result<()> {
 
     match cli.format.as_str() {
         "html" => {
-            generate_html_viewer(&events, attribution.as_ref(), &cli)?;
+            generate_html_viewer(&events, &cursor_events, attribution.as_ref(), &cli)?;
         }
         "json" => {
-            let data = viewer::generate_viewer_data(&events, attribution.as_ref());
+            let data = viewer::generate_viewer_data(&events, &cursor_events, attribution.as_ref());
             println!("{}", serde_json::to_string_pretty(&data)?);
         }
         "csv" => {
@@ -107,12 +119,13 @@ fn main() -> anyhow::Result<()> {
 
 fn generate_html_viewer(
     events: &[PageFaultEvent],
+    cursor_events: &[CursorEvent],
     attribution: Option<&PageAttribution>,
     cli: &Cli,
 ) -> anyhow::Result<()> {
     eprintln!("Generating viewer data...");
 
-    let data = viewer::generate_viewer_data(events, attribution);
+    let data = viewer::generate_viewer_data(events, cursor_events, attribution);
 
     // Determine output path
     let output_path = cli.output.clone().unwrap_or_else(|| {
@@ -144,6 +157,28 @@ fn generate_html_viewer(
         data.patterns.sequential_ratio * 100.0
     );
     eprintln!("Prefetch score:  {:.1}%", data.prefetch.prediction_hit_rate);
+
+    // Print cursor stats if available
+    if data.cursor_data.has_data {
+        eprintln!("\n=== Cursor Operations ===");
+        eprintln!("Total ops:       {}", data.cursor_data.summary.total_ops);
+        eprintln!(
+            "Op rate:         {:.1}/s",
+            data.cursor_data.summary.op_rate_per_sec
+        );
+        eprintln!(
+            "Avg latency:     {:.1} μs",
+            data.cursor_data.summary.avg_latency_us
+        );
+        eprintln!(
+            "P99 latency:     {:.1} μs",
+            data.cursor_data.summary.p99_latency_us
+        );
+        eprintln!(
+            "Seek ratio:      {:.1}%",
+            data.cursor_data.summary.seek_ratio
+        );
+    }
 
     eprintln!("\nViewer written to: {}", output_path.display());
 

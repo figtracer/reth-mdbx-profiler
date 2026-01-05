@@ -1,11 +1,11 @@
 //! Web-based trace viewer
 //!
 //! Generates a self-contained HTML file with interactive visualizations
-//! for MDBX page fault traces.
+//! for MDBX page fault traces and cursor operations.
 
 mod template;
 
-use crate::event::PageFaultEvent;
+use crate::event::{dbi_to_table_name, CursorEvent, PageFaultEvent};
 use crate::mdbx_metadata::{PageAttribution, RethTable};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -30,6 +30,77 @@ pub struct ViewerData {
     pub prefetch: PrefetchAnalysis,
     /// Heatmap data (2D grid)
     pub heatmap: HeatmapData,
+    /// Cursor operation data
+    pub cursor_data: CursorData,
+}
+
+/// Cursor operation statistics
+#[derive(Debug, Serialize, Default)]
+pub struct CursorData {
+    /// Whether cursor data is available
+    pub has_data: bool,
+    /// Summary statistics
+    pub summary: CursorSummary,
+    /// Operations by type
+    pub operations: Vec<OperationStats>,
+    /// Table access statistics
+    pub table_stats: Vec<CursorTableStats>,
+    /// Timeline of cursor operations
+    pub timeline: Vec<CursorTimelinePoint>,
+    /// Sample of recent operations for the log view
+    pub recent_ops: Vec<CursorOpSample>,
+}
+
+#[derive(Debug, Serialize, Default)]
+pub struct CursorSummary {
+    pub total_ops: u64,
+    pub op_rate_per_sec: f64,
+    pub avg_latency_us: f64,
+    pub p50_latency_us: f64,
+    pub p99_latency_us: f64,
+    pub seek_count: u64,
+    pub seek_ratio: f64,
+    pub nav_count: u64,
+    pub error_count: u64,
+    pub duration_secs: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OperationStats {
+    pub name: String,
+    pub count: u64,
+    pub percentage: f64,
+    pub avg_latency_us: f64,
+    pub is_seek: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CursorTableStats {
+    pub dbi: u32,
+    pub name: String,
+    pub ops: u64,
+    pub percentage: f64,
+    pub seeks: u64,
+    pub navs: u64,
+    pub avg_latency_us: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CursorTimelinePoint {
+    pub time_ms: u64,
+    pub ops: u32,
+    pub seeks: u32,
+    pub avg_latency_us: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CursorOpSample {
+    pub timestamp_ms: u64,
+    pub table: String,
+    pub operation: String,
+    pub key_hex: String,
+    pub latency_us: f64,
+    pub success: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -127,9 +198,13 @@ pub struct HeatmapData {
 /// Generate viewer data from trace events
 pub fn generate_viewer_data(
     events: &[PageFaultEvent],
+    cursor_events: &[CursorEvent],
     attribution: Option<&PageAttribution>,
 ) -> ViewerData {
     let page_faults: Vec<_> = events.iter().filter(|e| e.event_type == 1).collect();
+
+    // Generate cursor data
+    let cursor_data = generate_cursor_data(cursor_events);
 
     if page_faults.is_empty() {
         return ViewerData {
@@ -177,6 +252,7 @@ pub fn generate_viewer_data(
                 data: vec![],
                 max_count: 0,
             },
+            cursor_data,
         };
     }
 
@@ -249,6 +325,205 @@ pub fn generate_viewer_data(
         patterns,
         prefetch,
         heatmap,
+        cursor_data,
+    }
+}
+
+/// Generate cursor operation statistics
+fn generate_cursor_data(events: &[CursorEvent]) -> CursorData {
+    if events.is_empty() {
+        return CursorData::default();
+    }
+
+    let total = events.len() as u64;
+
+    // Timing
+    let min_ts = events.iter().map(|e| e.timestamp_ns).min().unwrap();
+    let max_ts = events.iter().map(|e| e.timestamp_ns).max().unwrap();
+    let duration_ns = max_ts - min_ts;
+    let duration_secs = duration_ns as f64 / 1e9;
+
+    // Collect latencies for percentile calculation
+    let mut latencies: Vec<u64> = events.iter().map(|e| e.latency_ns).collect();
+    latencies.sort();
+
+    let p50_idx = (latencies.len() as f64 * 0.5) as usize;
+    let p99_idx = (latencies.len() as f64 * 0.99) as usize;
+
+    let total_latency: u64 = latencies.iter().sum();
+    let avg_latency_us = (total_latency as f64 / total as f64) / 1000.0;
+    let p50_latency_us = latencies.get(p50_idx).copied().unwrap_or(0) as f64 / 1000.0;
+    let p99_latency_us = latencies
+        .get(p99_idx.min(latencies.len() - 1))
+        .copied()
+        .unwrap_or(0) as f64
+        / 1000.0;
+
+    // Count by operation type
+    let mut op_counts: HashMap<String, (u64, u64)> = HashMap::new(); // (count, total_latency)
+    let mut seek_count = 0u64;
+    let mut nav_count = 0u64;
+    let mut error_count = 0u64;
+
+    // Count by DBI/table
+    let mut dbi_stats: HashMap<u32, (u64, u64, u64, u64)> = HashMap::new(); // (ops, seeks, navs, total_latency)
+
+    for event in events {
+        let op = event.cursor_op();
+        let op_name = op.to_string();
+
+        let entry = op_counts.entry(op_name).or_insert((0, 0));
+        entry.0 += 1;
+        entry.1 += event.latency_ns;
+
+        if op.is_seek() {
+            seek_count += 1;
+        }
+        if op.is_navigation() {
+            nav_count += 1;
+        }
+        if !event.is_success() && !event.is_not_found() {
+            error_count += 1;
+        }
+
+        // DBI stats
+        let dbi_entry = dbi_stats.entry(event.dbi).or_insert((0, 0, 0, 0));
+        dbi_entry.0 += 1;
+        if op.is_seek() {
+            dbi_entry.1 += 1;
+        }
+        if op.is_navigation() {
+            dbi_entry.2 += 1;
+        }
+        dbi_entry.3 += event.latency_ns;
+    }
+
+    // Build operation stats
+    let mut operations: Vec<OperationStats> = op_counts
+        .into_iter()
+        .map(|(name, (count, total_lat))| {
+            let is_seek = matches!(
+                name.as_str(),
+                "SET"
+                    | "SET_KEY"
+                    | "SET_RANGE"
+                    | "SET_LOWERBOUND"
+                    | "SET_UPPERBOUND"
+                    | "GET_BOTH"
+                    | "GET_BOTH_RANGE"
+            );
+            OperationStats {
+                name,
+                count,
+                percentage: count as f64 / total as f64 * 100.0,
+                avg_latency_us: (total_lat as f64 / count as f64) / 1000.0,
+                is_seek,
+            }
+        })
+        .collect();
+    operations.sort_by(|a, b| b.count.cmp(&a.count));
+
+    // Build table stats
+    let mut table_stats: Vec<CursorTableStats> = dbi_stats
+        .into_iter()
+        .map(|(dbi, (ops, seeks, navs, total_lat))| {
+            let name = if dbi < 100 {
+                dbi_to_table_name(dbi).to_string()
+            } else {
+                format!("Cursor_{:x}", dbi)
+            };
+            CursorTableStats {
+                dbi,
+                name,
+                ops,
+                percentage: ops as f64 / total as f64 * 100.0,
+                seeks,
+                navs,
+                avg_latency_us: (total_lat as f64 / ops as f64) / 1000.0,
+            }
+        })
+        .collect();
+    table_stats.sort_by(|a, b| b.ops.cmp(&a.ops));
+    table_stats.truncate(20);
+
+    // Generate timeline (bucket by 100ms)
+    let bucket_ns = 100_000_000u64; // 100ms
+    let num_buckets = ((duration_ns / bucket_ns) + 1) as usize;
+    let mut timeline_buckets: Vec<(u32, u32, u64)> = vec![(0, 0, 0); num_buckets.min(1000)];
+
+    for event in events {
+        let bucket_idx = ((event.timestamp_ns - min_ts) / bucket_ns) as usize;
+        if bucket_idx < timeline_buckets.len() {
+            timeline_buckets[bucket_idx].0 += 1;
+            if event.cursor_op().is_seek() {
+                timeline_buckets[bucket_idx].1 += 1;
+            }
+            timeline_buckets[bucket_idx].2 += event.latency_ns;
+        }
+    }
+
+    let timeline: Vec<CursorTimelinePoint> = timeline_buckets
+        .into_iter()
+        .enumerate()
+        .filter(|(_, (ops, _, _))| *ops > 0)
+        .map(|(i, (ops, seeks, total_lat))| CursorTimelinePoint {
+            time_ms: (i as u64 * bucket_ns) / 1_000_000,
+            ops,
+            seeks,
+            avg_latency_us: (total_lat as f64 / ops as f64) / 1000.0,
+        })
+        .collect();
+
+    // Sample recent operations for log view
+    let sample_size = 200.min(events.len());
+    let step = events.len() / sample_size.max(1);
+    let recent_ops: Vec<CursorOpSample> = events
+        .iter()
+        .step_by(step.max(1))
+        .take(sample_size)
+        .map(|e| {
+            let table_name = if e.dbi < 100 {
+                dbi_to_table_name(e.dbi).to_string()
+            } else {
+                format!("Cursor_{:x}", e.dbi)
+            };
+            CursorOpSample {
+                timestamp_ms: (e.timestamp_ns - min_ts) / 1_000_000,
+                table: table_name,
+                operation: e.cursor_op().to_string(),
+                key_hex: if e.key_size > 0 {
+                    format!("0x{}", e.key_hex())
+                } else {
+                    String::new()
+                },
+                latency_us: e.latency_ns as f64 / 1000.0,
+                success: e.is_success() || e.is_not_found(),
+            }
+        })
+        .collect();
+
+    CursorData {
+        has_data: true,
+        summary: CursorSummary {
+            total_ops: total,
+            op_rate_per_sec: if duration_secs > 0.0 {
+                total as f64 / duration_secs
+            } else {
+                0.0
+            },
+            avg_latency_us,
+            p50_latency_us,
+            p99_latency_us,
+            seek_count,
+            seek_ratio: seek_count as f64 / total as f64 * 100.0,
+            nav_count,
+            error_count,
+            duration_secs,
+        },
+        operations,
+        table_stats,
+        timeline,
+        recent_ops,
     }
 }
 
