@@ -34,12 +34,12 @@ we correlate page faults with cursor operations using **thread id + timestamp ma
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│ thread 1234                                                      │
-│                                                                  │
+│ thread 1234                                                     │
+│                                                                 │
 │  cursor_get(HashedStorages) ─────────────────────>              │
-│  [start]                    [fault!]              [end]          │
-│  t=1000                     t=1050               t=1200          │
-│                                                                  │
+│  [start]                    [fault!]              [end]         │
+│  t=1000                     t=1050               t=1200         │
+│                                                                 │
 │  the fault at t=1050 is attributed to HashedStorages            │
 └─────────────────────────────────────────────────────────────────┘
 ```

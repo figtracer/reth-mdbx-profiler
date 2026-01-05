@@ -76,31 +76,6 @@ generate interactive html visualizations from traces:
 
 the analyzer runs on macos/linux without ebpf - collect traces on your node and analyze locally.
 
-## how table attribution works
-
-mdbx stores all tables interleaved in a single file - you can't map file offsets directly to tables. we solve this by correlating page faults with cursor operations:
-
-1. **page faults** are captured with: `timestamp_ns`, `tid`, `file_offset`
-2. **cursor operations** are captured with: `timestamp_ns`, `tid`, `dbi` (table id), `latency_ns`
-
-for each page fault, we find cursor operations on the **same thread** where the fault timestamp falls within the cursor's execution window:
-
-```
-cursor_start <= fault_timestamp <= cursor_start + latency
-```
-
-if a fault occurs while thread 1234 is inside `mdbx_cursor_get()` on HashedStorages, that fault is attributed to HashedStorages.
-
-### why --process-name matters
-
-when using `--pid`, if you restart reth, the profiler keeps filtering for the old pid. cursors opened before tracing started can't be attributed to tables (they show as "pre-trace cursors").
-
-with `--process-name`:
-1. start the profiler first
-2. restart your node
-3. the profiler detects the new pid and captures all cursor opens from the start
-4. 100% of cursor operations can be attributed to tables
-
 ## example output
 
 ```
