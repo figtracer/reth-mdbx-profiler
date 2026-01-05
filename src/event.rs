@@ -327,6 +327,7 @@ impl<'de> Deserialize<'de> for CursorEvent {
             key_size: helper.key_size,
             key_data,
             return_code: helper.return_code,
+            _pad: 0,
             latency_ns: helper.latency_ns,
         })
     }
