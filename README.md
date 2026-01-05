@@ -29,7 +29,7 @@ trace page faults and cursor operations on mdbx regions.
 
 ```bash
 # using process name (recommended - survives process restarts)
-sudo ./target/release/mdbx-profiler trace \
+./target/release/mdbx-profiler trace \
     --process-name reth \
     --mdbx-path /data/reth/db/mdbx.dat \
     --duration 60s \
@@ -38,7 +38,7 @@ sudo ./target/release/mdbx-profiler trace \
     --reth-binary /path/to/reth
 
 # using pid (if you know it won't restart)
-sudo ./target/release/mdbx-profiler trace \
+./target/release/mdbx-profiler trace \
     --pid $(pgrep reth) \
     --mdbx-path /data/reth/db/mdbx.dat \
     --duration 30s \
