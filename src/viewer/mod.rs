@@ -32,6 +32,8 @@ pub struct ViewerData {
     pub heatmap: HeatmapData,
     /// Cursor operation data
     pub cursor_data: CursorData,
+    /// Warning about page fault attribution method
+    pub page_fault_attribution_warning: Option<String>,
 }
 
 /// Cursor operation statistics
@@ -181,6 +183,10 @@ pub struct TableStats {
     pub faults: u64,
     pub major_faults: u64,
     pub percentage: f64,
+    /// Whether this table had actual cursor operations (true = real data, false = proportional estimate)
+    pub has_cursor_ops: bool,
+    /// Number of cursor operations on this table (0 if no cursor data)
+    pub cursor_ops: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -254,6 +260,21 @@ pub fn generate_viewer_data(
     // Generate cursor data
     let cursor_data = generate_cursor_data(cursor_events);
 
+    // Build a set of tables that have cursor operations (by name)
+    let tables_with_ops: std::collections::HashSet<String> = cursor_data
+        .table_stats
+        .iter()
+        .filter(|t| t.ops > 0)
+        .map(|t| t.name.clone())
+        .collect();
+
+    // Build a map of table name -> cursor ops count
+    let cursor_ops_by_table: HashMap<String, u64> = cursor_data
+        .table_stats
+        .iter()
+        .map(|t| (t.name.clone(), t.ops))
+        .collect();
+
     if page_faults.is_empty() {
         return ViewerData {
             summary: TraceSummary {
@@ -301,6 +322,7 @@ pub fn generate_viewer_data(
                 max_count: 0,
             },
             cursor_data,
+            page_fault_attribution_warning: None,
         };
     }
 
@@ -346,8 +368,13 @@ pub fn generate_viewer_data(
     // Generate timeline (bucket by 100ms intervals, sample if too many)
     let timeline = generate_timeline(&page_faults, min_ts, duration_ns);
 
-    // Table breakdown
-    let tables = generate_table_stats(&page_faults, attribution);
+    // Table breakdown - pass cursor ops info for accurate attribution
+    let (tables, page_fault_attribution_warning) = generate_table_stats(
+        &page_faults,
+        attribution,
+        &tables_with_ops,
+        &cursor_ops_by_table,
+    );
 
     // Thread distribution
     let threads = generate_thread_stats(&page_faults);
@@ -374,6 +401,7 @@ pub fn generate_viewer_data(
         prefetch,
         heatmap,
         cursor_data,
+        page_fault_attribution_warning,
     }
 }
 
@@ -841,13 +869,20 @@ fn generate_timeline(
 fn generate_table_stats(
     events: &[&PageFaultEvent],
     attribution: Option<&PageAttribution>,
-) -> Vec<TableStats> {
+    tables_with_ops: &std::collections::HashSet<String>,
+    cursor_ops_by_table: &HashMap<String, u64>,
+) -> (Vec<TableStats>, Option<String>) {
     // If we have mdbx_stat data, use proportion-based attribution
     // Since we can't map individual pages to tables, we distribute faults
     // proportionally based on each table's share of total pages
     if let Some(attr) = attribution {
         if let Some(mdbx_stats) = attr.get_mdbx_stats() {
-            return generate_table_stats_from_mdbx(events, mdbx_stats);
+            return generate_table_stats_from_mdbx(
+                events,
+                mdbx_stats,
+                tables_with_ops,
+                cursor_ops_by_table,
+            );
         }
     }
 
@@ -874,53 +909,138 @@ fn generate_table_stats(
     let total = events.len() as f64;
     let mut stats: Vec<_> = table_counts
         .into_iter()
-        .map(|(table, (faults, major))| TableStats {
-            name: table.to_string(),
-            category: table.category().to_string(),
-            faults,
-            major_faults: major,
-            percentage: faults as f64 / total * 100.0,
+        .map(|(table, (faults, major))| {
+            let name = table.to_string();
+            let ops = cursor_ops_by_table.get(&name).copied().unwrap_or(0);
+            TableStats {
+                name: name.clone(),
+                category: table.category().to_string(),
+                faults,
+                major_faults: major,
+                percentage: faults as f64 / total * 100.0,
+                has_cursor_ops: tables_with_ops.contains(&name),
+                cursor_ops: ops,
+            }
         })
         .collect();
 
     stats.sort_by(|a, b| b.faults.cmp(&a.faults));
-    stats
+    (stats, None)
 }
 
 /// Generate table stats using mdbx_stat proportions
-/// This distributes observed faults proportionally based on table sizes
+///
+/// When cursor operation data is available, only attribute faults to tables
+/// that were actually accessed. This prevents false positives from large tables
+/// (like TransactionHashNumbers) that weren't accessed during the trace.
 fn generate_table_stats_from_mdbx(
     events: &[&PageFaultEvent],
     mdbx_stats: &[crate::mdbx_metadata::MdbxStatOutput],
-) -> Vec<TableStats> {
+    tables_with_ops: &std::collections::HashSet<String>,
+    cursor_ops_by_table: &HashMap<String, u64>,
+) -> (Vec<TableStats>, Option<String>) {
     let total_faults = events.len() as u64;
     let major_faults = events.iter().filter(|e| e.is_major_fault()).count() as u64;
 
-    // Calculate total pages across all tables (excluding @main which is the root)
-    let total_pages: u64 = mdbx_stats
-        .iter()
-        .filter(|s| s.name != "@main")
-        .map(|s| s.total_pages)
-        .sum();
+    // Check if we have cursor operation data to filter by
+    let has_cursor_data = !tables_with_ops.is_empty();
+
+    // Calculate total pages - if we have cursor data, only count tables that were accessed
+    let (total_pages, filtered_tables): (u64, Vec<_>) = if has_cursor_data {
+        let filtered: Vec<_> = mdbx_stats
+            .iter()
+            .filter(|s| s.name != "@main" && tables_with_ops.contains(&s.name))
+            .collect();
+        let pages: u64 = filtered.iter().map(|s| s.total_pages).sum();
+        (pages, filtered)
+    } else {
+        let filtered: Vec<_> = mdbx_stats
+            .iter()
+            .filter(|s| s.name != "@main" && s.total_pages > 0)
+            .collect();
+        let pages: u64 = filtered.iter().map(|s| s.total_pages).sum();
+        (pages, filtered)
+    };
 
     if total_pages == 0 {
-        return vec![TableStats {
-            name: "Unknown".to_string(),
-            category: "Unknown".to_string(),
-            faults: total_faults,
-            major_faults,
-            percentage: 100.0,
-        }];
+        return (
+            vec![TableStats {
+                name: "Unknown".to_string(),
+                category: "Unknown".to_string(),
+                faults: total_faults,
+                major_faults,
+                percentage: 100.0,
+                has_cursor_ops: false,
+                cursor_ops: 0,
+            }],
+            None,
+        );
     }
 
-    let mut stats: Vec<_> = mdbx_stats
+    // Generate warning if we filtered out tables
+    let warning = if has_cursor_data {
+        let excluded_tables: Vec<_> = mdbx_stats
+            .iter()
+            .filter(|s| {
+                s.name != "@main" && s.total_pages > 0 && !tables_with_ops.contains(&s.name)
+            })
+            .collect();
+
+        if !excluded_tables.is_empty() {
+            let excluded_pages: u64 = excluded_tables.iter().map(|s| s.total_pages).sum();
+            let all_pages: u64 = mdbx_stats
+                .iter()
+                .filter(|s| s.name != "@main")
+                .map(|s| s.total_pages)
+                .sum();
+            let excluded_pct = excluded_pages as f64 / all_pages as f64 * 100.0;
+
+            // Get top 3 excluded tables by size
+            let mut excluded_sorted = excluded_tables.clone();
+            excluded_sorted.sort_by(|a, b| b.total_pages.cmp(&a.total_pages));
+            let top_excluded: Vec<_> = excluded_sorted
+                .iter()
+                .take(3)
+                .map(|s| {
+                    format!(
+                        "{} ({:.1}%)",
+                        s.name,
+                        s.total_pages as f64 / all_pages as f64 * 100.0
+                    )
+                })
+                .collect();
+
+            Some(format!(
+                "Page faults are attributed only to tables with cursor operations. \
+                 {} tables ({:.1}% of DB size) had no operations and were excluded: {}{}",
+                excluded_tables.len(),
+                excluded_pct,
+                top_excluded.join(", "),
+                if excluded_tables.len() > 3 {
+                    ", ..."
+                } else {
+                    ""
+                }
+            ))
+        } else {
+            None
+        }
+    } else {
+        Some(
+            "No cursor operation data available. Page faults are attributed proportionally \
+             by table size, which may not reflect actual access patterns."
+                .to_string(),
+        )
+    };
+
+    let mut stats: Vec<_> = filtered_tables
         .iter()
-        .filter(|s| s.name != "@main" && s.total_pages > 0)
         .map(|s| {
             let proportion = s.total_pages as f64 / total_pages as f64;
             let estimated_faults = (total_faults as f64 * proportion).round() as u64;
             let estimated_major = (major_faults as f64 * proportion).round() as u64;
             let table = RethTable::from_name(&s.name);
+            let ops = cursor_ops_by_table.get(&s.name).copied().unwrap_or(0);
 
             TableStats {
                 name: s.name.clone(),
@@ -928,12 +1048,14 @@ fn generate_table_stats_from_mdbx(
                 faults: estimated_faults,
                 major_faults: estimated_major,
                 percentage: proportion * 100.0,
+                has_cursor_ops: tables_with_ops.contains(&s.name),
+                cursor_ops: ops,
             }
         })
         .collect();
 
     stats.sort_by(|a, b| b.faults.cmp(&a.faults));
-    stats
+    (stats, warning)
 }
 
 fn generate_thread_stats(events: &[&PageFaultEvent]) -> Vec<ThreadStats> {
