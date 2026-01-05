@@ -109,6 +109,7 @@ pub fn generate_html(data: &ViewerData) -> String {
 
             <section id="tables" class="panel">
                 <h2>Table Breakdown</h2>
+                <div id="fault-attribution-warning" class="attribution-warning" style="display: none;"></div>
                 <div class="table-charts">
                     <div class="chart-container">
                         <canvas id="tables-pie-chart"></canvas>
@@ -617,6 +618,23 @@ body {
     grid-template-columns: 1fr 1fr;
     gap: 24px;
     margin-bottom: 24px;
+}
+
+.attribution-warning {
+    background: rgba(34, 197, 94, 0.1);
+    border: 1px solid rgba(34, 197, 94, 0.3);
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 16px;
+    color: #22c55e;
+    font-size: 14px;
+    line-height: 1.5;
+}
+
+.attribution-warning.warning {
+    background: rgba(251, 191, 36, 0.1);
+    border-color: rgba(251, 191, 36, 0.3);
+    color: #fbbf24;
 }
 
 .data-table {
@@ -1514,6 +1532,17 @@ function initHeatmap() {
 }
 
 function initTables() {
+    // Show attribution warning if present
+    if (DATA.page_fault_attribution_warning) {
+        const warningDiv = document.getElementById('fault-attribution-warning');
+        warningDiv.textContent = DATA.page_fault_attribution_warning;
+        warningDiv.style.display = 'block';
+        // Use warning style if correlation rate is low
+        if (DATA.page_fault_attribution_warning.includes('Could not correlate')) {
+            warningDiv.classList.add('warning');
+        }
+    }
+
     if (DATA.tables.length > 0) {
         const topTables = DATA.tables.slice(0, 10);
         const colors = ['#8b5cf6', '#6366f1', '#3b82f6', '#0ea5e9', '#06b6d4', '#14b8a6', '#10b981', '#84cc16', '#eab308', '#f59e0b'];
