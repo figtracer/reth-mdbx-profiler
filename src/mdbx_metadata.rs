@@ -765,6 +765,149 @@ pub fn estimate_table_from_pattern(
     RethTable::Unknown(0)
 }
 
+/// DBI to table name resolver
+///
+/// MDBX assigns DBI (Database Index) numbers dynamically when tables are opened.
+/// This struct helps map DBI numbers to Reth table names.
+///
+/// The typical DBI assignment order in Reth (may vary by version):
+/// - DBI 0: @main (MDBX internal main database)
+/// - DBI 1: @free (MDBX free list)
+/// - DBI 2+: User tables in order of first access
+///
+/// Since DBI assignment is dynamic, we provide:
+/// 1. A static mapping based on typical Reth table order
+/// 2. A runtime mechanism to learn DBI mappings from observed patterns
+#[derive(Debug, Clone, Default)]
+pub struct DbiResolver {
+    /// Known DBI to table name mappings
+    dbi_to_table: std::collections::HashMap<u32, RethTable>,
+    /// Reverse mapping for lookups
+    table_to_dbi: std::collections::HashMap<RethTable, u32>,
+}
+
+impl DbiResolver {
+    /// Create a new DBI resolver with default Reth table order
+    ///
+    /// This is based on typical Reth initialization order, but may not be
+    /// accurate for all versions or configurations.
+    pub fn new_with_defaults() -> Self {
+        let mut resolver = Self::default();
+
+        // MDBX internal tables
+        resolver.add_mapping(0, RethTable::MdbxMainDb);
+        resolver.add_mapping(1, RethTable::MdbxFreeList);
+
+        // Reth tables - order based on typical initialization
+        // This order may vary by Reth version
+        let reth_tables = [
+            RethTable::CanonicalHeaders,
+            RethTable::HeaderTerminalDifficulties,
+            RethTable::HeaderNumbers,
+            RethTable::Headers,
+            RethTable::BlockBodyIndices,
+            RethTable::BlockOmmers,
+            RethTable::BlockWithdrawals,
+            RethTable::Transactions,
+            RethTable::TransactionHashNumbers,
+            RethTable::TransactionBlocks,
+            RethTable::Receipts,
+            RethTable::TransactionSenders,
+            RethTable::PlainAccountState,
+            RethTable::PlainStorageState,
+            RethTable::Bytecodes,
+            RethTable::AccountsHistory,
+            RethTable::StoragesHistory,
+            RethTable::AccountChangeSets,
+            RethTable::StorageChangeSets,
+            RethTable::HashedAccounts,
+            RethTable::HashedStorages,
+            RethTable::AccountsTrie,
+            RethTable::StoragesTrie,
+            RethTable::AccountsTrieChangeSets,
+            RethTable::StoragesTrieChangeSets,
+            RethTable::StageCheckpoints,
+            RethTable::StageCheckpointProgresses,
+            RethTable::PruneCheckpoints,
+            RethTable::VersionHistory,
+            RethTable::ChainState,
+            RethTable::Metadata,
+        ];
+
+        for (i, table) in reth_tables.iter().enumerate() {
+            resolver.add_mapping((i + 2) as u32, *table);
+        }
+
+        resolver
+    }
+
+    /// Add a DBI to table mapping
+    pub fn add_mapping(&mut self, dbi: u32, table: RethTable) {
+        self.dbi_to_table.insert(dbi, table);
+        self.table_to_dbi.insert(table, dbi);
+    }
+
+    /// Get table name for a DBI
+    pub fn get_table(&self, dbi: u32) -> Option<RethTable> {
+        self.dbi_to_table.get(&dbi).copied()
+    }
+
+    /// Get table name as string for a DBI
+    pub fn get_table_name(&self, dbi: u32) -> String {
+        self.dbi_to_table
+            .get(&dbi)
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| format!("DBI_{}", dbi))
+    }
+
+    /// Get DBI for a table
+    pub fn get_dbi(&self, table: RethTable) -> Option<u32> {
+        self.table_to_dbi.get(&table).copied()
+    }
+
+    /// Load DBI mappings from mdbx_stat output
+    ///
+    /// mdbx_stat -a lists tables in DBI order, so we can use this to
+    /// build an accurate mapping.
+    pub fn from_mdbx_stat(stats: &[MdbxStatOutput]) -> Self {
+        let mut resolver = Self::default();
+
+        for (i, stat) in stats.iter().enumerate() {
+            let table = RethTable::from_name(&stat.name);
+            resolver.add_mapping(i as u32, table);
+        }
+
+        resolver
+    }
+
+    /// Try to infer table from key pattern
+    ///
+    /// Some tables have distinctive key patterns that can help identify them:
+    /// - HashedAccounts: 32-byte keys (keccak256 of address)
+    /// - AccountsTrie: Variable length nibble paths
+    /// - PlainAccountState: 20-byte keys (raw address)
+    pub fn infer_table_from_key(&self, key: &[u8]) -> Option<RethTable> {
+        match key.len() {
+            20 => Some(RethTable::PlainAccountState), // Raw 20-byte address
+            32 => {
+                // Could be HashedAccounts (32-byte hash) or storage keys
+                // HashedAccounts keys start with hash of address
+                Some(RethTable::HashedAccounts)
+            }
+            52 => {
+                // HashedStorages: 32-byte hashed address + 20-byte storage key?
+                // Or it could be other compound keys
+                Some(RethTable::HashedStorages)
+            }
+            _ if key.len() < 20 => {
+                // Short keys are often trie nodes (nibble paths)
+                Some(RethTable::AccountsTrie)
+            }
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -798,5 +941,21 @@ mod tests {
 
         assert_eq!(attr.get_table(100), Some(RethTable::AccountsTrie));
         assert_eq!(attr.get_table(1500), Some(RethTable::PlainAccountState));
+    }
+
+    #[test]
+    fn test_dbi_resolver() {
+        let resolver = DbiResolver::new_with_defaults();
+
+        // Check MDBX internal tables
+        assert_eq!(resolver.get_table(0), Some(RethTable::MdbxMainDb));
+        assert_eq!(resolver.get_table(1), Some(RethTable::MdbxFreeList));
+
+        // Check some Reth tables
+        assert!(resolver.get_table(2).is_some());
+
+        // Check unknown DBI
+        assert!(resolver.get_table(100).is_none());
+        assert_eq!(resolver.get_table_name(100), "DBI_100");
     }
 }

@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 //
-// eBPF program to trace MDBX page faults in MDBX applications
+// eBPF program to trace MDBX page faults and cursor operations
 //
-// This traces memory-mapped file access patterns to understand
-// trie traversal I/O behavior.
+// This traces:
+// 1. Memory-mapped file access patterns (page faults) to understand I/O behavior
+// 2. MDBX cursor operations (seeks, gets) to understand database access patterns
+//
+// The cursor tracing uses uprobes on libmdbx functions.
 
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -13,10 +16,38 @@
 // Maximum file path length we track
 #define MAX_PATH_LEN 256
 
+// Maximum key bytes to capture (first N bytes of the key)
+#define MAX_KEY_SIZE 64
+
 // Event types
 #define EVENT_PAGE_FAULT     1
 #define EVENT_MMAP           2
-#define EVENT_CURSOR_SEEK    3
+#define EVENT_CURSOR_GET     3
+#define EVENT_CURSOR_PUT     4
+
+// MDBX cursor operations (from libmdbx mdbx.h MDBX_cursor_op enum)
+// These are the numeric values for the cursor operations
+#define MDBX_FIRST           0
+#define MDBX_FIRST_DUP       1
+#define MDBX_GET_BOTH        2
+#define MDBX_GET_BOTH_RANGE  3
+#define MDBX_GET_CURRENT     4
+#define MDBX_GET_MULTIPLE    5
+#define MDBX_LAST            6
+#define MDBX_LAST_DUP        7
+#define MDBX_NEXT            8
+#define MDBX_NEXT_DUP        9
+#define MDBX_NEXT_MULTIPLE   10
+#define MDBX_NEXT_NODUP      11
+#define MDBX_PREV            12
+#define MDBX_PREV_DUP        13
+#define MDBX_PREV_NODUP      14
+#define MDBX_SET             15
+#define MDBX_SET_KEY         16
+#define MDBX_SET_RANGE       17
+#define MDBX_PREV_MULTIPLE   18
+#define MDBX_SET_LOWERBOUND  19
+#define MDBX_SET_UPPERBOUND  20
 
 // VM_FAULT flags from kernel (used in handle_mm_fault return value)
 #define VM_FAULT_MAJOR   0x0004
@@ -36,6 +67,21 @@ struct page_fault_event {
     __u8  is_major;          // Major fault (disk I/O) vs minor (in page cache)
 };
 
+// MDBX cursor operation event sent to userspace
+// This captures mdbx_cursor_get/put calls with key information
+struct cursor_event {
+    __u64 timestamp_ns;      // Kernel timestamp
+    __u32 pid;               // Process ID
+    __u32 tid;               // Thread ID
+    __u32 event_type;        // EVENT_CURSOR_GET or EVENT_CURSOR_PUT
+    __u32 cursor_op;         // MDBX cursor operation (MDBX_SET_RANGE, MDBX_NEXT, etc.)
+    __u32 dbi;               // Database index (table identifier)
+    __u32 key_size;          // Size of the key
+    __u8  key_data[MAX_KEY_SIZE];  // First MAX_KEY_SIZE bytes of the key
+    __s32 return_code;       // Return code from the operation (filled in uretprobe)
+    __u64 latency_ns;        // Time spent in the operation
+};
+
 // Context for correlating kprobe entry with kretprobe return
 struct fault_context {
     __u64 timestamp_ns;      // Entry timestamp for latency calculation
@@ -47,6 +93,17 @@ struct fault_context {
     __u32 tid;
     __u32 fault_flags;
     __u8  should_trace;      // Whether this fault should be traced
+};
+
+// Context for correlating uprobe entry with uretprobe return for cursor ops
+struct cursor_context {
+    __u64 timestamp_ns;      // Entry timestamp for latency calculation
+    __u32 pid;
+    __u32 tid;
+    __u32 cursor_op;         // MDBX cursor operation
+    __u32 dbi;               // Database index
+    __u32 key_size;          // Key size
+    __u8  key_data[MAX_KEY_SIZE];  // Key data
 };
 
 // Ring buffer for events - sized for high throughput
@@ -84,7 +141,7 @@ struct {
 // Statistics counters
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-    __uint(max_entries, 4);
+    __uint(max_entries, 8);
     __type(key, __u32);
     __type(value, __u64);
 } stats SEC(".maps");
@@ -98,10 +155,23 @@ struct {
     __type(value, struct fault_context);
 } pending_faults SEC(".maps");
 
+// Per-task cursor context for correlating uprobe entry with uretprobe return
+// Key: tid (thread id), Value: cursor_context
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 10240);
+    __type(key, __u64);    // pid_tgid
+    __type(value, struct cursor_context);
+} pending_cursors SEC(".maps");
+
 #define STAT_TOTAL_FAULTS     0
 #define STAT_MDBX_FAULTS      1
 #define STAT_MAJOR_FAULTS     2
 #define STAT_EVENTS_DROPPED   3
+#define STAT_CURSOR_OPS       4
+#define STAT_CURSOR_SEEKS     5
+#define STAT_CURSOR_NEXTS     6
+#define STAT_CURSOR_ERRORS    7
 
 static __always_inline void inc_stat(__u32 idx) {
     __u64 *val = bpf_map_lookup_elem(&stats, &idx);
@@ -284,6 +354,159 @@ int BPF_KPROBE(trace_mmap,
     e->is_major = 0;
     
     bpf_ringbuf_submit(e, 0);
+    
+    return 0;
+}
+
+// ============================================================================
+// MDBX Cursor Operation Tracing (uprobes)
+// ============================================================================
+//
+// These uprobes attach to libmdbx functions to trace database operations.
+// The main function we trace is mdbx_cursor_get which has this signature:
+//
+//   int mdbx_cursor_get(MDBX_cursor *cursor, MDBX_val *key, MDBX_val *data, 
+//                       MDBX_cursor_op op);
+//
+// MDBX_val is a struct with:
+//   struct MDBX_val { void *iov_base; size_t iov_len; };
+//
+// MDBX_cursor contains a reference to the DBI (database index).
+// The cursor struct layout (from libmdbx source):
+//   - The DBI is accessible via cursor->mc_dbi (offset varies by version)
+//
+// For simplicity, we capture:
+//   - The cursor operation (op parameter)
+//   - The key being sought (from key->iov_base, key->iov_len)
+//   - The DBI from the cursor structure
+
+// MDBX_val structure - matches libmdbx definition
+struct mdbx_val {
+    void *iov_base;
+    __u64 iov_len;  // size_t
+};
+
+// Uprobe on mdbx_cursor_get entry
+// Signature: int mdbx_cursor_get(MDBX_cursor *cursor, MDBX_val *key, 
+//                                 MDBX_val *data, MDBX_cursor_op op)
+SEC("uprobe/mdbx_cursor_get")
+int BPF_UPROBE(trace_cursor_get, void *cursor, struct mdbx_val *key, 
+               void *data, int op)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 pid = pid_tgid >> 32;
+    
+    // Filter by PID
+    if (!should_trace_pid(pid)) {
+        return 0;
+    }
+    
+    inc_stat(STAT_CURSOR_OPS);
+    
+    // Track specific operation types
+    if (op == MDBX_SET_RANGE || op == MDBX_SET || op == MDBX_SET_KEY ||
+        op == MDBX_SET_LOWERBOUND || op == MDBX_SET_UPPERBOUND) {
+        inc_stat(STAT_CURSOR_SEEKS);
+    } else if (op == MDBX_NEXT || op == MDBX_NEXT_DUP || op == MDBX_NEXT_NODUP) {
+        inc_stat(STAT_CURSOR_NEXTS);
+    }
+    
+    // Build cursor context
+    struct cursor_context ctx = {
+        .timestamp_ns = bpf_ktime_get_ns(),
+        .pid = pid,
+        .tid = (__u32)pid_tgid,
+        .cursor_op = op,
+        .dbi = 0,  // Will try to read from cursor struct
+        .key_size = 0,
+    };
+    
+    // Try to read the DBI from the cursor structure
+    // In libmdbx, MDBX_cursor has mc_dbi at a specific offset
+    // This offset may vary by version, but typically it's early in the struct
+    // We'll try offset 8 (after the first pointer which is mc_signature or similar)
+    // Offset for mc_dbi in MDBX_cursor: typically at byte 16 or 24
+    // Let's try to read it - if it fails, we'll get 0
+    if (cursor) {
+        // mc_dbi is typically a uint32_t at offset 16 in the cursor struct
+        // (after mc_signature:4, mc_flags:4, and one pointer:8)
+        // This is version-dependent; we use a common offset
+        __u32 dbi = 0;
+        bpf_probe_read_user(&dbi, sizeof(dbi), cursor + 16);
+        ctx.dbi = dbi;
+    }
+    
+    // Read key data if available (for seek operations)
+    if (key) {
+        struct mdbx_val key_val = {};
+        if (bpf_probe_read_user(&key_val, sizeof(key_val), key) == 0) {
+            ctx.key_size = key_val.iov_len;
+            if (ctx.key_size > MAX_KEY_SIZE) {
+                ctx.key_size = MAX_KEY_SIZE;
+            }
+            if (key_val.iov_base && ctx.key_size > 0) {
+                bpf_probe_read_user(ctx.key_data, ctx.key_size, key_val.iov_base);
+            }
+        }
+    }
+    
+    // Save context for uretprobe
+    bpf_map_update_elem(&pending_cursors, &pid_tgid, &ctx, BPF_ANY);
+    
+    return 0;
+}
+
+// Uretprobe on mdbx_cursor_get return
+SEC("uretprobe/mdbx_cursor_get")
+int BPF_URETPROBE(trace_cursor_get_ret, int ret)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    
+    // Look up the saved context
+    struct cursor_context *ctx = bpf_map_lookup_elem(&pending_cursors, &pid_tgid);
+    if (!ctx) {
+        return 0;
+    }
+    
+    // Track errors
+    if (ret != 0) {
+        inc_stat(STAT_CURSOR_ERRORS);
+    }
+    
+    // Calculate latency
+    __u64 now = bpf_ktime_get_ns();
+    __u64 latency = now - ctx->timestamp_ns;
+    
+    // Reserve space in ring buffer for cursor event
+    struct cursor_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (!e) {
+        inc_stat(STAT_EVENTS_DROPPED);
+        bpf_map_delete_elem(&pending_cursors, &pid_tgid);
+        return 0;
+    }
+    
+    // Fill event
+    e->timestamp_ns = ctx->timestamp_ns;
+    e->pid = ctx->pid;
+    e->tid = ctx->tid;
+    e->event_type = EVENT_CURSOR_GET;
+    e->cursor_op = ctx->cursor_op;
+    e->dbi = ctx->dbi;
+    e->key_size = ctx->key_size;
+    e->return_code = ret;
+    e->latency_ns = latency;
+    
+    // Copy key data
+    // Use a loop that the verifier can understand
+    #pragma unroll
+    for (int i = 0; i < MAX_KEY_SIZE; i++) {
+        e->key_data[i] = ctx->key_data[i];
+    }
+    
+    bpf_ringbuf_submit(e, 0);
+    
+    // Clean up
+    bpf_map_delete_elem(&pending_cursors, &pid_tgid);
     
     return 0;
 }

@@ -5,7 +5,7 @@
 # Generated files
 *.jsonl
 bpf/vmlinux.h
-
+.issues
 # IDE
 .idea/
 .vscode/
