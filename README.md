@@ -11,7 +11,6 @@ ebpf-based profiler for analyzing mdbx page fault patterns in reth.
 ## setup
 
 ```bash
-sudo ./scripts/setup-node.sh
 cargo build --release
 ```
 
