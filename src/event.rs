@@ -215,7 +215,7 @@ impl PageFaultEvent {
 ///
 /// This struct must match the layout of cursor_event in mdbx_tracer.bpf.c exactly
 #[repr(C)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct CursorEvent {
     /// Kernel timestamp in nanoseconds
     pub timestamp_ns: u64,
@@ -237,6 +237,72 @@ pub struct CursorEvent {
     pub return_code: i32,
     /// Time spent in the operation (nanoseconds)
     pub latency_ns: u64,
+}
+
+// Custom Serialize implementation for CursorEvent since [u8; 64] doesn't impl Serialize
+impl Serialize for CursorEvent {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("CursorEvent", 10)?;
+        state.serialize_field("timestamp_ns", &self.timestamp_ns)?;
+        state.serialize_field("pid", &self.pid)?;
+        state.serialize_field("tid", &self.tid)?;
+        state.serialize_field("event_type", &self.event_type)?;
+        state.serialize_field("cursor_op", &self.cursor_op)?;
+        state.serialize_field("dbi", &self.dbi)?;
+        state.serialize_field("key_size", &self.key_size)?;
+        // Serialize key_data as hex string for readability
+        state.serialize_field("key_data", &self.key_hex())?;
+        state.serialize_field("return_code", &self.return_code)?;
+        state.serialize_field("latency_ns", &self.latency_ns)?;
+        state.end()
+    }
+}
+
+// Custom Deserialize implementation for CursorEvent
+impl<'de> Deserialize<'de> for CursorEvent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct CursorEventHelper {
+            timestamp_ns: u64,
+            pid: u32,
+            tid: u32,
+            event_type: u32,
+            cursor_op: u32,
+            dbi: u32,
+            key_size: u32,
+            key_data: String, // Hex string
+            return_code: i32,
+            latency_ns: u64,
+        }
+
+        let helper = CursorEventHelper::deserialize(deserializer)?;
+
+        let mut key_data = [0u8; MAX_KEY_SIZE];
+        if let Ok(bytes) = hex::decode(&helper.key_data) {
+            let len = bytes.len().min(MAX_KEY_SIZE);
+            key_data[..len].copy_from_slice(&bytes[..len]);
+        }
+
+        Ok(CursorEvent {
+            timestamp_ns: helper.timestamp_ns,
+            pid: helper.pid,
+            tid: helper.tid,
+            event_type: helper.event_type,
+            cursor_op: helper.cursor_op,
+            dbi: helper.dbi,
+            key_size: helper.key_size,
+            key_data,
+            return_code: helper.return_code,
+            latency_ns: helper.latency_ns,
+        })
+    }
 }
 
 impl CursorEvent {

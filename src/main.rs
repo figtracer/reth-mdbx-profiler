@@ -19,7 +19,7 @@ use tracing::{debug, info, warn};
 mod event;
 mod mdbx;
 
-use event::{CursorEvent, PageFaultEvent, MAX_KEY_SIZE};
+use event::{CursorEvent, PageFaultEvent};
 
 /// eBPF profiler for MDBX page fault patterns and cursor operations
 #[derive(Parser)]
@@ -186,20 +186,6 @@ fn find_libmdbx_path(pid: u32) -> Option<PathBuf> {
     None
 }
 
-/// Attach uprobe to a function in a binary
-fn attach_uprobe(
-    prog: &mut ProgramMut,
-    pid: i32,
-    binary_path: &PathBuf,
-    func_name: &str,
-    is_retprobe: bool,
-) -> anyhow::Result<libbpf_rs::Link> {
-    // For uprobes, we need to find the function offset in the binary
-    // We'll use the function name directly and let libbpf resolve it
-    let link = prog.attach_uprobe(is_retprobe, pid, binary_path, 0)?;
-    Ok(link)
-}
-
 /// Find the offset of a symbol in a binary using nm or objdump
 fn find_symbol_offset(binary_path: &PathBuf, symbol: &str) -> Option<u64> {
     // Try nm first
@@ -257,7 +243,7 @@ fn run_trace(
 
     // Configure target PID
     {
-        let mut config_map = obj
+        let config_map = obj
             .maps_mut()
             .find(|m| m.name().to_string_lossy() == "profiler_config")
             .expect("profiler_config map not found");
@@ -268,7 +254,7 @@ fn run_trace(
 
     // Register MDBX inode for tracking
     {
-        let mut tracked_inodes = obj
+        let tracked_inodes = obj
             .maps_mut()
             .find(|m| m.name().to_string_lossy() == "tracked_inodes")
             .expect("tracked_inodes map not found");
@@ -526,7 +512,7 @@ fn run_cursor_trace(
 
     // Configure target PID
     {
-        let mut config_map = obj
+        let config_map = obj
             .maps_mut()
             .find(|m| m.name().to_string_lossy() == "profiler_config")
             .expect("profiler_config map not found");
