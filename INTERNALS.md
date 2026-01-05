@@ -64,12 +64,13 @@ this gives us accurate per-table attribution for faults that occur during cursor
 
 ### correlation rate
 
-typically 50-70% of faults can be correlated. the remainder are:
+typically 50-70% of faults can be correlated. the remainder are faults from the same process that occur outside cursor get operation windows:
 
-- **kernel readahead/prefetch**: linux speculatively reads ahead, causing faults outside cursor windows
-- **mmap page-ins**: initial page mappings before cursor operations
-- **background i/o**: faults in non-cursor code paths
-- **cursor open/close overhead**: faults during setup, not during get operations
+- **cursor open/close**: we only time `mdbx_cursor_get`, not setup/teardown. faults during `mdbx_cursor_open` aren't correlated
+- **transaction begin/commit**: mdbx transaction operations touch pages but we don't trace them
+- **write operations**: we trace reads (`mdbx_cursor_get`, `mdbx_get`) but not writes (`mdbx_cursor_put`, `mdbx_put`)
+- **between cursor operations**: faults while reth processes results between cursor calls
+- **kernel readahead**: when reth touches a page, linux may prefetch nearby pages asynchronously
 
 ## ebpf tracer (bpf/mdbx_tracer.bpf.c)
 
@@ -516,12 +517,9 @@ under extreme load, the ring buffer may fill before userspace can drain it. the 
 
 ### correlation coverage
 
-not all page faults can be correlated:
-- kernel prefetch/readahead
-- faults during cursor open/close
-- faults in non-cursor code paths
+not all page faults can be correlated. we only trace `mdbx_cursor_get` and `mdbx_get` - faults during other operations (cursor open/close, transaction begin/commit, writes) won't be attributed to tables.
 
-expect 50-70% correlation rate in typical workloads.
+expect 50-70% correlation rate in typical workloads. this can be improved by adding tracing for write operations and transaction management.
 
 ## building the bpf program
 

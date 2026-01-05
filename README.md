@@ -115,7 +115,7 @@ PlainStorageState  State         20.7K     5.1K      5.9%
 AccountsTrie       Trie          18.5K     3.4K      5.3%
 ```
 
-the ~40% uncorrelated faults are kernel readahead/prefetch, background mmap page-ins, or faults outside cursor windows.
+the ~40% uncorrelated faults occur outside cursor operation windows - during transaction begin/commit, cursor open/close, write operations, or kernel readahead triggered by reth's access patterns.
 
 ## known limitations
 
