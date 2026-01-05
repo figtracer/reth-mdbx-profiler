@@ -236,9 +236,10 @@ fn run_trace(
         let name = prog.name().to_string_lossy().to_string();
         let section = prog.section().to_string_lossy().to_string();
 
-        // Skip uprobe programs (cursor tracing) unless trace_cursors is enabled
+        // Skip uprobe programs (cursor/direct get tracing) unless trace_cursors is enabled
         // Check both program name and section name
-        let is_uprobe = section.contains("uprobe") || name.contains("cursor");
+        let is_uprobe =
+            section.contains("uprobe") || name.contains("cursor") || name.contains("direct_get");
         if is_uprobe && !trace_cursors {
             debug!("Skipping cursor probe: {} (section: {})", name, section);
             continue;
