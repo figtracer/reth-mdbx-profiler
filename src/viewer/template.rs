@@ -25,7 +25,6 @@ pub fn generate_html(data: &ViewerData) -> String {
             <button class="tab" data-tab="heatmap">Heatmap</button>
             <button class="tab" data-tab="tables">Tables</button>
             <button class="tab" data-tab="threads">Threads</button>
-            <button class="tab" data-tab="hotpages">Hot Pages</button>
             <button class="tab" data-tab="patterns">Patterns</button>
             <button class="tab" data-tab="prefetch">Prefetch</button>
             <button class="tab" data-tab="cursors">Cursor Ops</button>
@@ -143,30 +142,6 @@ pub fn generate_html(data: &ViewerData) -> String {
                             <th>Thread ID</th>
                             <th>Faults</th>
                             <th>%</th>
-                        </tr>
-                    </thead>
-                    <tbody></tbody>
-                </table>
-            </section>
-
-            <section id="hotpages" class="panel">
-                <h2>Hot Pages (Most Accessed)</h2>
-                <div class="filter-bar">
-                    <input type="text" id="page-filter" placeholder="Filter by table name...">
-                    <select id="page-sort">
-                        <option value="accesses">Sort by Accesses</option>
-                        <option value="major">Sort by Major Faults</option>
-                        <option value="offset">Sort by Offset</option>
-                    </select>
-                </div>
-                <table class="data-table" id="hotpages-table">
-                    <thead>
-                        <tr>
-                            <th>Page #</th>
-                            <th>Offset (GB)</th>
-                            <th>Accesses</th>
-                            <th>Major</th>
-                            <th>Table</th>
                         </tr>
                     </thead>
                     <tbody></tbody>
@@ -1432,9 +1407,7 @@ function initTab(tabName) {
         case 'threads':
             initThreads();
             break;
-        case 'hotpages':
-            initHotPages();
-            break;
+
         case 'patterns':
             initPatterns();
             break;
@@ -1598,44 +1571,6 @@ function initThreads() {
             tbody.appendChild(row);
         });
     }
-}
-
-function initHotPages() {
-    let hotPagesData = [...DATA.hot_pages];
-
-    function renderHotPages() {
-        const filter = document.getElementById('page-filter').value.toLowerCase();
-        const sort = document.getElementById('page-sort').value;
-
-        let filtered = hotPagesData.filter(p =>
-            p.table.toLowerCase().includes(filter) ||
-            p.page_number.toString().includes(filter)
-        );
-
-        if (sort === 'accesses') filtered.sort((a, b) => b.accesses - a.accesses);
-        else if (sort === 'major') filtered.sort((a, b) => b.major_faults - a.major_faults);
-        else if (sort === 'offset') filtered.sort((a, b) => a.page_number - b.page_number);
-
-        const tbody = document.querySelector('#hotpages-table tbody');
-        tbody.innerHTML = '';
-        filtered.slice(0, 100).forEach((p, i) => {
-            const row = document.createElement('tr');
-            const heatColor = p.major_faults > 0 ? `rgba(248, 113, 113, ${Math.min(p.major_faults / 100, 0.3)})` : 'transparent';
-            row.style.background = heatColor;
-            row.innerHTML = `
-                <td>${p.page_number.toLocaleString()}</td>
-                <td>${p.offset_gb.toFixed(4)}</td>
-                <td>${formatNumber(p.accesses)}</td>
-                <td style="color: ${p.major_faults > 0 ? '#f87171' : '#34d399'}">${formatNumber(p.major_faults)}</td>
-                <td>${p.table}</td>
-            `;
-            tbody.appendChild(row);
-        });
-    }
-
-    document.getElementById('page-filter').addEventListener('input', renderHotPages);
-    document.getElementById('page-sort').addEventListener('change', renderHotPages);
-    renderHotPages();
 }
 
 function initPatterns() {

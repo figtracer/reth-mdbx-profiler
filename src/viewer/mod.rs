@@ -138,8 +138,7 @@ pub struct ViewerData {
     pub tables: Vec<TableStats>,
     /// Thread distribution
     pub threads: Vec<ThreadStats>,
-    /// Hot pages
-    pub hot_pages: Vec<HotPage>,
+
     /// Access pattern analysis
     pub patterns: PatternAnalysis,
     /// Prefetch analysis
@@ -315,15 +314,6 @@ pub struct ThreadStats {
 }
 
 #[derive(Debug, Serialize)]
-pub struct HotPage {
-    pub page_number: u64,
-    pub offset_gb: f64,
-    pub accesses: u64,
-    pub table: String,
-    pub major_faults: u64,
-}
-
-#[derive(Debug, Serialize)]
 pub struct PatternAnalysis {
     pub sequential_ratio: f64,
     pub random_ratio: f64,
@@ -411,7 +401,7 @@ pub fn generate_viewer_data(
             timeline: vec![],
             tables: vec![],
             threads: vec![],
-            hot_pages: vec![],
+
             patterns: PatternAnalysis {
                 sequential_ratio: 0.0,
                 random_ratio: 0.0,
@@ -501,7 +491,6 @@ pub fn generate_viewer_data(
     let threads = generate_thread_stats(&page_faults);
 
     // Hot pages
-    let hot_pages = generate_hot_pages(&page_faults, attribution);
 
     // Pattern analysis
     let patterns = analyze_patterns(&page_faults);
@@ -517,7 +506,7 @@ pub fn generate_viewer_data(
         timeline,
         tables,
         threads,
-        hot_pages,
+
         patterns,
         prefetch,
         heatmap,
@@ -1263,87 +1252,6 @@ fn generate_thread_stats(events: &[&PageFaultEvent]) -> Vec<ThreadStats> {
     stats.sort_by(|a, b| b.faults.cmp(&a.faults));
     stats.truncate(20); // Top 20 threads
     stats
-}
-
-fn generate_hot_pages(
-    events: &[&PageFaultEvent],
-    attribution: Option<&PageAttribution>,
-) -> Vec<HotPage> {
-    let mut page_stats: HashMap<u64, (u64, u64)> = HashMap::new();
-    let page_size = attribution.map(|a| a.page_size()).unwrap_or(4096);
-
-    // Get table proportions if available for probabilistic assignment
-    let table_proportions: Vec<(String, f64)> = attribution
-        .and_then(|a| a.get_mdbx_stats())
-        .map(|stats| {
-            let total: u64 = stats
-                .iter()
-                .filter(|s| s.name != "@main")
-                .map(|s| s.total_pages)
-                .sum();
-            if total == 0 {
-                return vec![];
-            }
-            stats
-                .iter()
-                .filter(|s| s.name != "@main" && s.total_pages > 0)
-                .map(|s| (s.name.clone(), s.total_pages as f64 / total as f64))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    for e in events {
-        let page = e.page_number();
-        let entry = page_stats.entry(page).or_insert((0, 0));
-        entry.0 += 1;
-        if e.is_major_fault() {
-            entry.1 += 1;
-        }
-    }
-
-    let mut hot_pages: Vec<_> = page_stats
-        .into_iter()
-        .map(|(page, (accesses, major))| {
-            let offset = page * 4096;
-
-            // Determine table name
-            let table_name = if let Some(attr) = attribution {
-                let table = attr.get_table(page).unwrap_or(RethTable::Unknown(0));
-                if matches!(table, RethTable::Unknown(_)) && !table_proportions.is_empty() {
-                    // Use deterministic assignment based on page number for consistency
-                    // Pick table based on page position in the distribution
-                    let hash = (page as f64 / 1000.0).fract();
-                    let mut cumulative = 0.0;
-                    let mut assigned = "Unknown".to_string();
-                    for (name, prop) in &table_proportions {
-                        cumulative += prop;
-                        if hash < cumulative {
-                            assigned = name.clone();
-                            break;
-                        }
-                    }
-                    assigned
-                } else {
-                    table.to_string()
-                }
-            } else {
-                crate::mdbx_metadata::estimate_table_from_pattern(offset, page_size, 0, None)
-                    .to_string()
-            };
-
-            HotPage {
-                page_number: page,
-                offset_gb: offset as f64 / 1e9,
-                accesses,
-                table: table_name,
-                major_faults: major,
-            }
-        })
-        .collect();
-
-    hot_pages.sort_by(|a, b| b.accesses.cmp(&a.accesses));
-    hot_pages.truncate(100); // Top 100 hot pages
-    hot_pages
 }
 
 fn analyze_patterns(events: &[&PageFaultEvent]) -> PatternAnalysis {
