@@ -455,9 +455,62 @@ int BPF_UPROBE(trace_cursor_get, void *cursor, struct mdbx_val *key,
         if (dbi_ptr) {
             cctx.dbi = *dbi_ptr;
         } else {
-            // Fallback: use lower 32 bits of cursor address for grouping
-            // This happens if cursor was opened before tracing started
-            cctx.dbi = (__u32)(cursor_addr & 0xFFFFFFFF);
+            // Cursor was opened before tracing started - try to read DBI from struct
+            // MDBX_cursor layout (libmdbx 0.12+):
+            //   offset 0:  int32_t signature
+            //   offset 4:  int16_t top_and_flags  
+            //   offset 6:  uint8_t checking
+            //   offset 7:  uint8_t pad
+            //   offset 8:  uint8_t* dbi_state
+            //   offset 16: MDBX_txn* txn
+            // 
+            // MDBX_txn layout:
+            //   offset 0:  int32_t signature
+            //   offset 4:  uint32_t flags
+            //   offset 8:  size_t n_dbi
+            //   ... (varies by config)
+            //   dbi_state is typically at offset 104-120 depending on build options
+            //
+            // DBI = cursor->dbi_state - cursor->txn->dbi_state
+            // This is fragile, so we try it but fall back to a sentinel value
+            
+            __u64 cursor_dbi_state = 0;
+            __u64 txn_ptr = 0;
+            __u64 txn_dbi_state = 0;
+            
+            // Read cursor->dbi_state (offset 8)
+            if (bpf_probe_read_user(&cursor_dbi_state, sizeof(cursor_dbi_state), 
+                                    (void *)(cursor_addr + 8)) == 0 && cursor_dbi_state != 0) {
+                // Read cursor->txn (offset 16)
+                if (bpf_probe_read_user(&txn_ptr, sizeof(txn_ptr),
+                                        (void *)(cursor_addr + 16)) == 0 && txn_ptr != 0) {
+                    // Try common offsets for txn->dbi_state: 104, 112, 120, 88
+                    // These vary based on libmdbx build options (MDBX_ENABLE_DBI_SPARSE, etc.)
+                    #pragma unroll
+                    for (int offset_idx = 0; offset_idx < 4; offset_idx++) {
+                        __u64 try_offset = (offset_idx == 0) ? 104 : 
+                                           (offset_idx == 1) ? 112 : 
+                                           (offset_idx == 2) ? 120 : 88;
+                        if (bpf_probe_read_user(&txn_dbi_state, sizeof(txn_dbi_state),
+                                                (void *)(txn_ptr + try_offset)) == 0) {
+                            // Validate: dbi_state should point into txn's dbi_state array
+                            // and DBI should be reasonable (< 256)
+                            if (txn_dbi_state != 0 && cursor_dbi_state >= txn_dbi_state) {
+                                __u64 computed_dbi = cursor_dbi_state - txn_dbi_state;
+                                if (computed_dbi < 256) {
+                                    cctx.dbi = (__u32)computed_dbi;
+                                    goto dbi_found;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Could not determine DBI - use sentinel value 0xFFFFFFFE
+            // This will show up as "Unknown" in the analyzer
+            cctx.dbi = 0xFFFFFFFE;
+            dbi_found:;
         }
     }
     

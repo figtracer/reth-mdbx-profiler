@@ -5,7 +5,7 @@
 
 mod template;
 
-use crate::event::{dbi_to_table_name, CursorEvent, PageFaultEvent};
+use crate::event::{dbi_to_table_name, is_pre_trace_cursor, CursorEvent, PageFaultEvent};
 use crate::mdbx_metadata::{PageAttribution, RethTable};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -53,6 +53,10 @@ pub struct CursorData {
     pub slow_ops_by_table: Vec<SlowOpsTableStats>,
     /// Slow keys - frequently accessed keys with high latency
     pub slow_keys: Vec<SlowKeyStats>,
+    /// Count of operations from cursors opened before tracing started
+    pub pre_trace_cursor_ops: u64,
+    /// Warning message if many cursors were opened before tracing
+    pub pre_trace_warning: Option<String>,
 }
 
 /// Statistics for slow operations (>100μs) per table
@@ -404,11 +408,16 @@ fn generate_cursor_data(events: &[CursorEvent]) -> CursorData {
     let mut seek_count = 0u64;
     let mut nav_count = 0u64;
     let mut error_count = 0u64;
+    let mut pre_trace_cursor_ops = 0u64;
 
     // Count by DBI/table
     let mut dbi_stats: HashMap<u32, (u64, u64, u64, u64)> = HashMap::new(); // (ops, seeks, navs, total_latency)
 
     for event in events {
+        // Track pre-trace cursor operations
+        if is_pre_trace_cursor(event.dbi) {
+            pre_trace_cursor_ops += 1;
+        }
         let op = event.cursor_op();
         let op_name = op.to_string();
 
@@ -463,26 +472,47 @@ fn generate_cursor_data(events: &[CursorEvent]) -> CursorData {
         .collect();
     operations.sort_by(|a, b| b.count.cmp(&a.count));
 
-    // Build table stats
-    let mut table_stats: Vec<CursorTableStats> = dbi_stats
+    // Build table stats - group pre-trace cursors together
+    let mut pre_trace_total: (u64, u64, u64, u64) = (0, 0, 0, 0);
+    let mut known_dbi_stats: HashMap<u32, (u64, u64, u64, u64)> = HashMap::new();
+
+    for (dbi, stats) in dbi_stats {
+        if is_pre_trace_cursor(dbi) {
+            pre_trace_total.0 += stats.0;
+            pre_trace_total.1 += stats.1;
+            pre_trace_total.2 += stats.2;
+            pre_trace_total.3 += stats.3;
+        } else {
+            known_dbi_stats.insert(dbi, stats);
+        }
+    }
+
+    let mut table_stats: Vec<CursorTableStats> = known_dbi_stats
         .into_iter()
-        .map(|(dbi, (ops, seeks, navs, total_lat))| {
-            let name = if dbi < 100 {
-                dbi_to_table_name(dbi).to_string()
-            } else {
-                format!("Cursor_{:x}", dbi)
-            };
-            CursorTableStats {
-                dbi,
-                name,
-                ops,
-                percentage: ops as f64 / total as f64 * 100.0,
-                seeks,
-                navs,
-                avg_latency_us: (total_lat as f64 / ops as f64) / 1000.0,
-            }
+        .map(|(dbi, (ops, seeks, navs, total_lat))| CursorTableStats {
+            dbi,
+            name: dbi_to_table_name(dbi).to_string(),
+            ops,
+            percentage: ops as f64 / total as f64 * 100.0,
+            seeks,
+            navs,
+            avg_latency_us: (total_lat as f64 / ops as f64) / 1000.0,
         })
         .collect();
+
+    // Add pre-trace cursors as a single group if any exist
+    if pre_trace_total.0 > 0 {
+        table_stats.push(CursorTableStats {
+            dbi: 0xFFFFFFFF,
+            name: "Unknown (pre-trace cursors)".to_string(),
+            ops: pre_trace_total.0,
+            percentage: pre_trace_total.0 as f64 / total as f64 * 100.0,
+            seeks: pre_trace_total.1,
+            navs: pre_trace_total.2,
+            avg_latency_us: (pre_trace_total.3 as f64 / pre_trace_total.0 as f64) / 1000.0,
+        });
+    }
+
     table_stats.sort_by(|a, b| b.ops.cmp(&a.ops));
     table_stats.truncate(20);
 
@@ -687,6 +717,20 @@ fn generate_cursor_data(events: &[CursorEvent]) -> CursorData {
     slow_keys.sort_by(|a, b| b.slow_access_count.cmp(&a.slow_access_count));
     slow_keys.truncate(50); // Top 50 slow keys
 
+    // Generate warning if significant portion of ops are from pre-trace cursors
+    let pre_trace_ratio = pre_trace_cursor_ops as f64 / total as f64;
+    let pre_trace_warning = if pre_trace_ratio > 0.1 {
+        Some(format!(
+            "Warning: {:.1}% of cursor operations ({}) are from cursors opened before tracing started. \
+             These cannot be attributed to specific tables. To capture all cursors, start tracing \
+             before the application opens its database, or restart the application after tracing begins.",
+            pre_trace_ratio * 100.0,
+            pre_trace_cursor_ops
+        ))
+    } else {
+        None
+    };
+
     CursorData {
         has_data: true,
         summary: CursorSummary {
@@ -711,6 +755,8 @@ fn generate_cursor_data(events: &[CursorEvent]) -> CursorData {
         recent_ops,
         slow_ops_by_table,
         slow_keys,
+        pre_trace_cursor_ops,
+        pre_trace_warning,
     }
 }
 

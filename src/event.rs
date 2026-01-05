@@ -14,6 +14,15 @@ use serde::{Deserialize, Serialize};
 /// tables, this will be wrong. Verify against your reth version's tables/mod.rs.
 ///
 /// Last verified against: reth main branch (2025-01)
+/// Sentinel value for cursors opened before tracing started where DBI couldn't be determined
+pub const DBI_UNKNOWN_SENTINEL: u32 = 0xFFFFFFFE;
+
+/// Check if a DBI value represents a cursor opened before tracing
+/// (either our sentinel or a memory address used as fallback)
+pub fn is_pre_trace_cursor(dbi: u32) -> bool {
+    dbi == DBI_UNKNOWN_SENTINEL || dbi > 100
+}
+
 pub fn dbi_to_table_name(dbi: u32) -> &'static str {
     match dbi {
         0 => "FREE_DBI (internal)",
@@ -49,6 +58,8 @@ pub fn dbi_to_table_name(dbi: u32) -> &'static str {
         30 => "VersionHistory",
         31 => "ChainState",
         32 => "Metadata",
+        DBI_UNKNOWN_SENTINEL => "Unknown (pre-trace cursor)",
+        _ if dbi > 100 => "Unknown (pre-trace cursor)",
         _ => "Unknown",
     }
 }
