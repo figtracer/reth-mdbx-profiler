@@ -69,6 +69,9 @@ struct page_fault_event {
 
 // MDBX cursor operation event sent to userspace
 // This captures mdbx_cursor_get/put calls with key information
+// Layout (112 bytes total on x86_64):
+//   timestamp_ns: 0, pid: 8, tid: 12, event_type: 16, cursor_op: 20,
+//   dbi: 24, key_size: 28, key_data: 32, return_code: 96, _pad: 100, latency_ns: 104
 struct cursor_event {
     __u64 timestamp_ns;      // Kernel timestamp
     __u32 pid;               // Process ID
@@ -79,6 +82,7 @@ struct cursor_event {
     __u32 key_size;          // Size of the key
     __u8  key_data[MAX_KEY_SIZE];  // First MAX_KEY_SIZE bytes of the key
     __s32 return_code;       // Return code from the operation (filled in uretprobe)
+    __u32 _pad;              // Explicit padding for u64 alignment
     __u64 latency_ns;        // Time spent in the operation
 };
 
@@ -494,6 +498,7 @@ int BPF_URETPROBE(trace_cursor_get_ret, int ret)
     e->dbi = cctx->dbi;
     e->key_size = cctx->key_size;
     e->return_code = ret;
+    e->_pad = 0;
     e->latency_ns = latency;
     
     // Copy key data

@@ -368,20 +368,55 @@ fn run_trace(
 
     ring_builder.add(&events_map, move |data: &[u8]| {
         // Check event type to determine which struct to use
-        // Event type is at different offsets for different structs
-        // PageFaultEvent: offset 40 (after timestamp, address, file_offset, vma_start, vma_end)
-        // CursorEvent: offset 16 (after timestamp, pid, tid)
+        // Struct layouts (from C compiler on x86_64 Linux):
+        // PageFaultEvent: event_type at offset 48 (after 5x u64 + 2x u32)
+        // CursorEvent: event_type at offset 16 (after u64 + 2x u32)
+        //
+        // PageFaultEvent is 72 bytes, CursorEvent is 112 bytes
+        // We differentiate by checking event_type at both possible offsets
 
-        if data.len() >= std::mem::size_of::<PageFaultEvent>() {
-            // Try to read event type at PageFaultEvent offset
-            let event_type = if data.len() >= 44 {
-                u32::from_ne_bytes(data[40..44].try_into().unwrap_or([0; 4]))
-            } else {
-                0
-            };
+        const PAGE_FAULT_EVENT_SIZE: usize = 72;
+        const CURSOR_EVENT_SIZE: usize = 112;
+        const PAGE_FAULT_EVENT_TYPE_OFFSET: usize = 48;
+        const CURSOR_EVENT_TYPE_OFFSET: usize = 16;
 
-            if event_type == 1 || event_type == 2 {
-                // Page fault or mmap event
+        if data.len() < CURSOR_EVENT_TYPE_OFFSET + 4 {
+            return 0;
+        }
+
+        // First, try to read event_type at cursor event offset (16)
+        // This works for both structs since PageFaultEvent is larger
+        let cursor_event_type = u32::from_ne_bytes(
+            data[CURSOR_EVENT_TYPE_OFFSET..CURSOR_EVENT_TYPE_OFFSET + 4]
+                .try_into()
+                .unwrap_or([0; 4]),
+        );
+
+        // Check if this is a cursor event (event_type 3 or 4 at offset 16)
+        if (cursor_event_type == 3 || cursor_event_type == 4) && data.len() >= CURSOR_EVENT_SIZE {
+            let event: CursorEvent =
+                unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CursorEvent) };
+
+            cursor_count_clone.fetch_add(1, Ordering::Relaxed);
+
+            if let Ok(json) = serde_json::to_string(&event) {
+                use std::io::Write;
+                if let Ok(mut w) = writer_clone.lock() {
+                    let _ = writeln!(w, "{}", json);
+                }
+            }
+            return 0;
+        }
+
+        // Check if this is a page fault event (event_type 1 or 2 at offset 48)
+        if data.len() >= PAGE_FAULT_EVENT_SIZE {
+            let page_fault_event_type = u32::from_ne_bytes(
+                data[PAGE_FAULT_EVENT_TYPE_OFFSET..PAGE_FAULT_EVENT_TYPE_OFFSET + 4]
+                    .try_into()
+                    .unwrap_or([0; 4]),
+            );
+
+            if page_fault_event_type == 1 || page_fault_event_type == 2 {
                 let event: PageFaultEvent =
                     unsafe { std::ptr::read_unaligned(data.as_ptr() as *const PageFaultEvent) };
 
@@ -391,21 +426,6 @@ fn run_trace(
                     use std::io::Write;
                     if let Ok(mut w) = writer_clone.lock() {
                         let _ = writeln!(w, "{}", json);
-                    }
-                }
-            } else if event_type == 3 || event_type == 4 {
-                // Cursor event - need to read from different struct layout
-                if data.len() >= std::mem::size_of::<CursorEvent>() {
-                    let event: CursorEvent =
-                        unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CursorEvent) };
-
-                    cursor_count_clone.fetch_add(1, Ordering::Relaxed);
-
-                    if let Ok(json) = serde_json::to_string(&event) {
-                        use std::io::Write;
-                        if let Ok(mut w) = writer_clone.lock() {
-                            let _ = writeln!(w, "{}", json);
-                        }
                     }
                 }
             }

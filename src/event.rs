@@ -145,7 +145,20 @@ impl std::fmt::Display for CursorOp {
 
 /// Page fault event from BPF
 ///
-/// This struct must match the layout in mdbx_tracer.bpf.c exactly
+/// This struct must match the layout in mdbx_tracer.bpf.c exactly.
+/// Layout on x86_64 Linux (72 bytes total):
+///   - timestamp_ns: offset 0, size 8
+///   - address: offset 8, size 8
+///   - file_offset: offset 16, size 8
+///   - vma_start: offset 24, size 8
+///   - vma_end: offset 32, size 8
+///   - pid: offset 40, size 4
+///   - tid: offset 44, size 4
+///   - event_type: offset 48, size 4
+///   - fault_flags: offset 52, size 4
+///   - latency_ns: offset 56, size 8
+///   - is_major: offset 64, size 1
+///   - padding: offset 65, size 7 (for 8-byte alignment)
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct PageFaultEvent {
@@ -171,7 +184,7 @@ pub struct PageFaultEvent {
     pub latency_ns: u64,
     /// Major fault (disk I/O) vs minor (in page cache)
     pub is_major: u8,
-    // Padding to match C struct alignment
+    // Padding to match C struct alignment (7 bytes to reach 72 total)
     pub _pad: [u8; 7],
 }
 
@@ -213,7 +226,19 @@ impl PageFaultEvent {
 
 /// MDBX cursor operation event from BPF
 ///
-/// This struct must match the layout of cursor_event in mdbx_tracer.bpf.c exactly
+/// This struct must match the layout of cursor_event in mdbx_tracer.bpf.c exactly.
+/// Layout on x86_64 Linux (112 bytes total):
+///   - timestamp_ns: offset 0, size 8
+///   - pid: offset 8, size 4
+///   - tid: offset 12, size 4
+///   - event_type: offset 16, size 4
+///   - cursor_op: offset 20, size 4
+///   - dbi: offset 24, size 4
+///   - key_size: offset 28, size 4
+///   - key_data: offset 32, size 64
+///   - return_code: offset 96, size 4
+///   - padding: offset 100, size 4 (implicit for u64 alignment)
+///   - latency_ns: offset 104, size 8
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct CursorEvent {
@@ -235,6 +260,8 @@ pub struct CursorEvent {
     pub key_data: [u8; MAX_KEY_SIZE],
     /// Return code from the operation
     pub return_code: i32,
+    /// Explicit padding for u64 alignment (to match C struct layout)
+    pub _pad: u32,
     /// Time spent in the operation (nanoseconds)
     pub latency_ns: u64,
 }
