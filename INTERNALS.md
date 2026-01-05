@@ -28,16 +28,6 @@ the profiler uses ebpf to trace memory-mapped file accesses in the linux kernel.
 
 mdbx stores all tables in a single file (mdbx.dat) as interleaved b+ tree pages. unlike databases with separate files per table, you **cannot** map a file offset directly to a table - page 1000 might belong to HashedStorages, page 1001 to AccountsTrie.
 
-### why proportional estimation fails
-
-an early approach was to attribute faults proportionally by table size:
-
-```
-table_faults = total_faults × (table_pages / total_pages)
-```
-
-this is **wrong**. a table that's 32% of disk gets 32% of faults attributed, even if it was never accessed. we discovered this when TransactionHashNumbers (32% of disk) showed 32% of faults despite having 0 cursor operations.
-
 ### the solution: timestamp correlation
 
 we correlate page faults with cursor operations using **thread id + timestamp matching**:
