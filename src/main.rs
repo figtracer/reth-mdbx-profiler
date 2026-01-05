@@ -186,22 +186,35 @@ fn find_libmdbx_path(pid: u32) -> Option<PathBuf> {
     None
 }
 
-/// Find the offset of a symbol in a binary using nm or objdump
+/// Find the offset of a symbol in a binary using nm
 fn find_symbol_offset(binary_path: &PathBuf, symbol: &str) -> Option<u64> {
-    // Try nm first
-    let output = std::process::Command::new("nm")
-        .arg("-D")
-        .arg(binary_path)
-        .output()
-        .ok()?;
+    // Try nm with regular symbols first (for statically linked binaries)
+    for nm_flag in &[&[] as &[&str], &["-D"]] {
+        let mut cmd = std::process::Command::new("nm");
+        for flag in *nm_flag {
+            cmd.arg(flag);
+        }
+        cmd.arg(binary_path);
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    for line in stdout.lines() {
-        if line.contains(symbol) && !line.contains("@@") {
-            // Format: "0000000000123456 T symbol_name"
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 3 && parts[2] == symbol {
-                return u64::from_str_radix(parts[0], 16).ok();
+        let output = match cmd.output() {
+            Ok(o) => o,
+            Err(_) => continue,
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            if line.contains(symbol) && !line.contains("@@") {
+                // Format: "0000000000123456 T symbol_name"
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 3 && parts[2] == symbol {
+                    if let Some(offset) = u64::from_str_radix(parts[0], 16).ok() {
+                        debug!(
+                            "Found symbol {} at offset 0x{:x} using nm {:?}",
+                            symbol, offset, nm_flag
+                        );
+                        return Some(offset);
+                    }
+                }
             }
         }
     }
@@ -310,7 +323,8 @@ fn run_trace(
 
                 match find_symbol_offset(&binary, func_name) {
                     Some(offset) => {
-                        let is_ret = name.contains("uretprobe");
+                        // Check both section name and program name for return probe
+                        let is_ret = section.contains("uretprobe") || name.ends_with("_ret");
                         match prog.attach_uprobe(is_ret, pid as i32, &binary, offset as usize) {
                             Ok(link) => {
                                 info!("Attached {} at offset 0x{:x}", name, offset);
