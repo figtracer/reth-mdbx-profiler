@@ -42,7 +42,12 @@ impl MdbxFile {
             MdbxFileType::Data
         };
 
-        Ok(Self { path: path.to_path_buf(), inode, size, file_type })
+        Ok(Self {
+            path: path.to_path_buf(),
+            inode,
+            size,
+            file_type,
+        })
     }
 }
 
@@ -128,9 +133,21 @@ impl MmapRegion {
         let device = parts[3].to_string();
         let inode = parts[4].parse().ok()?;
 
-        let path = if parts.len() > 5 { Some(PathBuf::from(parts[5..].join(" "))) } else { None };
+        let path = if parts.len() > 5 {
+            Some(PathBuf::from(parts[5..].join(" ")))
+        } else {
+            None
+        };
 
-        Some(Self { start, end, permissions, offset, device, inode, path })
+        Some(Self {
+            start,
+            end,
+            permissions,
+            offset,
+            device,
+            inode,
+            path,
+        })
     }
 
     /// Check if this region is an MDBX data file
