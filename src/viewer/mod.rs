@@ -141,8 +141,6 @@ pub struct ViewerData {
 
     /// Access pattern analysis
     pub patterns: PatternAnalysis,
-    /// Prefetch analysis
-    pub prefetch: PrefetchAnalysis,
     /// Heatmap data (2D grid)
     pub heatmap: HeatmapData,
     /// Cursor operation data
@@ -317,8 +315,9 @@ pub struct ThreadStats {
 pub struct PatternAnalysis {
     pub sequential_ratio: f64,
     pub random_ratio: f64,
-    pub stride_distribution: Vec<StrideInfo>,
     pub burst_stats: BurstStats,
+    /// Top stride patterns for summary display
+    pub top_strides: Vec<StrideInfo>,
 }
 
 #[derive(Debug, Serialize)]
@@ -326,6 +325,7 @@ pub struct StrideInfo {
     pub stride_pages: i64,
     pub count: u64,
     pub pattern_type: String,
+    pub percentage: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -334,14 +334,6 @@ pub struct BurstStats {
     pub p95_events: u32,
     pub max_events: u32,
     pub bucket_ms: u64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct PrefetchAnalysis {
-    pub prediction_hit_rate: f64,
-    pub locality_score: f64,
-    pub recommendation: String,
-    pub prefetch_benefit_estimate: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -405,19 +397,13 @@ pub fn generate_viewer_data(
             patterns: PatternAnalysis {
                 sequential_ratio: 0.0,
                 random_ratio: 0.0,
-                stride_distribution: vec![],
                 burst_stats: BurstStats {
                     median_events: 0,
                     p95_events: 0,
                     max_events: 0,
                     bucket_ms: 100,
                 },
-            },
-            prefetch: PrefetchAnalysis {
-                prediction_hit_rate: 0.0,
-                locality_score: 0.0,
-                recommendation: "No data".to_string(),
-                prefetch_benefit_estimate: 0.0,
+                top_strides: vec![],
             },
             heatmap: HeatmapData {
                 time_buckets: 0,
@@ -495,9 +481,6 @@ pub fn generate_viewer_data(
     // Pattern analysis
     let patterns = analyze_patterns(&page_faults);
 
-    // Prefetch analysis
-    let prefetch = analyze_prefetch(&page_faults);
-
     // Heatmap
     let heatmap = generate_heatmap(&page_faults, min_ts, duration_ns, min_offset, max_offset);
 
@@ -508,7 +491,6 @@ pub fn generate_viewer_data(
         threads,
 
         patterns,
-        prefetch,
         heatmap,
         cursor_data,
         page_fault_attribution_warning,
@@ -1259,13 +1241,13 @@ fn analyze_patterns(events: &[&PageFaultEvent]) -> PatternAnalysis {
         return PatternAnalysis {
             sequential_ratio: 0.0,
             random_ratio: 0.0,
-            stride_distribution: vec![],
             burst_stats: BurstStats {
                 median_events: 0,
                 p95_events: 0,
                 max_events: 0,
                 bucket_ms: 100,
             },
+            top_strides: vec![],
         };
     }
 
@@ -1294,13 +1276,13 @@ fn analyze_patterns(events: &[&PageFaultEvent]) -> PatternAnalysis {
         0.0
     };
 
-    // Get top strides
+    // Get top strides for summary display
     let mut strides: Vec<_> = stride_counts.into_iter().collect();
     strides.sort_by(|a, b| b.1.cmp(&a.1));
 
-    let stride_distribution: Vec<_> = strides
+    let top_strides: Vec<_> = strides
         .into_iter()
-        .take(15)
+        .take(5) // Only top 5 for summary
         .map(|(stride, count)| {
             let pattern_type = match stride {
                 0 => "same-page",
@@ -1316,6 +1298,7 @@ fn analyze_patterns(events: &[&PageFaultEvent]) -> PatternAnalysis {
                 stride_pages: stride,
                 count,
                 pattern_type: pattern_type.to_string(),
+                percentage: count as f64 / total as f64 * 100.0,
             }
         })
         .collect();
@@ -1352,99 +1335,8 @@ fn analyze_patterns(events: &[&PageFaultEvent]) -> PatternAnalysis {
     PatternAnalysis {
         sequential_ratio,
         random_ratio: 1.0 - sequential_ratio,
-        stride_distribution,
         burst_stats,
-    }
-}
-
-fn analyze_prefetch(events: &[&PageFaultEvent]) -> PrefetchAnalysis {
-    if events.len() < 100 {
-        return PrefetchAnalysis {
-            prediction_hit_rate: 0.0,
-            locality_score: 0.0,
-            recommendation: "Not enough data for analysis".to_string(),
-            prefetch_benefit_estimate: 0.0,
-        };
-    }
-
-    // Stride-based prediction
-    let window_size = 10;
-    let lookahead = 5;
-    let mut correct_predictions = 0;
-    let mut total_predictions = 0;
-
-    for i in window_size..(events.len() - lookahead) {
-        let recent_strides: Vec<i64> = (0..window_size - 1)
-            .map(|j| {
-                events[i - window_size + j + 1].file_offset as i64
-                    - events[i - window_size + j].file_offset as i64
-            })
-            .collect();
-
-        let avg_stride: i64 = recent_strides.iter().sum::<i64>() / recent_strides.len() as i64;
-
-        let current_offset = events[i].file_offset;
-        let predictions: Vec<u64> = (1..=lookahead)
-            .map(|j| (current_offset as i64 + avg_stride * j as i64) as u64)
-            .collect();
-
-        let actual_offsets: Vec<u64> = (1..=lookahead).map(|j| events[i + j].file_offset).collect();
-
-        for pred in &predictions {
-            total_predictions += 1;
-            let pred_page = pred / 4096;
-            for actual in &actual_offsets {
-                let actual_page = actual / 4096;
-                if (pred_page as i64 - actual_page as i64).abs() <= 1 {
-                    correct_predictions += 1;
-                    break;
-                }
-            }
-        }
-    }
-
-    let hit_rate = if total_predictions > 0 {
-        correct_predictions as f64 / total_predictions as f64 * 100.0
-    } else {
-        0.0
-    };
-
-    // Locality analysis
-    let locality_window = 100;
-    let mut locality_scores: Vec<f64> = Vec::new();
-
-    for chunk in events.chunks(locality_window) {
-        let unique_pages: std::collections::HashSet<u64> =
-            chunk.iter().map(|e| e.page_number()).collect();
-        let locality = unique_pages.len() as f64 / chunk.len() as f64;
-        locality_scores.push(locality);
-    }
-
-    let avg_locality: f64 =
-        locality_scores.iter().sum::<f64>() / locality_scores.len().max(1) as f64;
-
-    let (recommendation, benefit) = if hit_rate > 30.0 {
-        (
-            "Good predictability - prefetching would significantly reduce page faults".to_string(),
-            hit_rate * 0.8,
-        )
-    } else if hit_rate > 15.0 {
-        (
-            "Moderate predictability - prefetching may help for some access patterns".to_string(),
-            hit_rate * 0.5,
-        )
-    } else {
-        (
-            "Poor predictability - consider larger page sizes, caching, or mlock()".to_string(),
-            hit_rate * 0.2,
-        )
-    };
-
-    PrefetchAnalysis {
-        prediction_hit_rate: hit_rate,
-        locality_score: 1.0 - avg_locality, // Invert so higher is better
-        recommendation,
-        prefetch_benefit_estimate: benefit,
+        top_strides,
     }
 }
 

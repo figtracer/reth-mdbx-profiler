@@ -26,7 +26,6 @@ pub fn generate_html(data: &ViewerData) -> String {
             <button class="tab" data-tab="tables">Tables</button>
             <button class="tab" data-tab="threads">Threads</button>
             <button class="tab" data-tab="patterns">Patterns</button>
-            <button class="tab" data-tab="prefetch">Prefetch</button>
             <button class="tab" data-tab="cursors">Cursor Ops</button>
         </nav>
 
@@ -160,10 +159,8 @@ pub fn generate_html(data: &ViewerData) -> String {
                         <div class="stat-value" id="rand-ratio"></div>
                     </div>
                 </div>
-                <h3>Stride Distribution</h3>
-                <div class="chart-container">
-                    <canvas id="stride-chart"></canvas>
-                </div>
+                <h3>Top Stride Patterns</h3>
+                <div class="stride-summary" id="stride-summary"></div>
                 <h3>Burst Analysis</h3>
                 <div class="burst-stats">
                     <div class="stat-card">
@@ -178,28 +175,6 @@ pub fn generate_html(data: &ViewerData) -> String {
                         <div class="stat-label">Max Events/Bucket</div>
                         <div class="stat-value" id="burst-max"></div>
                     </div>
-                </div>
-            </section>
-
-            <section id="prefetch" class="panel">
-                <h2>Prefetch Opportunity Analysis</h2>
-                <div class="prefetch-gauge">
-                    <div class="gauge-container">
-                        <canvas id="prefetch-gauge"></canvas>
-                        <div class="gauge-label">Prediction Hit Rate</div>
-                    </div>
-                    <div class="gauge-container">
-                        <canvas id="locality-gauge"></canvas>
-                        <div class="gauge-label">Locality Score</div>
-                    </div>
-                </div>
-                <div class="recommendation-box" id="recommendation">
-                </div>
-                <div class="prefetch-details">
-                    <h3>Details</h3>
-                    <p><strong>Hit Rate:</strong> <span id="hit-rate"></span></p>
-                    <p><strong>Locality Score:</strong> <span id="locality-score"></span></p>
-                    <p><strong>Estimated Benefit:</strong> <span id="prefetch-benefit"></span></p>
                 </div>
             </section>
 
@@ -710,73 +685,38 @@ body {
     flex: 1;
 }
 
-.prefetch-gauge {
-    display: flex;
-    justify-content: center;
-    gap: 80px;
-    margin-bottom: 40px;
-}
-
-.gauge-container {
-    text-align: center;
-}
-
-.gauge-container canvas {
-    width: 220px;
-    height: 220px;
-}
-
-.gauge-label {
-    margin-top: 15px;
-    color: #a1a1aa;
-    font-weight: 500;
-    font-size: 0.95em;
-}
-
-.recommendation-box {
-    background: #0a0a0f;
-    padding: 24px;
-    border-radius: 12px;
-    border-left: 4px solid #6366f1;
+.stride-summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
     margin-bottom: 24px;
-    line-height: 1.6;
 }
 
-.recommendation-box.good {
-    border-left-color: #34d399;
-    background: linear-gradient(135deg, rgba(52, 211, 153, 0.05) 0%, #0a0a0f 100%);
-}
-
-.recommendation-box.moderate {
-    border-left-color: #fbbf24;
-    background: linear-gradient(135deg, rgba(251, 191, 36, 0.05) 0%, #0a0a0f 100%);
-}
-
-.recommendation-box.poor {
-    border-left-color: #f87171;
-    background: linear-gradient(135deg, rgba(248, 113, 113, 0.05) 0%, #0a0a0f 100%);
-}
-
-.prefetch-details {
+.stride-item {
     background: #0a0a0f;
-    padding: 24px;
-    border-radius: 12px;
+    padding: 16px;
+    border-radius: 8px;
     border: 1px solid #252530;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
 }
 
-.prefetch-details h3 {
-    margin-bottom: 20px;
+.stride-item .stride-label {
+    font-size: 0.9em;
     color: #a1a1aa;
+}
+
+.stride-item .stride-value {
+    font-size: 1.1em;
     font-weight: 600;
-}
-
-.prefetch-details p {
-    margin-bottom: 12px;
-    color: #e4e4e7;
-}
-
-.prefetch-details strong {
     color: #6366f1;
+}
+
+.stride-item .stride-pct {
+    font-size: 0.85em;
+    color: #888;
+    margin-left: 8px;
 }
 
 h2 {
@@ -1411,9 +1351,6 @@ function initTab(tabName) {
         case 'patterns':
             initPatterns();
             break;
-        case 'prefetch':
-            initPrefetch();
-            break;
         case 'cursors':
             initCursors();
             break;
@@ -1577,37 +1514,25 @@ function initPatterns() {
     document.getElementById('seq-ratio').textContent = (DATA.patterns.sequential_ratio * 100).toFixed(1) + '%';
     document.getElementById('rand-ratio').textContent = (DATA.patterns.random_ratio * 100).toFixed(1) + '%';
 
-    if (DATA.patterns.stride_distribution.length > 0) {
-        charts.stride = new SimpleChart(document.getElementById('stride-chart'));
-        charts.stride.drawBar(
-            DATA.patterns.stride_distribution.map(s => s.stride_pages + ' pg'),
-            DATA.patterns.stride_distribution.map(s => s.count),
-            '#fbbf24',
-            { title: 'Stride Distribution (pages between consecutive accesses)' }
-        );
+    // Display top stride patterns as summary cards
+    const strideSummary = document.getElementById('stride-summary');
+    if (DATA.patterns.top_strides && DATA.patterns.top_strides.length > 0) {
+        DATA.patterns.top_strides.forEach(s => {
+            const item = document.createElement('div');
+            item.className = 'stride-item';
+            item.innerHTML = `
+                <span class="stride-label">${s.pattern_type} (${s.stride_pages} pg)</span>
+                <span><span class="stride-value">${formatNumber(s.count)}</span><span class="stride-pct">${s.percentage.toFixed(1)}%</span></span>
+            `;
+            strideSummary.appendChild(item);
+        });
+    } else {
+        strideSummary.innerHTML = '<div style="color:#888;padding:20px;text-align:center;">No stride data available</div>';
     }
 
     document.getElementById('burst-median').textContent = formatNumber(DATA.patterns.burst_stats.median_events);
     document.getElementById('burst-p95').textContent = formatNumber(DATA.patterns.burst_stats.p95_events);
     document.getElementById('burst-max').textContent = formatNumber(DATA.patterns.burst_stats.max_events);
-}
-
-function initPrefetch() {
-    charts.prefetchGauge = new SimpleChart(document.getElementById('prefetch-gauge'));
-    charts.prefetchGauge.drawGauge(DATA.prefetch.prediction_hit_rate, 100, '#6366f1');
-
-    charts.localityGauge = new SimpleChart(document.getElementById('locality-gauge'));
-    charts.localityGauge.drawGauge(DATA.prefetch.locality_score * 100, 100, '#34d399');
-
-    const recBox = document.getElementById('recommendation');
-    recBox.innerHTML = `<strong>Recommendation:</strong> ${DATA.prefetch.recommendation}`;
-    if (DATA.prefetch.prediction_hit_rate > 30) recBox.classList.add('good');
-    else if (DATA.prefetch.prediction_hit_rate > 15) recBox.classList.add('moderate');
-    else recBox.classList.add('poor');
-
-    document.getElementById('hit-rate').textContent = DATA.prefetch.prediction_hit_rate.toFixed(1) + '%';
-    document.getElementById('locality-score').textContent = (DATA.prefetch.locality_score * 100).toFixed(1) + '%';
-    document.getElementById('prefetch-benefit').textContent = DATA.prefetch.prefetch_benefit_estimate.toFixed(1) + '% potential fault reduction';
 }
 
 function initCursors() {

@@ -156,7 +156,6 @@ fn generate_html_viewer(
         "Sequential:      {:.1}%",
         data.patterns.sequential_ratio * 100.0
     );
-    eprintln!("Prefetch score:  {:.1}%", data.prefetch.prediction_hit_rate);
 
     // Print cursor stats if available
     if data.cursor_data.has_data {
