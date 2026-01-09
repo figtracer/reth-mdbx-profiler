@@ -375,7 +375,7 @@ pub fn generate_html(data: &ViewerData) -> String {
                     </div>
 
                     <h3>Transaction Timeline (Gantt View)</h3>
-                    <div id="txn-gantt-container" class="chart-full" style="min-height: 400px; max-height: 800px; overflow-y: auto;">
+                    <div id="txn-gantt-container" class="chart-full" style="position: relative;">
                         <canvas id="txn-gantt-chart"></canvas>
                     </div>
 
@@ -592,6 +592,11 @@ body {
 .chart-full canvas {
     width: 100% !important;
     height: 400px !important;
+}
+
+/* Gantt chart needs dynamic height, don't override */
+#txn-gantt-chart {
+    height: auto !important;
 }
 
 .timeline-controls {
@@ -1868,14 +1873,14 @@ function initTransactions() {
         const filteredTimeline = txnData.timeline.filter(t => threadSet.has(t.tid));
 
         // Large row height for visibility
-        const rowHeight = 55;
+        const rowHeight = 60;
         const padding = { top: 70, right: 50, bottom: 50, left: 120 };
-        const chartHeight = sortedThreads.length * rowHeight + padding.top + padding.bottom;
+        const chartHeight = Math.max(300, sortedThreads.length * rowHeight + padding.top + padding.bottom);
 
-        // Size container to fit content exactly
-        ganttContainer.style.height = chartHeight + 'px';
-        ganttContainer.style.overflow = 'hidden';
+        // Set container to not constrain the canvas
+        ganttContainer.style.overflow = 'visible';
         ganttContainer.style.position = 'relative';
+        ganttContainer.style.minHeight = chartHeight + 'px';
 
         // Find time range from filtered data
         const dataMinTime = Math.min(...filteredTimeline.map(t => t.start_ms));
@@ -1909,9 +1914,16 @@ function initTransactions() {
         `;
         document.body.appendChild(tooltip);
 
+        // Get display width (CSS pixels, not canvas pixels)
+        function getDisplayWidth() {
+            const containerStyle = getComputedStyle(ganttContainer);
+            const containerPadding = parseFloat(containerStyle.paddingLeft) + parseFloat(containerStyle.paddingRight);
+            return ganttContainer.clientWidth - containerPadding;
+        }
+
         // Calculate transaction rectangles for hit testing
         function calcTxnRects() {
-            const width = ganttCanvas.width / window.devicePixelRatio;
+            const width = getDisplayWidth();
             const chartWidth = width - padding.left - padding.right;
             const viewRange = viewMaxTime - viewMinTime || 1;
 
@@ -1930,16 +1942,19 @@ function initTransactions() {
         }
 
         function render() {
-            const rect = ganttContainer.getBoundingClientRect();
-            const width = rect.width;
+            const width = getDisplayWidth();
 
+            // Set canvas display size
             ganttCanvas.style.width = width + 'px';
             ganttCanvas.style.height = chartHeight + 'px';
-            ganttCanvas.width = width * window.devicePixelRatio;
-            ganttCanvas.height = chartHeight * window.devicePixelRatio;
+
+            // Set canvas internal resolution for crisp rendering
+            const dpr = window.devicePixelRatio || 1;
+            ganttCanvas.width = width * dpr;
+            ganttCanvas.height = chartHeight * dpr;
 
             const ctx = ganttCanvas.getContext('2d');
-            ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
             const chartWidth = width - padding.left - padding.right;
             const viewRange = viewMaxTime - viewMinTime || 1;
@@ -2097,7 +2112,8 @@ function initTransactions() {
             e.preventDefault();
             const rect = ganttCanvas.getBoundingClientRect();
             const mouseX = e.clientX - rect.left;
-            const chartWidth = rect.width - padding.left - padding.right;
+            const width = getDisplayWidth();
+            const chartWidth = width - padding.left - padding.right;
             const mouseRatio = Math.max(0, Math.min(1, (mouseX - padding.left) / chartWidth));
 
             const viewRange = viewMaxTime - viewMinTime;
@@ -2125,9 +2141,10 @@ function initTransactions() {
 
         const handleMouseMove = (e) => {
             const rect = ganttCanvas.getBoundingClientRect();
+            const width = getDisplayWidth();
+            const chartWidth = width - padding.left - padding.right;
 
             if (isDragging) {
-                const chartWidth = rect.width - padding.left - padding.right;
                 const dx = e.clientX - dragStartX;
                 const viewRange = viewMaxTime - viewMinTime;
                 const timeDelta = -(dx / chartWidth) * viewRange;
@@ -2179,7 +2196,7 @@ function initTransactions() {
                         </div>
                         <div style="display:grid;grid-template-columns:auto 1fr;gap:6px 12px;">
                             <span style="color:#888">Thread:</span><span>TID ${txn.tid}</span>
-                            <span style="color:#888">Pointer:</span><code style="background:#1a1a2e;padding:2px 8px;border-radius:4px;font-size:11px">0x${txn.txn_ptr.toString(16)}</code>
+                            <span style="color:#888">Pointer:</span><code style="background:#1a1a2e;padding:2px 8px;border-radius:4px;font-size:11px">${txn.txn_ptr}</code>
                             <span style="color:#888">Start:</span><span>${(txn.start_ms / 1000).toFixed(4)}s</span>
                             <span style="color:#888">Duration:</span><span>${duration} ms</span>
                             <span style="color:#888">Status:</span><span style="color:${statusColor};font-weight:bold">${txn.end_type || 'open'}</span>

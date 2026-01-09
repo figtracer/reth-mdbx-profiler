@@ -307,8 +307,8 @@ pub struct TxnSummary {
 pub struct TxnTimelineEntry {
     /// Thread ID
     pub tid: u32,
-    /// Transaction pointer (for correlation)
-    pub txn_ptr: u64,
+    /// Transaction pointer as hex string (to avoid JS precision loss with u64)
+    pub txn_ptr: String,
     /// Start time relative to trace start (ms)
     pub start_ms: f64,
     /// End time relative to trace start (ms) - None if still open
@@ -1107,7 +1107,7 @@ fn generate_txn_data(events: &[TxnEvent]) -> TxnData {
                     let end_ms = (event.timestamp_ns - min_ts) as f64 / 1_000_000.0;
                     timeline_entries.push(TxnTimelineEntry {
                         tid: event.tid,
-                        txn_ptr: event.txn_ptr,
+                        txn_ptr: format!("0x{:x}", event.txn_ptr),
                         start_ms,
                         end_ms: Some(end_ms),
                         duration_ms: Some(end_ms - start_ms),
@@ -1135,7 +1135,7 @@ fn generate_txn_data(events: &[TxnEvent]) -> TxnData {
                     let end_ms = (event.timestamp_ns - min_ts) as f64 / 1_000_000.0;
                     timeline_entries.push(TxnTimelineEntry {
                         tid: event.tid,
-                        txn_ptr: event.txn_ptr,
+                        txn_ptr: format!("0x{:x}", event.txn_ptr),
                         start_ms,
                         end_ms: Some(end_ms),
                         duration_ms: Some(end_ms - start_ms),
@@ -1161,7 +1161,7 @@ fn generate_txn_data(events: &[TxnEvent]) -> TxnData {
         let start_ms = (start_ts - min_ts) as f64 / 1_000_000.0;
         timeline_entries.push(TxnTimelineEntry {
             tid,
-            txn_ptr,
+            txn_ptr: format!("0x{:x}", txn_ptr),
             start_ms,
             end_ms: None,
             duration_ms: None,
