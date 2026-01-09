@@ -2061,7 +2061,10 @@ function initTransactions() {
                     ctx.fillStyle = '#fff';
                     ctx.font = 'bold 10px -apple-system, BlinkMacSystemFont, sans-serif';
                     ctx.textAlign = 'center';
-                    const label = txn.end_type === 'commit' ? 'C' : txn.end_type === 'abort' ? 'A' : '?';
+                    // C = commit, X = closed (RO abort), A = abort (RW), ? = open
+                    const label = txn.end_type === 'commit' ? 'C' :
+                                  (txn.end_type === 'abort' && txn.txn_type === 'RO') ? 'X' :
+                                  txn.end_type === 'abort' ? 'A' : '?';
                     ctx.fillText(label, x + barWidth / 2, y + barHeight / 2 + 4);
                 }
             });
@@ -2075,7 +2078,7 @@ function initTransactions() {
             const legendItems = [
                 { color: '#2ecc71', label: 'RO Commit' },
                 { color: '#ff6b6b', label: 'RW Commit' },
-                { color: '#27ae60', label: 'RO Abort' },
+                { color: '#27ae60', label: 'RO Closed' },
                 { color: '#c0392b', label: 'RW Abort' },
             ];
 
@@ -2188,8 +2191,11 @@ function initTransactions() {
                     ganttCanvas.style.cursor = 'pointer';
                     const txn = hoveredTxn;
                     const duration = txn.end_ms ? (txn.end_ms - txn.start_ms).toFixed(2) : 'ongoing';
+                    // For RO transactions, "abort" really means "closed/released" - not an error
+                    const isRoAbort = txn.txn_type === 'RO' && txn.end_type === 'abort';
+                    const statusLabel = isRoAbort ? 'closed' : (txn.end_type || 'open');
                     const statusColor = txn.end_type === 'commit' ? '#2ecc71' :
-                                       txn.end_type === 'abort' ? '#e74c3c' : '#f39c12';
+                                       (isRoAbort ? '#27ae60' : (txn.end_type === 'abort' ? '#e74c3c' : '#f39c12'));
                     tooltip.innerHTML = `
                         <div style="font-weight:bold;margin-bottom:10px;font-size:14px;color:${txn.txn_type === 'RW' ? '#ff6b6b' : '#2ecc71'}">
                             ${txn.txn_type} Transaction
@@ -2199,7 +2205,7 @@ function initTransactions() {
                             <span style="color:#888">Pointer:</span><code style="background:#1a1a2e;padding:2px 8px;border-radius:4px;font-size:11px">${txn.txn_ptr}</code>
                             <span style="color:#888">Start:</span><span>${(txn.start_ms / 1000).toFixed(4)}s</span>
                             <span style="color:#888">Duration:</span><span>${duration} ms</span>
-                            <span style="color:#888">Status:</span><span style="color:${statusColor};font-weight:bold">${txn.end_type || 'open'}</span>
+                            <span style="color:#888">Status:</span><span style="color:${statusColor};font-weight:bold">${statusLabel}</span>
                             ${txn.commit_latency_us ? `<span style="color:#888">Latency:</span><span>${txn.commit_latency_us.toFixed(1)} μs</span>` : ''}
                         </div>
                     `;
