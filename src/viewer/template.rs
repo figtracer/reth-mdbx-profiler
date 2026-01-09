@@ -1868,12 +1868,12 @@ function initTransactions() {
         const filteredTimeline = txnData.timeline.filter(t => threadSet.has(t.tid));
 
         // Large row height for visibility
-        const rowHeight = 60;
-        const padding = { top: 80, right: 50, bottom: 70, left: 120 };
+        const rowHeight = 55;
+        const padding = { top: 70, right: 50, bottom: 50, left: 120 };
         const chartHeight = sortedThreads.length * rowHeight + padding.top + padding.bottom;
 
-        // Set fixed height with scroll
-        ganttContainer.style.height = '600px';
+        // Size container to fit content exactly
+        ganttContainer.style.height = chartHeight + 'px';
         ganttContainer.style.overflow = 'hidden';
         ganttContainer.style.position = 'relative';
 
@@ -1932,12 +1932,11 @@ function initTransactions() {
         function render() {
             const rect = ganttContainer.getBoundingClientRect();
             const width = rect.width;
-            const height = 600;
 
             ganttCanvas.style.width = width + 'px';
-            ganttCanvas.style.height = height + 'px';
+            ganttCanvas.style.height = chartHeight + 'px';
             ganttCanvas.width = width * window.devicePixelRatio;
-            ganttCanvas.height = height * window.devicePixelRatio;
+            ganttCanvas.height = chartHeight * window.devicePixelRatio;
 
             const ctx = ganttCanvas.getContext('2d');
             ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
@@ -1946,11 +1945,11 @@ function initTransactions() {
             const viewRange = viewMaxTime - viewMinTime || 1;
 
             // Background gradient
-            const bgGrad = ctx.createLinearGradient(0, 0, 0, height);
+            const bgGrad = ctx.createLinearGradient(0, 0, 0, chartHeight);
             bgGrad.addColorStop(0, '#0a0a12');
             bgGrad.addColorStop(1, '#0f0f18');
             ctx.fillStyle = bgGrad;
-            ctx.fillRect(0, 0, width, height);
+            ctx.fillRect(0, 0, width, chartHeight);
 
             // Draw alternating row backgrounds
             sortedThreads.forEach((tid, i) => {
@@ -1990,7 +1989,7 @@ function initTransactions() {
                 ctx.strokeStyle = 'rgba(255,255,255,0.06)';
                 ctx.beginPath();
                 ctx.moveTo(x, padding.top);
-                ctx.lineTo(x, height - padding.bottom);
+                ctx.lineTo(x, chartHeight - padding.bottom);
                 ctx.stroke();
 
                 // Time label
@@ -1998,7 +1997,7 @@ function initTransactions() {
                 ctx.fillStyle = '#888';
                 ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
                 ctx.textAlign = 'center';
-                ctx.fillText((time / 1000).toFixed(2) + 's', x, height - padding.bottom + 20);
+                ctx.fillText((time / 1000).toFixed(2) + 's', x, chartHeight - padding.bottom + 20);
             }
 
             // Draw transactions as bars

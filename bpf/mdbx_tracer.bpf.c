@@ -303,6 +303,15 @@ struct {
     __type(value, struct txn_commit_context);
 } pending_txn_commits SEC(".maps");
 
+// Track active transactions: txn_ptr -> flags
+// This allows us to know the transaction type (RO/RW) at commit/abort time
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 4096);
+    __type(key, __u64);    // txn_ptr
+    __type(value, __u32);  // txn_flags
+} active_txn_flags SEC(".maps");
+
 #define STAT_TOTAL_FAULTS     0
 #define STAT_MDBX_FAULTS      1
 #define STAT_MAJOR_FAULTS     2
@@ -1180,6 +1189,13 @@ int BPF_URETPROBE(trace_txn_begin_ret, int ret)
     e->_pad = 0;
 
     bpf_ringbuf_submit(e, 0);
+
+    // Store txn_flags so we can retrieve them at commit/abort time
+    if (txn_ptr != 0) {
+        __u32 flags = bctx->txn_flags;
+        bpf_map_update_elem(&active_txn_flags, &txn_ptr, &flags, BPF_ANY);
+    }
+
     bpf_map_delete_elem(&pending_txn_begins, &pid_tgid);
     return 0;
 }
@@ -1228,18 +1244,29 @@ int BPF_URETPROBE(trace_txn_commit_ret, int ret)
         return 0;
     }
 
+    // Look up the txn_flags from when the transaction was started
+    __u64 txn_ptr = cctx->txn_ptr;
+    __u32 *flags_ptr = bpf_map_lookup_elem(&active_txn_flags, &txn_ptr);
+    __u32 txn_flags = flags_ptr ? *flags_ptr : 0;
+
     e->timestamp_ns = cctx->timestamp_ns;
     e->pid = cctx->pid;
     e->tid = cctx->tid;
     e->event_type = EVENT_TXN_COMMIT;
-    e->txn_flags = 0;  // Not available at commit time
-    e->txn_ptr = cctx->txn_ptr;
+    e->txn_flags = txn_flags;
+    e->txn_ptr = txn_ptr;
     e->parent_txn_ptr = 0;
     e->latency_ns = latency;
     e->return_code = ret;
     e->_pad = 0;
 
     bpf_ringbuf_submit(e, 0);
+
+    // Remove from active transactions map
+    if (txn_ptr != 0) {
+        bpf_map_delete_elem(&active_txn_flags, &txn_ptr);
+    }
+
     bpf_map_delete_elem(&pending_txn_commits, &pid_tgid);
     return 0;
 }
@@ -1264,18 +1291,29 @@ int BPF_UPROBE(trace_txn_abort, void *txn)
         return 0;
     }
 
+    // Look up the txn_flags from when the transaction was started
+    __u64 txn_ptr = (__u64)txn;
+    __u32 *flags_ptr = bpf_map_lookup_elem(&active_txn_flags, &txn_ptr);
+    __u32 txn_flags = flags_ptr ? *flags_ptr : 0;
+
     e->timestamp_ns = bpf_ktime_get_ns();
     e->pid = pid;
     e->tid = (__u32)pid_tgid;
     e->event_type = EVENT_TXN_ABORT;
-    e->txn_flags = 0;
-    e->txn_ptr = (__u64)txn;
+    e->txn_flags = txn_flags;
+    e->txn_ptr = txn_ptr;
     e->parent_txn_ptr = 0;
     e->latency_ns = 0;
     e->return_code = 0;
     e->_pad = 0;
 
     bpf_ringbuf_submit(e, 0);
+
+    // Remove from active transactions map
+    if (txn_ptr != 0) {
+        bpf_map_delete_elem(&active_txn_flags, &txn_ptr);
+    }
+
     return 0;
 }
 
