@@ -1853,23 +1853,37 @@ function initTransactions() {
         const ganttContainer = document.getElementById('txn-gantt-chart').parentElement;
         const ganttCanvas = document.getElementById('txn-gantt-chart');
 
-        // Count transactions per thread and get top threads by activity
+        // Count transactions per thread and track which have RW transactions
         const threadCounts = new Map();
+        const rwThreads = new Set();
         txnData.timeline.forEach(t => {
             threadCounts.set(t.tid, (threadCounts.get(t.tid) || 0) + 1);
+            if (t.txn_type === 'RW') {
+                rwThreads.add(t.tid);
+            }
         });
 
-        // Sort threads by transaction count, take top 10
+        // Sort threads by transaction count, take top 10 RO threads
         const maxThreads = 10;
-        const sortedThreads = [...threadCounts.entries()]
+        const topThreads = [...threadCounts.entries()]
+            .filter(([tid]) => !rwThreads.has(tid))  // Exclude RW threads from count-based selection
             .sort((a, b) => b[1] - a[1])
             .slice(0, maxThreads)
             .map(([tid]) => tid);
 
+        // Always include RW threads at the top (most important for analysis)
+        const rwThreadList = [...rwThreads].sort((a, b) => {
+            // Sort RW threads by transaction count
+            return (threadCounts.get(b) || 0) - (threadCounts.get(a) || 0);
+        });
+
+        // Combine: RW threads first, then top RO threads
+        const sortedThreads = [...rwThreadList, ...topThreads];
+
         const threadSet = new Set(sortedThreads);
         const threadMap = new Map(sortedThreads.map((tid, i) => [tid, i]));
 
-        // Filter timeline to only include top threads
+        // Filter timeline to only include selected threads
         const filteredTimeline = txnData.timeline.filter(t => threadSet.has(t.tid));
 
         // Large row height for visibility
@@ -2097,7 +2111,8 @@ function initTransactions() {
             ctx.fillStyle = '#555';
             ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
             ctx.textAlign = 'left';
-            ctx.fillText(`Showing top ${sortedThreads.length} threads by activity (${filteredTimeline.length} transactions)`, padding.left, 55);
+            const rwInfo = rwThreadList.length > 0 ? ` (${rwThreadList.length} RW + ${topThreads.length} top RO)` : '';
+            ctx.fillText(`Showing ${sortedThreads.length} threads${rwInfo} - ${filteredTimeline.length} transactions`, padding.left, 55);
 
             // Zoom controls hint
             ctx.fillStyle = '#666';
