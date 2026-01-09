@@ -585,6 +585,99 @@ not all page faults can be correlated. we only trace `mdbx_cursor_get` and `mdbx
 
 expect 50-70% correlation rate in typical workloads. this can be improved by adding tracing for write operations and transaction management.
 
+## transaction lifecycle tracing
+
+the profiler traces mdbx transaction lifecycle operations to understand concurrency patterns:
+
+### traced functions
+
+```c
+SEC("uprobe/mdbx_txn_begin_ex")
+int BPF_UPROBE(trace_txn_begin, void *env, void *parent, unsigned int flags, void **txn, void *ctx)
+
+SEC("uretprobe/mdbx_txn_begin_ex") 
+int BPF_URETPROBE(trace_txn_begin_ret, int ret)
+
+SEC("uprobe/mdbx_txn_commit_ex")
+int BPF_UPROBE(trace_txn_commit, void *txn, void *latency)
+
+SEC("uretprobe/mdbx_txn_commit_ex")
+int BPF_URETPROBE(trace_txn_commit_ret, int ret)
+
+SEC("uprobe/mdbx_txn_abort")
+int BPF_UPROBE(trace_txn_abort, void *txn)
+
+SEC("uretprobe/mdbx_txn_abort")
+int BPF_URETPROBE(trace_txn_abort_ret, int ret)
+```
+
+### transaction event structure
+
+```c
+struct txn_event {
+    __u64 timestamp_ns;
+    __u32 pid;
+    __u32 tid;
+    __u32 event_type;      // 7=BEGIN, 8=COMMIT, 9=ABORT
+    __u32 txn_flags;       // MDBX_TXN_RDONLY=0x20000, MDBX_TXN_READWRITE=0
+    __u64 txn_ptr;         // transaction pointer (for correlation)
+    __u64 parent_txn_ptr;  // for nested transactions (0 if none)
+    __u64 latency_ns;      // commit/abort latency
+    __s32 return_code;
+};
+```
+
+### ro vs rw transaction detection
+
+mdbx uses `MDBX_TXN_RDONLY = 0x20000` for read-only transactions:
+
+```c
+// in txn_begin uprobe
+__u32 txn_flags = flags;
+bool is_ro = (flags & 0x20000) != 0;
+
+// store flags for later lookup at commit/abort time
+bpf_map_update_elem(&active_txn_flags, &txn_ptr, &txn_flags, BPF_ANY);
+```
+
+### transaction correlation
+
+transactions are correlated using `(txn_ptr, tid)` as a key since mdbx reuses transaction pointers:
+
+```rust
+// active_txns: (txn_ptr, tid) -> (start_time, is_ro)
+let mut active_txns: HashMap<(u64, u32), (u64, bool)> = HashMap::new();
+
+// on BEGIN: insert into map
+active_txns.insert((event.txn_ptr, event.tid), (event.timestamp_ns, is_ro));
+
+// on COMMIT/ABORT: lookup and create timeline entry
+if let Some((start_ts, is_ro)) = active_txns.remove(&(event.txn_ptr, event.tid)) {
+    timeline_entries.push(TxnTimelineEntry { ... });
+}
+```
+
+### reth's transaction patterns
+
+analysis of reth's mdbx usage reveals:
+
+1. **read-only transactions dominate**: vast majority (>99%) are RO transactions
+2. **ro transactions are "aborted"**: ro txns use `mdbx_txn_abort()` to close (not commit) - this is normal and efficient
+3. **few rw transactions**: typically one writer thread doing batch commits
+4. **high rw commit latency**: ~100-150ms average for rw commits (actual disk flush)
+5. **near-zero ro "commit" latency**: ro commits are just cleanup, ~3-4μs
+
+### visualization
+
+the transaction gantt chart shows:
+- **rw threads at top**: always displayed regardless of transaction count
+- **top ro threads by activity**: busiest reader threads
+- **color coding**:
+  - bright green: ro commit
+  - dark green: ro closed (abort)
+  - red: rw commit  
+  - dark red: rw abort
+
 ## building the bpf program
 
 the bpf program is compiled with clang:
