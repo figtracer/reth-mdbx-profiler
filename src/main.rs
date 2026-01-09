@@ -19,7 +19,7 @@ use tracing::{debug, info, warn};
 mod event;
 mod mdbx;
 
-use event::{CursorEvent, PageFaultEvent};
+use event::{CursorEvent, PageFaultEvent, TxnEvent};
 
 /// eBPF profiler for MDBX page fault patterns and cursor operations
 #[derive(Parser)]
@@ -344,10 +344,12 @@ fn run_trace(
         let name = prog.name().to_string_lossy().to_string();
         let section = prog.section().to_string_lossy().to_string();
 
-        // Skip uprobe programs (cursor/direct get tracing) unless trace_cursors is enabled
+        // Skip uprobe programs (cursor/direct get/txn tracing) unless trace_cursors is enabled
         // Check both program name and section name
-        let is_uprobe =
-            section.contains("uprobe") || name.contains("cursor") || name.contains("direct_get");
+        let is_uprobe = section.contains("uprobe")
+            || name.contains("cursor")
+            || name.contains("direct_get")
+            || name.contains("txn_");
         if is_uprobe && !trace_cursors {
             debug!("Skipping cursor probe: {} (section: {})", name, section);
             continue;
@@ -372,7 +374,10 @@ fn run_trace(
                         }
                     }
                 } else {
-                    warn!("No process running yet and --reth-binary not specified. Skipping uprobe {}.", name);
+                    warn!(
+                        "No process running yet and --reth-binary not specified. Skipping uprobe {}.",
+                        name
+                    );
                     continue;
                 };
 
@@ -381,12 +386,22 @@ fn run_trace(
                 // Find the symbol offset based on program name
                 let func_name = if name.contains("cursor_get") {
                     "mdbx_cursor_get"
+                } else if name.contains("cursor_put") {
+                    "mdbx_cursor_put"
+                } else if name.contains("cursor_del") {
+                    "mdbx_cursor_del"
                 } else if name.contains("cursor_open") {
                     "mdbx_cursor_open"
                 } else if name.contains("cursor_close") {
                     "mdbx_cursor_close"
                 } else if name.contains("direct_get") {
                     "mdbx_get"
+                } else if name.contains("txn_begin") {
+                    "mdbx_txn_begin_ex"
+                } else if name.contains("txn_commit") {
+                    "mdbx_txn_commit_ex"
+                } else if name.contains("txn_abort") {
+                    "mdbx_txn_abort"
                 } else {
                     debug!("Skipping unknown cursor probe: {}", name);
                     continue;
@@ -473,8 +488,10 @@ fn run_trace(
 
     let event_count = Arc::new(AtomicU64::new(0));
     let cursor_count = Arc::new(AtomicU64::new(0));
+    let txn_count = Arc::new(AtomicU64::new(0));
     let event_count_clone = event_count.clone();
     let cursor_count_clone = cursor_count.clone();
+    let txn_count_clone = txn_count.clone();
     let writer_clone = writer.clone();
 
     ring_builder.add(&events_map, move |data: &[u8]| {
@@ -482,12 +499,14 @@ fn run_trace(
         // Struct layouts (from C compiler on x86_64 Linux):
         // PageFaultEvent: event_type at offset 48 (after 5x u64 + 2x u32)
         // CursorEvent: event_type at offset 16 (after u64 + 2x u32)
+        // TxnEvent: event_type at offset 16 (after u64 + 2x u32) - same offset as CursorEvent
         //
-        // PageFaultEvent is 72 bytes, CursorEvent is 112 bytes
+        // PageFaultEvent is 72 bytes, CursorEvent is 120 bytes, TxnEvent is 56 bytes
         // We differentiate by checking event_type at both possible offsets
 
         const PAGE_FAULT_EVENT_SIZE: usize = 72;
-        const CURSOR_EVENT_SIZE: usize = 112;
+        const CURSOR_EVENT_SIZE: usize = 120;
+        const TXN_EVENT_SIZE: usize = 56;
         const PAGE_FAULT_EVENT_TYPE_OFFSET: usize = 48;
         const CURSOR_EVENT_TYPE_OFFSET: usize = 16;
 
@@ -495,23 +514,40 @@ fn run_trace(
             return 0;
         }
 
-        // First, try to read event_type at cursor event offset (16)
-        // This works for both structs since PageFaultEvent is larger
-        let cursor_event_type = u32::from_ne_bytes(
+        // First, try to read event_type at cursor/txn event offset (16)
+        // This works for cursor events, txn events, and page fault events
+        let event_type = u32::from_ne_bytes(
             data[CURSOR_EVENT_TYPE_OFFSET..CURSOR_EVENT_TYPE_OFFSET + 4]
                 .try_into()
                 .unwrap_or([0; 4]),
         );
 
-        // Check if this is a cursor event (event_type 3, 4, or 5 at offset 16)
-        // 3 = CursorGet, 4 = CursorPut, 5 = DirectGet (mdbx_get)
-        if (cursor_event_type == 3 || cursor_event_type == 4 || cursor_event_type == 5)
+        // Check if this is a cursor event (event_type 3, 4, 5, or 6 at offset 16)
+        // 3 = CursorGet, 4 = CursorPut, 5 = DirectGet (mdbx_get), 6 = CursorDel
+        if (event_type == 3 || event_type == 4 || event_type == 5 || event_type == 6)
             && data.len() >= CURSOR_EVENT_SIZE
         {
             let event: CursorEvent =
                 unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CursorEvent) };
 
             cursor_count_clone.fetch_add(1, Ordering::Relaxed);
+
+            if let Ok(json) = serde_json::to_string(&event) {
+                use std::io::Write;
+                if let Ok(mut w) = writer_clone.lock() {
+                    let _ = writeln!(w, "{}", json);
+                }
+            }
+            return 0;
+        }
+
+        // Check if this is a transaction event (event_type 7, 8, or 9 at offset 16)
+        // 7 = TxnBegin, 8 = TxnCommit, 9 = TxnAbort
+        if (event_type == 7 || event_type == 8 || event_type == 9) && data.len() >= TXN_EVENT_SIZE {
+            let event: TxnEvent =
+                unsafe { std::ptr::read_unaligned(data.as_ptr() as *const TxnEvent) };
+
+            txn_count_clone.fetch_add(1, Ordering::Relaxed);
 
             if let Ok(json) = serde_json::to_string(&event) {
                 use std::io::Write;
@@ -605,13 +641,16 @@ fn run_trace(
         if last_stats.elapsed() >= Duration::from_secs(stats_interval) {
             let pf_count = event_count.load(Ordering::Relaxed);
             let cur_count = cursor_count.load(Ordering::Relaxed);
+            let txn_cnt = txn_count.load(Ordering::Relaxed);
             let elapsed = start.elapsed().as_secs_f64();
             info!(
-                "Page faults: {} ({:.1}/s), Cursor ops: {} ({:.1}/s), Elapsed: {:.1}s{}",
+                "Page faults: {} ({:.1}/s), Cursor ops: {} ({:.1}/s), Txns: {} ({:.1}/s), Elapsed: {:.1}s{}",
                 pf_count,
                 pf_count as f64 / elapsed,
                 cur_count,
                 cur_count as f64 / elapsed,
+                txn_cnt,
+                txn_cnt as f64 / elapsed,
                 elapsed,
                 if current_pid == 0 {
                     " [waiting for process]"
@@ -640,9 +679,10 @@ fn run_trace(
 
     let pf_total = event_count.load(Ordering::Relaxed);
     let cur_total = cursor_count.load(Ordering::Relaxed);
+    let txn_total = txn_count.load(Ordering::Relaxed);
     info!(
-        "Trace saved to {:?} ({} page faults, {} cursor ops)",
-        output, pf_total, cur_total
+        "Trace saved to {:?} ({} page faults, {} cursor ops, {} txn events)",
+        output, pf_total, cur_total, txn_total
     );
     Ok(())
 }
@@ -657,6 +697,11 @@ fn print_stats(stats_map: &libbpf_rs::Map) -> anyhow::Result<()> {
         "Cursor seeks",
         "Cursor nexts",
         "Cursor errors",
+        "Cursor puts",
+        "Cursor dels",
+        "Txn begins",
+        "Txn commits",
+        "Txn aborts",
     ];
 
     info!("=== Statistics ===");
@@ -748,6 +793,7 @@ fn analyze_trace(input: PathBuf, format: String) -> anyhow::Result<()> {
 
     let mut page_fault_events: Vec<PageFaultEvent> = Vec::new();
     let mut cursor_events: Vec<CursorEvent> = Vec::new();
+    let mut txn_events: Vec<TxnEvent> = Vec::new();
 
     use std::io::BufRead;
     for line in reader.lines() {
@@ -759,6 +805,13 @@ fn analyze_trace(input: PathBuf, format: String) -> anyhow::Result<()> {
                 continue;
             }
         }
+        // Try to parse as txn event
+        if let Ok(event) = serde_json::from_str::<TxnEvent>(&line) {
+            if event.event_type >= 7 && event.event_type <= 9 {
+                txn_events.push(event);
+                continue;
+            }
+        }
         // Try to parse as cursor event
         if let Ok(event) = serde_json::from_str::<CursorEvent>(&line) {
             cursor_events.push(event);
@@ -766,9 +819,10 @@ fn analyze_trace(input: PathBuf, format: String) -> anyhow::Result<()> {
     }
 
     info!(
-        "Loaded {} page fault events, {} cursor events",
+        "Loaded {} page fault events, {} cursor events, {} txn events",
         page_fault_events.len(),
-        cursor_events.len()
+        cursor_events.len(),
+        txn_events.len()
     );
 
     match format.as_str() {
@@ -779,6 +833,9 @@ fn analyze_trace(input: PathBuf, format: String) -> anyhow::Result<()> {
             if !cursor_events.is_empty() {
                 print_cursor_summary(&cursor_events);
             }
+            if !txn_events.is_empty() {
+                print_txn_summary(&txn_events);
+            }
         }
         "csv" => {
             if !page_fault_events.is_empty() {
@@ -786,6 +843,9 @@ fn analyze_trace(input: PathBuf, format: String) -> anyhow::Result<()> {
             }
             if !cursor_events.is_empty() {
                 print_cursor_csv(&cursor_events);
+            }
+            if !txn_events.is_empty() {
+                print_txn_csv(&txn_events);
             }
         }
         "json" => {
@@ -795,12 +855,19 @@ fn analyze_trace(input: PathBuf, format: String) -> anyhow::Result<()> {
             if !cursor_events.is_empty() {
                 println!("{}", serde_json::to_string_pretty(&cursor_events)?);
             }
+            if !txn_events.is_empty() {
+                println!("{}", serde_json::to_string_pretty(&txn_events)?);
+            }
         }
         "logs" => {
             // Print cursor events in issue 14558 log format
             for event in &cursor_events {
                 let table_name = event::dbi_to_table_name(event.dbi);
                 println!("{}", event.format_log(table_name));
+            }
+            // Print txn events
+            for event in &txn_events {
+                println!("{}", event.description());
             }
         }
         other => anyhow::bail!("Unknown format: {}", other),
@@ -986,17 +1053,185 @@ fn print_csv(events: &[PageFaultEvent]) {
 }
 
 fn print_cursor_csv(events: &[CursorEvent]) {
-    println!("timestamp_ns,tid,dbi,cursor_op,key_hex,return_code,latency_ns");
+    println!(
+        "timestamp_ns,tid,dbi,cursor_op,key_hex,return_code,latency_ns,value_size,write_flags"
+    );
     for e in events {
         println!(
-            "{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{}",
             e.timestamp_ns,
             e.tid,
             e.dbi,
             e.cursor_op().name(),
             e.key_hex(),
             e.return_code,
-            e.latency_ns
+            e.latency_ns,
+            e.value_size,
+            e.write_flags
+        );
+    }
+}
+
+fn print_txn_summary(events: &[TxnEvent]) {
+    if events.is_empty() {
+        println!("No transaction events to analyze");
+        return;
+    }
+
+    let total = events.len();
+
+    let min_ts = events.iter().map(|e| e.timestamp_ns).min().unwrap_or(0);
+    let max_ts = events.iter().map(|e| e.timestamp_ns).max().unwrap_or(0);
+    let duration_s = (max_ts - min_ts) as f64 / 1_000_000_000.0;
+
+    // Count by event type
+    let mut begin_count = 0;
+    let mut commit_count = 0;
+    let mut abort_count = 0;
+    let mut ro_count = 0;
+    let mut rw_count = 0;
+    let mut total_commit_latency_ns: u64 = 0;
+    let mut commit_latencies: Vec<u64> = Vec::new();
+
+    // Track concurrent transactions per thread
+    let mut thread_txns: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+
+    for event in events {
+        match event.event_type {
+            7 => {
+                // TXN_BEGIN
+                begin_count += 1;
+                if event.is_read_only() {
+                    ro_count += 1;
+                } else {
+                    rw_count += 1;
+                }
+                *thread_txns.entry(event.tid).or_insert(0) += 1;
+            }
+            8 => {
+                // TXN_COMMIT
+                commit_count += 1;
+                total_commit_latency_ns += event.latency_ns;
+                commit_latencies.push(event.latency_ns);
+                if let Some(count) = thread_txns.get_mut(&event.tid) {
+                    if *count > 0 {
+                        *count -= 1;
+                    }
+                }
+            }
+            9 => {
+                // TXN_ABORT
+                abort_count += 1;
+                if let Some(count) = thread_txns.get_mut(&event.tid) {
+                    if *count > 0 {
+                        *count -= 1;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let avg_commit_latency_us = if commit_count > 0 {
+        (total_commit_latency_ns as f64 / commit_count as f64) / 1000.0
+    } else {
+        0.0
+    };
+
+    // Calculate percentiles for commit latency
+    commit_latencies.sort();
+    let p50_latency = if !commit_latencies.is_empty() {
+        commit_latencies[commit_latencies.len() / 2] as f64 / 1000.0
+    } else {
+        0.0
+    };
+    let p99_latency = if !commit_latencies.is_empty() {
+        commit_latencies[(commit_latencies.len() * 99) / 100] as f64 / 1000.0
+    } else {
+        0.0
+    };
+
+    println!("\n=== Transaction Summary ===\n");
+    println!("Duration:        {:.2}s", duration_s);
+    println!("Total events:    {}", total);
+    println!();
+    println!("Transaction counts:");
+    println!(
+        "  Begins:        {} ({:.1}/s)",
+        begin_count,
+        begin_count as f64 / duration_s
+    );
+    println!(
+        "  Commits:       {} ({:.1}/s)",
+        commit_count,
+        commit_count as f64 / duration_s
+    );
+    println!("  Aborts:        {}", abort_count);
+    println!();
+    println!("Transaction types:");
+    println!(
+        "  Read-only:     {} ({:.1}%)",
+        ro_count,
+        if begin_count > 0 {
+            ro_count as f64 / begin_count as f64 * 100.0
+        } else {
+            0.0
+        }
+    );
+    println!(
+        "  Read-write:    {} ({:.1}%)",
+        rw_count,
+        if begin_count > 0 {
+            rw_count as f64 / begin_count as f64 * 100.0
+        } else {
+            0.0
+        }
+    );
+    println!();
+    println!("Commit latency:");
+    println!("  Average:       {:.2} us", avg_commit_latency_us);
+    println!("  p50:           {:.2} us", p50_latency);
+    println!("  p99:           {:.2} us", p99_latency);
+
+    // Thread distribution
+    let mut thread_counts: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+    for event in events {
+        *thread_counts.entry(event.tid).or_insert(0) += 1;
+    }
+
+    println!();
+    println!("Thread distribution:");
+    let mut threads: Vec<_> = thread_counts.iter().collect();
+    threads.sort_by(|a, b| b.1.cmp(a.1));
+    for (tid, count) in threads.iter().take(5) {
+        println!(
+            "  TID {}: {} events ({:.1}%)",
+            tid,
+            count,
+            **count as f64 / total as f64 * 100.0
+        );
+    }
+}
+
+fn print_txn_csv(events: &[TxnEvent]) {
+    println!("timestamp_ns,tid,event_type,txn_flags,txn_ptr,parent_txn_ptr,latency_ns,return_code");
+    for e in events {
+        let event_name = match e.event_type {
+            7 => "BEGIN",
+            8 => "COMMIT",
+            9 => "ABORT",
+            _ => "UNKNOWN",
+        };
+        println!(
+            "{},{},{},{},{},{},{},{}",
+            e.timestamp_ns,
+            e.tid,
+            event_name,
+            e.flags().name(),
+            e.txn_ptr,
+            e.parent_txn_ptr,
+            e.latency_ns,
+            e.return_code
         );
     }
 }

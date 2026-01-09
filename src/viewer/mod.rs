@@ -5,7 +5,7 @@
 
 mod template;
 
-use crate::event::{dbi_to_table_name, is_pre_trace_cursor, CursorEvent, PageFaultEvent};
+use crate::event::{dbi_to_table_name, is_pre_trace_cursor, CursorEvent, PageFaultEvent, TxnEvent};
 use crate::mdbx_metadata::{PageAttribution, RethTable};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -145,6 +145,8 @@ pub struct ViewerData {
     pub heatmap: HeatmapData,
     /// Cursor operation data
     pub cursor_data: CursorData,
+    /// Transaction lifecycle data
+    pub txn_data: TxnData,
     /// Warning about page fault attribution method
     pub page_fault_attribution_warning: Option<String>,
 }
@@ -266,6 +268,109 @@ pub struct CursorOpSample {
     pub success: bool,
 }
 
+/// Transaction lifecycle data for parallelization analysis
+#[derive(Debug, Serialize, Default)]
+pub struct TxnData {
+    /// Whether transaction data is available
+    pub has_data: bool,
+    /// Summary statistics
+    pub summary: TxnSummary,
+    /// Timeline of transactions (for Gantt chart visualization)
+    pub timeline: Vec<TxnTimelineEntry>,
+    /// Thread activity breakdown
+    pub thread_stats: Vec<TxnThreadStats>,
+    /// Concurrent transaction analysis
+    pub concurrency: TxnConcurrencyStats,
+    /// Recent transaction samples for log view
+    pub recent_txns: Vec<TxnSample>,
+}
+
+/// Transaction summary statistics
+#[derive(Debug, Serialize, Default)]
+pub struct TxnSummary {
+    pub total_events: u64,
+    pub begin_count: u64,
+    pub commit_count: u64,
+    pub abort_count: u64,
+    pub ro_count: u64,
+    pub rw_count: u64,
+    pub duration_secs: f64,
+    pub txn_rate_per_sec: f64,
+    pub avg_commit_latency_us: f64,
+    pub p50_commit_latency_us: f64,
+    pub p99_commit_latency_us: f64,
+    pub max_commit_latency_us: f64,
+}
+
+/// A transaction's lifecycle for timeline visualization
+#[derive(Debug, Serialize)]
+pub struct TxnTimelineEntry {
+    /// Thread ID
+    pub tid: u32,
+    /// Transaction pointer (for correlation)
+    pub txn_ptr: u64,
+    /// Start time relative to trace start (ms)
+    pub start_ms: f64,
+    /// End time relative to trace start (ms) - None if still open
+    pub end_ms: Option<f64>,
+    /// Duration in ms (if completed)
+    pub duration_ms: Option<f64>,
+    /// Transaction type: "RO" or "RW"
+    pub txn_type: String,
+    /// How the transaction ended: "commit", "abort", or "open"
+    pub end_type: String,
+    /// Commit latency in us (if committed)
+    pub commit_latency_us: Option<f64>,
+}
+
+/// Per-thread transaction statistics
+#[derive(Debug, Serialize)]
+pub struct TxnThreadStats {
+    pub tid: u32,
+    pub total_txns: u64,
+    pub ro_txns: u64,
+    pub rw_txns: u64,
+    pub commits: u64,
+    pub aborts: u64,
+    pub avg_commit_latency_us: f64,
+    pub percentage: f64,
+}
+
+/// Concurrency analysis statistics
+#[derive(Debug, Serialize, Default)]
+pub struct TxnConcurrencyStats {
+    /// Maximum number of concurrent RO transactions observed
+    pub max_concurrent_ro: u32,
+    /// Maximum number of concurrent RW transactions observed (should be 0 or 1 for MDBX)
+    pub max_concurrent_rw: u32,
+    /// Maximum total concurrent transactions
+    pub max_concurrent_total: u32,
+    /// Average concurrent RO transactions
+    pub avg_concurrent_ro: f64,
+    /// Timeline of concurrency levels
+    pub concurrency_timeline: Vec<ConcurrencyPoint>,
+}
+
+/// A point in the concurrency timeline
+#[derive(Debug, Serialize)]
+pub struct ConcurrencyPoint {
+    pub time_ms: u64,
+    pub concurrent_ro: u32,
+    pub concurrent_rw: u32,
+}
+
+/// Sample transaction for log view
+#[derive(Debug, Serialize)]
+pub struct TxnSample {
+    pub timestamp_ms: u64,
+    pub tid: u32,
+    pub event_type: String,
+    pub txn_type: String,
+    pub txn_ptr_short: String,
+    pub latency_us: Option<f64>,
+    pub success: bool,
+}
+
 #[derive(Debug, Serialize)]
 pub struct TraceSummary {
     pub duration_secs: f64,
@@ -353,12 +458,16 @@ pub struct HeatmapData {
 pub fn generate_viewer_data(
     events: &[PageFaultEvent],
     cursor_events: &[CursorEvent],
+    txn_events: &[TxnEvent],
     attribution: Option<&PageAttribution>,
 ) -> ViewerData {
     let page_faults: Vec<_> = events.iter().filter(|e| e.event_type == 1).collect();
 
     // Generate cursor data
     let cursor_data = generate_cursor_data(cursor_events);
+
+    // Generate transaction data
+    let txn_data = generate_txn_data(txn_events);
 
     // Build a set of tables that have cursor operations (by name)
     let tables_with_ops: std::collections::HashSet<String> = cursor_data
@@ -416,6 +525,7 @@ pub fn generate_viewer_data(
                 max_count: 0,
             },
             cursor_data,
+            txn_data,
             page_fault_attribution_warning: None,
         };
     }
@@ -493,6 +603,7 @@ pub fn generate_viewer_data(
         patterns,
         heatmap,
         cursor_data,
+        txn_data,
         page_fault_attribution_warning,
     }
 }
@@ -920,6 +1031,340 @@ fn generate_cursor_data(events: &[CursorEvent]) -> CursorData {
         slow_keys,
         pre_trace_cursor_ops,
         pre_trace_warning,
+    }
+}
+
+/// Generate transaction lifecycle data for visualization
+fn generate_txn_data(events: &[TxnEvent]) -> TxnData {
+    if events.is_empty() {
+        return TxnData::default();
+    }
+
+    let total = events.len() as u64;
+
+    // Timing
+    let min_ts = events.iter().map(|e| e.timestamp_ns).min().unwrap();
+    let max_ts = events.iter().map(|e| e.timestamp_ns).max().unwrap();
+    let duration_ns = max_ts - min_ts;
+    let duration_secs = duration_ns as f64 / 1e9;
+
+    // Count events and collect commit latencies
+    let mut begin_count = 0u64;
+    let mut commit_count = 0u64;
+    let mut abort_count = 0u64;
+    let mut ro_count = 0u64;
+    let mut rw_count = 0u64;
+    let mut commit_latencies: Vec<u64> = Vec::new();
+
+    // Track active transactions: txn_ptr -> (start_time, tid, is_ro)
+    let mut active_txns: HashMap<u64, (u64, u32, bool)> = HashMap::new();
+
+    // Build timeline entries
+    let mut timeline_entries: Vec<TxnTimelineEntry> = Vec::new();
+
+    // Track per-thread stats: tid -> (total, ro, rw, commits, aborts, total_commit_latency)
+    let mut thread_stats_map: HashMap<u32, (u64, u64, u64, u64, u64, u64)> = HashMap::new();
+
+    // Track concurrency over time
+    let mut concurrency_events: Vec<(u64, i32, bool)> = Vec::new(); // (timestamp, delta, is_ro)
+
+    for event in events {
+        let thread_entry = thread_stats_map
+            .entry(event.tid)
+            .or_insert((0, 0, 0, 0, 0, 0));
+
+        match event.event_type {
+            7 => {
+                // TXN_BEGIN
+                begin_count += 1;
+                let is_ro = event.is_read_only();
+                if is_ro {
+                    ro_count += 1;
+                    thread_entry.1 += 1;
+                } else {
+                    rw_count += 1;
+                    thread_entry.2 += 1;
+                }
+                thread_entry.0 += 1;
+
+                // Track active transaction
+                active_txns.insert(event.txn_ptr, (event.timestamp_ns, event.tid, is_ro));
+
+                // Track concurrency
+                concurrency_events.push((event.timestamp_ns, 1, is_ro));
+            }
+            8 => {
+                // TXN_COMMIT
+                commit_count += 1;
+                thread_entry.3 += 1;
+                commit_latencies.push(event.latency_ns);
+                thread_entry.5 += event.latency_ns;
+
+                // Create timeline entry if we have the begin
+                if let Some((start_ts, tid, is_ro)) = active_txns.remove(&event.txn_ptr) {
+                    let start_ms = (start_ts - min_ts) as f64 / 1_000_000.0;
+                    let end_ms = (event.timestamp_ns - min_ts) as f64 / 1_000_000.0;
+                    timeline_entries.push(TxnTimelineEntry {
+                        tid,
+                        txn_ptr: event.txn_ptr,
+                        start_ms,
+                        end_ms: Some(end_ms),
+                        duration_ms: Some(end_ms - start_ms),
+                        txn_type: if is_ro {
+                            "RO".to_string()
+                        } else {
+                            "RW".to_string()
+                        },
+                        end_type: "commit".to_string(),
+                        commit_latency_us: Some(event.latency_ns as f64 / 1000.0),
+                    });
+
+                    // Track concurrency
+                    concurrency_events.push((event.timestamp_ns, -1, is_ro));
+                }
+            }
+            9 => {
+                // TXN_ABORT
+                abort_count += 1;
+                thread_entry.4 += 1;
+
+                // Create timeline entry if we have the begin
+                if let Some((start_ts, tid, is_ro)) = active_txns.remove(&event.txn_ptr) {
+                    let start_ms = (start_ts - min_ts) as f64 / 1_000_000.0;
+                    let end_ms = (event.timestamp_ns - min_ts) as f64 / 1_000_000.0;
+                    timeline_entries.push(TxnTimelineEntry {
+                        tid,
+                        txn_ptr: event.txn_ptr,
+                        start_ms,
+                        end_ms: Some(end_ms),
+                        duration_ms: Some(end_ms - start_ms),
+                        txn_type: if is_ro {
+                            "RO".to_string()
+                        } else {
+                            "RW".to_string()
+                        },
+                        end_type: "abort".to_string(),
+                        commit_latency_us: None,
+                    });
+
+                    // Track concurrency
+                    concurrency_events.push((event.timestamp_ns, -1, is_ro));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Add entries for transactions still open at end of trace
+    for (txn_ptr, (start_ts, tid, is_ro)) in active_txns {
+        let start_ms = (start_ts - min_ts) as f64 / 1_000_000.0;
+        timeline_entries.push(TxnTimelineEntry {
+            tid,
+            txn_ptr,
+            start_ms,
+            end_ms: None,
+            duration_ms: None,
+            txn_type: if is_ro {
+                "RO".to_string()
+            } else {
+                "RW".to_string()
+            },
+            end_type: "open".to_string(),
+            commit_latency_us: None,
+        });
+    }
+
+    // Sort timeline by start time
+    timeline_entries.sort_by(|a, b| a.start_ms.partial_cmp(&b.start_ms).unwrap());
+
+    // Limit timeline entries for performance
+    if timeline_entries.len() > 1000 {
+        // Sample evenly
+        let step = timeline_entries.len() / 1000;
+        timeline_entries = timeline_entries
+            .into_iter()
+            .step_by(step)
+            .take(1000)
+            .collect();
+    }
+
+    // Calculate commit latency stats
+    commit_latencies.sort();
+    let avg_commit_latency_us = if !commit_latencies.is_empty() {
+        (commit_latencies.iter().sum::<u64>() as f64 / commit_latencies.len() as f64) / 1000.0
+    } else {
+        0.0
+    };
+    let p50_commit_latency_us = if !commit_latencies.is_empty() {
+        commit_latencies[commit_latencies.len() / 2] as f64 / 1000.0
+    } else {
+        0.0
+    };
+    let p99_commit_latency_us = if !commit_latencies.is_empty() {
+        commit_latencies[(commit_latencies.len() * 99) / 100] as f64 / 1000.0
+    } else {
+        0.0
+    };
+    let max_commit_latency_us = commit_latencies.last().copied().unwrap_or(0) as f64 / 1000.0;
+
+    // Build thread stats
+    let mut thread_stats: Vec<TxnThreadStats> = thread_stats_map
+        .into_iter()
+        .map(
+            |(tid, (total_txns, ro_txns, rw_txns, commits, aborts, total_lat))| TxnThreadStats {
+                tid,
+                total_txns,
+                ro_txns,
+                rw_txns,
+                commits,
+                aborts,
+                avg_commit_latency_us: if commits > 0 {
+                    (total_lat as f64 / commits as f64) / 1000.0
+                } else {
+                    0.0
+                },
+                percentage: total_txns as f64 / begin_count as f64 * 100.0,
+            },
+        )
+        .collect();
+    thread_stats.sort_by(|a, b| b.total_txns.cmp(&a.total_txns));
+    thread_stats.truncate(20);
+
+    // Calculate concurrency stats
+    concurrency_events.sort_by_key(|(ts, _, _)| *ts);
+
+    let mut current_ro = 0i32;
+    let mut current_rw = 0i32;
+    let mut max_concurrent_ro = 0u32;
+    let mut max_concurrent_rw = 0u32;
+    let mut max_concurrent_total = 0u32;
+    let mut concurrency_samples: Vec<(u64, u32, u32)> = Vec::new();
+    let mut total_ro_time = 0u64;
+    let mut last_ts = min_ts;
+
+    for (ts, delta, is_ro) in &concurrency_events {
+        // Accumulate time at current level
+        if current_ro > 0 {
+            total_ro_time += (ts - last_ts) * current_ro as u64;
+        }
+        last_ts = *ts;
+
+        if *is_ro {
+            current_ro += delta;
+        } else {
+            current_rw += delta;
+        }
+
+        max_concurrent_ro = max_concurrent_ro.max(current_ro.max(0) as u32);
+        max_concurrent_rw = max_concurrent_rw.max(current_rw.max(0) as u32);
+        max_concurrent_total = max_concurrent_total.max((current_ro + current_rw).max(0) as u32);
+
+        concurrency_samples.push((*ts, current_ro.max(0) as u32, current_rw.max(0) as u32));
+    }
+
+    let avg_concurrent_ro = if duration_ns > 0 {
+        total_ro_time as f64 / duration_ns as f64
+    } else {
+        0.0
+    };
+
+    // Sample concurrency timeline for visualization (bucket by 100ms)
+    let bucket_ns = 100_000_000u64; // 100ms
+    let num_buckets = ((duration_ns / bucket_ns) + 1) as usize;
+    let mut concurrency_timeline: Vec<ConcurrencyPoint> = Vec::with_capacity(num_buckets.min(1000));
+
+    if !concurrency_samples.is_empty() {
+        let mut bucket_idx = 0usize;
+        let mut sample_idx = 0usize;
+        let mut last_ro = 0u32;
+        let mut last_rw = 0u32;
+
+        while bucket_idx < num_buckets.min(1000) {
+            let bucket_start = min_ts + (bucket_idx as u64 * bucket_ns);
+
+            // Find the last sample before or at this bucket
+            while sample_idx < concurrency_samples.len()
+                && concurrency_samples[sample_idx].0 <= bucket_start
+            {
+                last_ro = concurrency_samples[sample_idx].1;
+                last_rw = concurrency_samples[sample_idx].2;
+                sample_idx += 1;
+            }
+
+            concurrency_timeline.push(ConcurrencyPoint {
+                time_ms: (bucket_idx as u64 * bucket_ns) / 1_000_000,
+                concurrent_ro: last_ro,
+                concurrent_rw: last_rw,
+            });
+
+            bucket_idx += 1;
+        }
+    }
+
+    // Sample recent transactions for log view
+    let sample_size = 200.min(events.len());
+    let step = events.len() / sample_size.max(1);
+    let recent_txns: Vec<TxnSample> = events
+        .iter()
+        .step_by(step.max(1))
+        .take(sample_size)
+        .map(|e| {
+            let event_type = match e.event_type {
+                7 => "BEGIN",
+                8 => "COMMIT",
+                9 => "ABORT",
+                _ => "UNKNOWN",
+            };
+            TxnSample {
+                timestamp_ms: (e.timestamp_ns - min_ts) / 1_000_000,
+                tid: e.tid,
+                event_type: event_type.to_string(),
+                txn_type: if e.is_read_only() {
+                    "RO".to_string()
+                } else {
+                    "RW".to_string()
+                },
+                txn_ptr_short: format!("0x{:x}", e.txn_ptr & 0xFFFF),
+                latency_us: if e.event_type == 8 {
+                    Some(e.latency_ns as f64 / 1000.0)
+                } else {
+                    None
+                },
+                success: e.return_code == 0,
+            }
+        })
+        .collect();
+
+    TxnData {
+        has_data: true,
+        summary: TxnSummary {
+            total_events: total,
+            begin_count,
+            commit_count,
+            abort_count,
+            ro_count,
+            rw_count,
+            duration_secs,
+            txn_rate_per_sec: if duration_secs > 0.0 {
+                begin_count as f64 / duration_secs
+            } else {
+                0.0
+            },
+            avg_commit_latency_us,
+            p50_commit_latency_us,
+            p99_commit_latency_us,
+            max_commit_latency_us,
+        },
+        timeline: timeline_entries,
+        thread_stats,
+        concurrency: TxnConcurrencyStats {
+            max_concurrent_ro,
+            max_concurrent_rw,
+            max_concurrent_total,
+            avg_concurrent_ro,
+            concurrency_timeline,
+        },
+        recent_txns,
     }
 }
 

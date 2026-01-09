@@ -27,6 +27,7 @@ pub fn generate_html(data: &ViewerData) -> String {
             <button class="tab" data-tab="threads">Threads</button>
             <button class="tab" data-tab="patterns">Patterns</button>
             <button class="tab" data-tab="cursors">Cursor Ops</button>
+            <button class="tab" data-tab="transactions">Transactions</button>
         </nav>
 
         <main>
@@ -297,6 +298,114 @@ pub fn generate_html(data: &ViewerData) -> String {
                                     <th>Table</th>
                                     <th>Operation</th>
                                     <th>Key</th>
+                                    <th>Latency</th>
+                                    <th>Status</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+
+            <section id="transactions" class="panel">
+                <h2>Transaction Lifecycle Analysis</h2>
+                <div id="txn-no-data" style="display:none; text-align:center; padding:40px; color:#888;">
+                    No transaction data available. Run trace with --trace-cursors flag.
+                </div>
+                <div id="txn-content">
+                    <div class="summary-grid">
+                        <div class="stat-card">
+                            <div class="stat-label">Total Transactions</div>
+                            <div class="stat-value" id="txn-total"></div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Txn Rate</div>
+                            <div class="stat-value" id="txn-rate"></div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Read-Only</div>
+                            <div class="stat-value minor" id="txn-ro"></div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Read-Write</div>
+                            <div class="stat-value major" id="txn-rw"></div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Commits</div>
+                            <div class="stat-value" id="txn-commits"></div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Aborts</div>
+                            <div class="stat-value" id="txn-aborts"></div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Avg Commit Latency</div>
+                            <div class="stat-value" id="txn-avg-latency"></div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">P99 Commit Latency</div>
+                            <div class="stat-value major" id="txn-p99-latency"></div>
+                        </div>
+                    </div>
+
+                    <h3>Concurrency Analysis</h3>
+                    <div class="summary-grid" style="grid-template-columns: repeat(4, 1fr);">
+                        <div class="stat-card">
+                            <div class="stat-label">Max Concurrent RO</div>
+                            <div class="stat-value" id="txn-max-ro"></div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Max Concurrent RW</div>
+                            <div class="stat-value" id="txn-max-rw"></div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Max Total Concurrent</div>
+                            <div class="stat-value" id="txn-max-total"></div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-label">Avg Concurrent RO</div>
+                            <div class="stat-value" id="txn-avg-ro"></div>
+                        </div>
+                    </div>
+
+                    <h3>Concurrency Timeline</h3>
+                    <div class="chart-full">
+                        <canvas id="txn-concurrency-chart"></canvas>
+                    </div>
+
+                    <h3>Transaction Timeline (Gantt View)</h3>
+                    <div class="chart-full" style="height: 500px; overflow-y: auto;">
+                        <canvas id="txn-gantt-chart" style="height: 100%;"></canvas>
+                    </div>
+
+                    <h3>Thread Transaction Distribution</h3>
+                    <table class="data-table" id="txn-threads-table">
+                        <thead>
+                            <tr>
+                                <th>Thread ID</th>
+                                <th>Total Txns</th>
+                                <th>RO</th>
+                                <th>RW</th>
+                                <th>Commits</th>
+                                <th>Aborts</th>
+                                <th>Avg Commit Latency</th>
+                                <th>%</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+
+                    <h3>Transaction Log (Sample)</h3>
+                    <div class="cursor-log-container" style="max-height:400px; overflow-y:auto; background:#0a0a0f; border-radius:8px; border:1px solid #252530;">
+                        <table class="data-table" id="txn-log-table">
+                            <thead>
+                                <tr>
+                                    <th>Time (ms)</th>
+                                    <th>Thread ID</th>
+                                    <th>Event</th>
+                                    <th>Type</th>
+                                    <th>Txn Ptr</th>
                                     <th>Latency</th>
                                     <th>Status</th>
                                 </tr>
@@ -1354,6 +1463,9 @@ function initTab(tabName) {
         case 'cursors':
             initCursors();
             break;
+        case 'transactions':
+            initTransactions();
+            break;
     }
 }
 
@@ -1685,6 +1797,223 @@ function initCursors() {
         `;
         logBody.appendChild(row);
     });
+}
+
+function initTransactions() {
+    const txnData = DATA.txn_data;
+
+    if (!txnData || !txnData.has_data) {
+        document.getElementById('txn-no-data').style.display = 'block';
+        document.getElementById('txn-content').style.display = 'none';
+        return;
+    }
+
+    document.getElementById('txn-no-data').style.display = 'none';
+    document.getElementById('txn-content').style.display = 'block';
+
+    // Summary stats
+    document.getElementById('txn-total').textContent = formatNumber(txnData.summary.begin_count);
+    document.getElementById('txn-rate').textContent = formatNumber(txnData.summary.txn_rate_per_sec) + '/s';
+    document.getElementById('txn-ro').textContent = formatNumber(txnData.summary.ro_count);
+    document.getElementById('txn-rw').textContent = formatNumber(txnData.summary.rw_count);
+    document.getElementById('txn-commits').textContent = formatNumber(txnData.summary.commit_count);
+    document.getElementById('txn-aborts').textContent = formatNumber(txnData.summary.abort_count);
+    document.getElementById('txn-avg-latency').textContent = txnData.summary.avg_commit_latency_us.toFixed(1) + ' μs';
+    document.getElementById('txn-p99-latency').textContent = txnData.summary.p99_commit_latency_us.toFixed(1) + ' μs';
+
+    // Concurrency stats
+    document.getElementById('txn-max-ro').textContent = txnData.concurrency.max_concurrent_ro;
+    document.getElementById('txn-max-rw').textContent = txnData.concurrency.max_concurrent_rw;
+    document.getElementById('txn-max-total').textContent = txnData.concurrency.max_concurrent_total;
+    document.getElementById('txn-avg-ro').textContent = txnData.concurrency.avg_concurrent_ro.toFixed(2);
+
+    // Concurrency timeline chart
+    if (txnData.concurrency.concurrency_timeline && txnData.concurrency.concurrency_timeline.length > 0) {
+        charts.txnConcurrency = new SimpleChart(document.getElementById('txn-concurrency-chart'));
+        charts.txnConcurrency.drawLine(
+            [
+                txnData.concurrency.concurrency_timeline.map(t => t.concurrent_ro),
+                txnData.concurrency.concurrency_timeline.map(t => t.concurrent_rw)
+            ],
+            {
+                colors: ['#34d399', '#f87171'],
+                labels: ['Concurrent RO', 'Concurrent RW'],
+                title: 'Transaction Concurrency Over Time'
+            }
+        );
+    }
+
+    // Gantt chart for transaction timeline
+    if (txnData.timeline && txnData.timeline.length > 0) {
+        const ganttCanvas = document.getElementById('txn-gantt-chart');
+        const rect = ganttCanvas.parentElement.getBoundingClientRect();
+
+        // Get unique threads and sort
+        const threads = [...new Set(txnData.timeline.map(t => t.tid))].sort((a, b) => a - b);
+        const threadMap = new Map(threads.map((tid, i) => [tid, i]));
+
+        // Calculate chart dimensions
+        const rowHeight = 25;
+        const padding = { top: 40, right: 30, bottom: 50, left: 80 };
+        const chartHeight = Math.max(200, threads.length * rowHeight + padding.top + padding.bottom);
+
+        ganttCanvas.style.height = chartHeight + 'px';
+        ganttCanvas.width = rect.width * window.devicePixelRatio;
+        ganttCanvas.height = chartHeight * window.devicePixelRatio;
+
+        const ctx = ganttCanvas.getContext('2d');
+        ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+
+        const width = rect.width;
+        const chartWidth = width - padding.left - padding.right;
+        const innerHeight = chartHeight - padding.top - padding.bottom;
+
+        // Find time range
+        const minTime = Math.min(...txnData.timeline.map(t => t.start_ms));
+        const maxTime = Math.max(...txnData.timeline.map(t => t.end_ms || t.start_ms + 100));
+        const timeRange = maxTime - minTime || 1;
+
+        // Background
+        ctx.fillStyle = '#0a0a0f';
+        ctx.fillRect(0, 0, width, chartHeight);
+
+        // Draw grid
+        ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+        ctx.lineWidth = 1;
+
+        // Horizontal grid lines for each thread
+        threads.forEach((tid, i) => {
+            const y = padding.top + i * rowHeight + rowHeight / 2;
+            ctx.beginPath();
+            ctx.moveTo(padding.left, y);
+            ctx.lineTo(width - padding.right, y);
+            ctx.stroke();
+
+            // Thread label
+            ctx.fillStyle = '#888';
+            ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
+            ctx.textAlign = 'right';
+            ctx.fillText('TID ' + tid, padding.left - 10, y + 4);
+        });
+
+        // Vertical time grid
+        for (let i = 0; i <= 5; i++) {
+            const x = padding.left + (i / 5) * chartWidth;
+            ctx.beginPath();
+            ctx.moveTo(x, padding.top);
+            ctx.lineTo(x, chartHeight - padding.bottom);
+            ctx.stroke();
+
+            // Time label
+            const time = minTime + (timeRange * i / 5);
+            ctx.fillStyle = '#888';
+            ctx.textAlign = 'center';
+            ctx.fillText((time / 1000).toFixed(2) + 's', x, chartHeight - padding.bottom + 20);
+        }
+
+        // Draw transactions as bars
+        txnData.timeline.forEach(txn => {
+            const threadIdx = threadMap.get(txn.tid);
+            if (threadIdx === undefined) return;
+
+            const y = padding.top + threadIdx * rowHeight + 5;
+            const x = padding.left + ((txn.start_ms - minTime) / timeRange) * chartWidth;
+            const endMs = txn.end_ms || (txn.start_ms + 100);
+            const barWidth = Math.max(2, ((endMs - txn.start_ms) / timeRange) * chartWidth);
+            const barHeight = rowHeight - 10;
+
+            // Color based on type and status
+            let color;
+            if (txn.txn_type === 'RW') {
+                color = txn.end_type === 'commit' ? '#ef4444' :
+                        txn.end_type === 'abort' ? '#7c2d12' : '#dc2626';
+            } else {
+                color = txn.end_type === 'commit' ? '#22c55e' :
+                        txn.end_type === 'abort' ? '#14532d' : '#16a34a';
+            }
+
+            // Draw bar with rounded corners
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            const radius = 3;
+            ctx.roundRect(x, y, barWidth, barHeight, radius);
+            ctx.fill();
+
+            // Border
+            ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+        });
+
+        // Legend
+        ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
+        ctx.textAlign = 'left';
+        const legendY = 20;
+        let legendX = padding.left;
+
+        const legendItems = [
+            { color: '#22c55e', label: 'RO Commit' },
+            { color: '#ef4444', label: 'RW Commit' },
+            { color: '#14532d', label: 'RO Abort' },
+            { color: '#7c2d12', label: 'RW Abort' },
+            { color: '#16a34a', label: 'RO Open' },
+            { color: '#dc2626', label: 'RW Open' }
+        ];
+
+        legendItems.forEach(item => {
+            ctx.fillStyle = item.color;
+            ctx.fillRect(legendX, legendY - 8, 12, 12);
+            ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+            ctx.strokeRect(legendX, legendY - 8, 12, 12);
+
+            ctx.fillStyle = '#aaa';
+            ctx.fillText(item.label, legendX + 16, legendY);
+            legendX += ctx.measureText(item.label).width + 35;
+        });
+    }
+
+    // Thread stats table
+    const threadBody = document.querySelector('#txn-threads-table tbody');
+    if (txnData.thread_stats) {
+        txnData.thread_stats.forEach(t => {
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td>${t.tid}</td>
+                <td>${formatNumber(t.total_txns)}</td>
+                <td style="color: #34d399">${formatNumber(t.ro_txns)}</td>
+                <td style="color: #f87171">${formatNumber(t.rw_txns)}</td>
+                <td>${formatNumber(t.commits)}</td>
+                <td>${formatNumber(t.aborts)}</td>
+                <td>${t.avg_commit_latency_us.toFixed(1)} μs</td>
+                <td>${t.percentage.toFixed(1)}%</td>
+            `;
+            threadBody.appendChild(row);
+        });
+    }
+
+    // Transaction log table
+    const logBody = document.querySelector('#txn-log-table tbody');
+    if (txnData.recent_txns) {
+        txnData.recent_txns.forEach(txn => {
+            const row = document.createElement('tr');
+            const eventColor = txn.event_type === 'BEGIN' ? '#6366f1' :
+                              txn.event_type === 'COMMIT' ? '#22c55e' : '#f87171';
+            const typeColor = txn.txn_type === 'RO' ? '#34d399' : '#f87171';
+            const statusColor = txn.success ? '#34d399' : '#f87171';
+            const latencyStr = txn.latency_us ? txn.latency_us.toFixed(1) + ' μs' : '-';
+
+            row.innerHTML = `
+                <td>${txn.timestamp_ms}</td>
+                <td>${txn.tid}</td>
+                <td style="color: ${eventColor}">${txn.event_type}</td>
+                <td style="color: ${typeColor}">${txn.txn_type}</td>
+                <td style="font-family: monospace;">${txn.txn_ptr_short}</td>
+                <td>${latencyStr}</td>
+                <td style="color: ${statusColor}">${txn.success ? 'OK' : 'ERR'}</td>
+            `;
+            logBody.appendChild(row);
+        });
+    }
 }
 
 // Initialize the viewer

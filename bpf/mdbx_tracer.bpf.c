@@ -25,6 +25,10 @@
 #define EVENT_CURSOR_GET     3
 #define EVENT_CURSOR_PUT     4
 #define EVENT_DIRECT_GET     5
+#define EVENT_CURSOR_DEL     6
+#define EVENT_TXN_BEGIN      7
+#define EVENT_TXN_COMMIT     8
+#define EVENT_TXN_ABORT      9
 
 // MDBX cursor operations (from libmdbx mdbx.h MDBX_cursor_op enum)
 // These are the numeric values for the cursor operations
@@ -69,22 +73,36 @@ struct page_fault_event {
 };
 
 // MDBX cursor operation event sent to userspace
-// This captures mdbx_cursor_get/put calls with key information
-// Layout (112 bytes total on x86_64):
-//   timestamp_ns: 0, pid: 8, tid: 12, event_type: 16, cursor_op: 20,
-//   dbi: 24, key_size: 28, key_data: 32, return_code: 96, _pad: 100, latency_ns: 104
+// This captures mdbx_cursor_get/put/del calls with key information
 struct cursor_event {
     __u64 timestamp_ns;      // Kernel timestamp
     __u32 pid;               // Process ID
     __u32 tid;               // Thread ID
-    __u32 event_type;        // EVENT_CURSOR_GET or EVENT_CURSOR_PUT
+    __u32 event_type;        // EVENT_CURSOR_GET, EVENT_CURSOR_PUT, EVENT_CURSOR_DEL
     __u32 cursor_op;         // MDBX cursor operation (MDBX_SET_RANGE, MDBX_NEXT, etc.)
     __u32 dbi;               // Database index (table identifier)
     __u32 key_size;          // Size of the key
     __u8  key_data[MAX_KEY_SIZE];  // First MAX_KEY_SIZE bytes of the key
     __s32 return_code;       // Return code from the operation (filled in uretprobe)
-    __u32 _pad;              // Explicit padding for u64 alignment
+    __u32 value_size;        // Size of value (for put operations)
     __u64 latency_ns;        // Time spent in the operation
+    __u32 write_flags;       // Write flags (UPSERT, APPEND, etc.) for put operations
+    __u32 _pad2;             // Padding for alignment
+};
+
+// Transaction event sent to userspace
+// This captures mdbx_txn_begin/commit/abort calls
+struct txn_event {
+    __u64 timestamp_ns;      // Kernel timestamp
+    __u32 pid;               // Process ID
+    __u32 tid;               // Thread ID
+    __u32 event_type;        // EVENT_TXN_BEGIN, EVENT_TXN_COMMIT, EVENT_TXN_ABORT
+    __u32 txn_flags;         // Transaction flags (MDBX_TXN_RDONLY=1, MDBX_TXN_READWRITE=0)
+    __u64 txn_ptr;           // Transaction pointer (for correlation)
+    __u64 parent_txn_ptr;    // Parent transaction pointer (0 if none)
+    __u64 latency_ns;        // Time spent (for commit)
+    __s32 return_code;       // Return code
+    __u32 _pad;              // Padding for alignment
 };
 
 // Context for correlating kprobe entry with kretprobe return
@@ -108,7 +126,48 @@ struct cursor_context {
     __u32 cursor_op;         // MDBX cursor operation
     __u32 dbi;               // Database index
     __u32 key_size;          // Key size
+    __u32 value_size;        // Value size (for put operations)
+    __u32 write_flags;       // Write flags (for put operations)
     __u8  key_data[MAX_KEY_SIZE];  // Key data
+};
+
+// Context for correlating uprobe entry with uretprobe return for cursor put ops
+struct cursor_put_context {
+    __u64 timestamp_ns;      // Entry timestamp for latency calculation
+    __u32 pid;
+    __u32 tid;
+    __u32 dbi;               // Database index
+    __u32 key_size;          // Key size
+    __u32 value_size;        // Value size
+    __u32 write_flags;       // Write flags (UPSERT, APPEND, etc.)
+    __u8  key_data[MAX_KEY_SIZE];  // Key data
+};
+
+// Context for correlating uprobe entry with uretprobe return for cursor del ops
+struct cursor_del_context {
+    __u64 timestamp_ns;      // Entry timestamp for latency calculation
+    __u32 pid;
+    __u32 tid;
+    __u32 dbi;               // Database index
+    __u32 write_flags;       // Delete flags (CURRENT, NO_DUP_DATA)
+};
+
+// Context for transaction begin operations
+struct txn_begin_context {
+    __u64 timestamp_ns;      // Entry timestamp
+    __u32 pid;
+    __u32 tid;
+    __u32 txn_flags;         // Transaction flags (RO/RW)
+    __u64 parent_txn_ptr;    // Parent transaction pointer
+    __u64 txn_ptr_ptr;       // Address of MDBX_txn** output parameter
+};
+
+// Context for transaction commit operations
+struct txn_commit_context {
+    __u64 timestamp_ns;      // Entry timestamp
+    __u32 pid;
+    __u32 tid;
+    __u64 txn_ptr;           // Transaction pointer
 };
 
 // Ring buffer for events - sized for high throughput
@@ -212,6 +271,38 @@ struct {
     __type(value, struct direct_get_context);
 } pending_direct_gets SEC(".maps");
 
+// Per-task context for mdbx_cursor_put
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 10240);
+    __type(key, __u64);    // pid_tgid
+    __type(value, struct cursor_put_context);
+} pending_cursor_puts SEC(".maps");
+
+// Per-task context for mdbx_cursor_del
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 10240);
+    __type(key, __u64);    // pid_tgid
+    __type(value, struct cursor_del_context);
+} pending_cursor_dels SEC(".maps");
+
+// Per-task context for mdbx_txn_begin_ex
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 1024);
+    __type(key, __u64);    // pid_tgid
+    __type(value, struct txn_begin_context);
+} pending_txn_begins SEC(".maps");
+
+// Per-task context for mdbx_txn_commit_ex
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 1024);
+    __type(key, __u64);    // pid_tgid
+    __type(value, struct txn_commit_context);
+} pending_txn_commits SEC(".maps");
+
 #define STAT_TOTAL_FAULTS     0
 #define STAT_MDBX_FAULTS      1
 #define STAT_MAJOR_FAULTS     2
@@ -221,6 +312,11 @@ struct {
 #define STAT_CURSOR_NEXTS     6
 #define STAT_CURSOR_ERRORS    7
 #define STAT_DIRECT_GETS      8
+#define STAT_CURSOR_PUTS      9
+#define STAT_CURSOR_DELS     10
+#define STAT_TXN_BEGINS      11
+#define STAT_TXN_COMMITS     12
+#define STAT_TXN_ABORTS      13
 
 static __always_inline void inc_stat(__u32 idx) {
     __u64 *val = bpf_map_lookup_elem(&stats, &idx);
@@ -594,8 +690,10 @@ int BPF_URETPROBE(trace_cursor_get_ret, int ret)
     e->dbi = cctx->dbi;
     e->key_size = cctx->key_size;
     e->return_code = ret;
-    e->_pad = 0;
+    e->value_size = 0;  // Not applicable for get
     e->latency_ns = latency;
+    e->write_flags = 0;
+    e->_pad2 = 0;
     
     // Copy key data
     // Use a loop that the verifier can understand
@@ -777,8 +875,10 @@ int BPF_URETPROBE(trace_direct_get_ret, int ret)
     e->dbi = dctx->dbi;
     e->key_size = dctx->key_size;
     e->return_code = ret;
-    e->_pad = 0;
+    e->value_size = 0;  // Not tracked for direct get
     e->latency_ns = latency;
+    e->write_flags = 0;
+    e->_pad2 = 0;
     
     // Copy key data
     #pragma unroll
@@ -791,6 +891,391 @@ int BPF_URETPROBE(trace_direct_get_ret, int ret)
     // Clean up
     bpf_map_delete_elem(&pending_direct_gets, &pid_tgid);
     
+    return 0;
+}
+
+// ============================================================================
+// MDBX Cursor Put Tracing (uprobes)
+// ============================================================================
+//
+// Signature: int mdbx_cursor_put(MDBX_cursor *cursor, MDBX_val *key,
+//                                 MDBX_val *data, MDBX_put_flags_t flags)
+//
+// This traces cursor-based write operations which Reth uses heavily for:
+// - upsert, insert, append, append_dup
+
+SEC("uprobe/mdbx_cursor_put")
+int BPF_UPROBE(trace_cursor_put, void *cursor, struct mdbx_val *key,
+               struct mdbx_val *data, __u32 flags)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 pid = pid_tgid >> 32;
+
+    if (!should_trace_pid(pid)) {
+        return 0;
+    }
+
+    inc_stat(STAT_CURSOR_PUTS);
+
+    struct cursor_put_context pctx = {
+        .timestamp_ns = bpf_ktime_get_ns(),
+        .pid = pid,
+        .tid = (__u32)pid_tgid,
+        .dbi = 0,
+        .key_size = 0,
+        .value_size = 0,
+        .write_flags = flags,
+    };
+
+    // Look up the DBI from cursor_to_dbi map
+    if (cursor) {
+        __u64 cursor_addr = (__u64)cursor;
+        __u32 *dbi_ptr = bpf_map_lookup_elem(&cursor_to_dbi, &cursor_addr);
+        if (dbi_ptr) {
+            pctx.dbi = *dbi_ptr;
+        } else {
+            pctx.dbi = 0xFFFFFFFE;  // Unknown cursor
+        }
+    }
+
+    // Read key data
+    if (key) {
+        struct mdbx_val key_val = {};
+        if (bpf_probe_read_user(&key_val, sizeof(key_val), key) == 0) {
+            pctx.key_size = key_val.iov_len;
+            if (pctx.key_size > MAX_KEY_SIZE) {
+                pctx.key_size = MAX_KEY_SIZE;
+            }
+            if (key_val.iov_base && pctx.key_size > 0) {
+                bpf_probe_read_user(pctx.key_data, pctx.key_size, key_val.iov_base);
+            }
+        }
+    }
+
+    // Read value size (not the actual data, just the size)
+    if (data) {
+        struct mdbx_val data_val = {};
+        if (bpf_probe_read_user(&data_val, sizeof(data_val), data) == 0) {
+            pctx.value_size = data_val.iov_len;
+        }
+    }
+
+    bpf_map_update_elem(&pending_cursor_puts, &pid_tgid, &pctx, BPF_ANY);
+    return 0;
+}
+
+SEC("uretprobe/mdbx_cursor_put")
+int BPF_URETPROBE(trace_cursor_put_ret, int ret)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+
+    struct cursor_put_context *pctx = bpf_map_lookup_elem(&pending_cursor_puts, &pid_tgid);
+    if (!pctx) {
+        return 0;
+    }
+
+    if (ret != 0) {
+        inc_stat(STAT_CURSOR_ERRORS);
+    }
+
+    __u64 now = bpf_ktime_get_ns();
+    __u64 latency = now - pctx->timestamp_ns;
+
+    struct cursor_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (!e) {
+        inc_stat(STAT_EVENTS_DROPPED);
+        bpf_map_delete_elem(&pending_cursor_puts, &pid_tgid);
+        return 0;
+    }
+
+    e->timestamp_ns = pctx->timestamp_ns;
+    e->pid = pctx->pid;
+    e->tid = pctx->tid;
+    e->event_type = EVENT_CURSOR_PUT;
+    e->cursor_op = 0;  // Not applicable for put
+    e->dbi = pctx->dbi;
+    e->key_size = pctx->key_size;
+    e->return_code = ret;
+    e->value_size = pctx->value_size;
+    e->latency_ns = latency;
+    e->write_flags = pctx->write_flags;
+    e->_pad2 = 0;
+
+    #pragma unroll
+    for (int i = 0; i < MAX_KEY_SIZE; i++) {
+        e->key_data[i] = pctx->key_data[i];
+    }
+
+    bpf_ringbuf_submit(e, 0);
+    bpf_map_delete_elem(&pending_cursor_puts, &pid_tgid);
+    return 0;
+}
+
+// ============================================================================
+// MDBX Cursor Del Tracing (uprobes)
+// ============================================================================
+//
+// Signature: int mdbx_cursor_del(MDBX_cursor *cursor, MDBX_put_flags_t flags)
+//
+// This traces cursor-based delete operations
+
+SEC("uprobe/mdbx_cursor_del")
+int BPF_UPROBE(trace_cursor_del, void *cursor, __u32 flags)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 pid = pid_tgid >> 32;
+
+    if (!should_trace_pid(pid)) {
+        return 0;
+    }
+
+    inc_stat(STAT_CURSOR_DELS);
+
+    struct cursor_del_context dctx = {
+        .timestamp_ns = bpf_ktime_get_ns(),
+        .pid = pid,
+        .tid = (__u32)pid_tgid,
+        .dbi = 0,
+        .write_flags = flags,
+    };
+
+    // Look up the DBI from cursor_to_dbi map
+    if (cursor) {
+        __u64 cursor_addr = (__u64)cursor;
+        __u32 *dbi_ptr = bpf_map_lookup_elem(&cursor_to_dbi, &cursor_addr);
+        if (dbi_ptr) {
+            dctx.dbi = *dbi_ptr;
+        } else {
+            dctx.dbi = 0xFFFFFFFE;  // Unknown cursor
+        }
+    }
+
+    bpf_map_update_elem(&pending_cursor_dels, &pid_tgid, &dctx, BPF_ANY);
+    return 0;
+}
+
+SEC("uretprobe/mdbx_cursor_del")
+int BPF_URETPROBE(trace_cursor_del_ret, int ret)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+
+    struct cursor_del_context *dctx = bpf_map_lookup_elem(&pending_cursor_dels, &pid_tgid);
+    if (!dctx) {
+        return 0;
+    }
+
+    if (ret != 0) {
+        inc_stat(STAT_CURSOR_ERRORS);
+    }
+
+    __u64 now = bpf_ktime_get_ns();
+    __u64 latency = now - dctx->timestamp_ns;
+
+    struct cursor_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (!e) {
+        inc_stat(STAT_EVENTS_DROPPED);
+        bpf_map_delete_elem(&pending_cursor_dels, &pid_tgid);
+        return 0;
+    }
+
+    e->timestamp_ns = dctx->timestamp_ns;
+    e->pid = dctx->pid;
+    e->tid = dctx->tid;
+    e->event_type = EVENT_CURSOR_DEL;
+    e->cursor_op = 0;
+    e->dbi = dctx->dbi;
+    e->key_size = 0;  // No key for delete at current position
+    e->return_code = ret;
+    e->value_size = 0;
+    e->latency_ns = latency;
+    e->write_flags = dctx->write_flags;
+    e->_pad2 = 0;
+
+    // Zero out key_data
+    #pragma unroll
+    for (int i = 0; i < MAX_KEY_SIZE; i++) {
+        e->key_data[i] = 0;
+    }
+
+    bpf_ringbuf_submit(e, 0);
+    bpf_map_delete_elem(&pending_cursor_dels, &pid_tgid);
+    return 0;
+}
+
+// ============================================================================
+// MDBX Transaction Lifecycle Tracing (uprobes)
+// ============================================================================
+//
+// These trace transaction begin/commit/abort to understand:
+// - Transaction duration
+// - Concurrent transactions (RO vs RW)
+// - Thread to transaction mapping
+
+// Signature: int mdbx_txn_begin_ex(MDBX_env *env, MDBX_txn *parent,
+//                                   MDBX_txn_flags_t flags, MDBX_txn **txn, void *context)
+SEC("uprobe/mdbx_txn_begin_ex")
+int BPF_UPROBE(trace_txn_begin, void *env, void *parent, __u32 flags,
+               void **txn_ptr, void *context)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 pid = pid_tgid >> 32;
+
+    if (!should_trace_pid(pid)) {
+        return 0;
+    }
+
+    inc_stat(STAT_TXN_BEGINS);
+
+    struct txn_begin_context bctx = {
+        .timestamp_ns = bpf_ktime_get_ns(),
+        .pid = pid,
+        .tid = (__u32)pid_tgid,
+        .txn_flags = flags,
+        .parent_txn_ptr = (__u64)parent,
+        .txn_ptr_ptr = (__u64)txn_ptr,
+    };
+
+    bpf_map_update_elem(&pending_txn_begins, &pid_tgid, &bctx, BPF_ANY);
+    return 0;
+}
+
+SEC("uretprobe/mdbx_txn_begin_ex")
+int BPF_URETPROBE(trace_txn_begin_ret, int ret)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+
+    struct txn_begin_context *bctx = bpf_map_lookup_elem(&pending_txn_begins, &pid_tgid);
+    if (!bctx) {
+        return 0;
+    }
+
+    __u64 now = bpf_ktime_get_ns();
+    __u64 latency = now - bctx->timestamp_ns;
+
+    // Read the transaction pointer from the output parameter
+    __u64 txn_ptr = 0;
+    if (ret == 0 && bctx->txn_ptr_ptr) {
+        void *txn = NULL;
+        if (bpf_probe_read_user(&txn, sizeof(txn), (void *)bctx->txn_ptr_ptr) == 0) {
+            txn_ptr = (__u64)txn;
+        }
+    }
+
+    struct txn_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (!e) {
+        inc_stat(STAT_EVENTS_DROPPED);
+        bpf_map_delete_elem(&pending_txn_begins, &pid_tgid);
+        return 0;
+    }
+
+    e->timestamp_ns = bctx->timestamp_ns;
+    e->pid = bctx->pid;
+    e->tid = bctx->tid;
+    e->event_type = EVENT_TXN_BEGIN;
+    e->txn_flags = bctx->txn_flags;
+    e->txn_ptr = txn_ptr;
+    e->parent_txn_ptr = bctx->parent_txn_ptr;
+    e->latency_ns = latency;
+    e->return_code = ret;
+    e->_pad = 0;
+
+    bpf_ringbuf_submit(e, 0);
+    bpf_map_delete_elem(&pending_txn_begins, &pid_tgid);
+    return 0;
+}
+
+// Signature: int mdbx_txn_commit_ex(MDBX_txn *txn, MDBX_commit_latency *latency)
+SEC("uprobe/mdbx_txn_commit_ex")
+int BPF_UPROBE(trace_txn_commit, void *txn, void *latency)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 pid = pid_tgid >> 32;
+
+    if (!should_trace_pid(pid)) {
+        return 0;
+    }
+
+    inc_stat(STAT_TXN_COMMITS);
+
+    struct txn_commit_context cctx = {
+        .timestamp_ns = bpf_ktime_get_ns(),
+        .pid = pid,
+        .tid = (__u32)pid_tgid,
+        .txn_ptr = (__u64)txn,
+    };
+
+    bpf_map_update_elem(&pending_txn_commits, &pid_tgid, &cctx, BPF_ANY);
+    return 0;
+}
+
+SEC("uretprobe/mdbx_txn_commit_ex")
+int BPF_URETPROBE(trace_txn_commit_ret, int ret)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+
+    struct txn_commit_context *cctx = bpf_map_lookup_elem(&pending_txn_commits, &pid_tgid);
+    if (!cctx) {
+        return 0;
+    }
+
+    __u64 now = bpf_ktime_get_ns();
+    __u64 latency = now - cctx->timestamp_ns;
+
+    struct txn_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (!e) {
+        inc_stat(STAT_EVENTS_DROPPED);
+        bpf_map_delete_elem(&pending_txn_commits, &pid_tgid);
+        return 0;
+    }
+
+    e->timestamp_ns = cctx->timestamp_ns;
+    e->pid = cctx->pid;
+    e->tid = cctx->tid;
+    e->event_type = EVENT_TXN_COMMIT;
+    e->txn_flags = 0;  // Not available at commit time
+    e->txn_ptr = cctx->txn_ptr;
+    e->parent_txn_ptr = 0;
+    e->latency_ns = latency;
+    e->return_code = ret;
+    e->_pad = 0;
+
+    bpf_ringbuf_submit(e, 0);
+    bpf_map_delete_elem(&pending_txn_commits, &pid_tgid);
+    return 0;
+}
+
+// Signature: int mdbx_txn_abort(MDBX_txn *txn)
+// For abort, we don't need entry/return correlation - just emit on entry
+SEC("uprobe/mdbx_txn_abort")
+int BPF_UPROBE(trace_txn_abort, void *txn)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 pid = pid_tgid >> 32;
+
+    if (!should_trace_pid(pid)) {
+        return 0;
+    }
+
+    inc_stat(STAT_TXN_ABORTS);
+
+    struct txn_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (!e) {
+        inc_stat(STAT_EVENTS_DROPPED);
+        return 0;
+    }
+
+    e->timestamp_ns = bpf_ktime_get_ns();
+    e->pid = pid;
+    e->tid = (__u32)pid_tgid;
+    e->event_type = EVENT_TXN_ABORT;
+    e->txn_flags = 0;
+    e->txn_ptr = (__u64)txn;
+    e->parent_txn_ptr = 0;
+    e->latency_ns = 0;
+    e->return_code = 0;
+    e->_pad = 0;
+
+    bpf_ringbuf_submit(e, 0);
     return 0;
 }
 

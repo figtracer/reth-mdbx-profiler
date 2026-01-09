@@ -7,7 +7,7 @@ mod event;
 mod mdbx_metadata;
 mod viewer;
 
-use event::{CursorEvent, PageFaultEvent};
+use event::{CursorEvent, PageFaultEvent, TxnEvent};
 use mdbx_metadata::PageAttribution;
 
 /// Analyze MDBX page fault traces and generate interactive visualizations
@@ -46,6 +46,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut events: Vec<PageFaultEvent> = Vec::new();
     let mut cursor_events: Vec<CursorEvent> = Vec::new();
+    let mut txn_events: Vec<TxnEvent> = Vec::new();
     let mut parse_errors = 0;
 
     for line in reader.lines() {
@@ -54,6 +55,13 @@ fn main() -> anyhow::Result<()> {
         if let Ok(event) = serde_json::from_str::<PageFaultEvent>(&line) {
             if event.event_type == 1 || event.event_type == 2 {
                 events.push(event);
+                continue;
+            }
+        }
+        // Try to parse as txn event
+        if let Ok(event) = serde_json::from_str::<TxnEvent>(&line) {
+            if event.event_type >= 7 && event.event_type <= 9 {
+                txn_events.push(event);
                 continue;
             }
         }
@@ -66,13 +74,14 @@ fn main() -> anyhow::Result<()> {
     }
 
     eprintln!(
-        "Loaded {} page fault events, {} cursor events ({} parse errors)",
+        "Loaded {} page fault events, {} cursor events, {} txn events ({} parse errors)",
         events.len(),
         cursor_events.len(),
+        txn_events.len(),
         parse_errors
     );
 
-    if events.is_empty() && cursor_events.is_empty() {
+    if events.is_empty() && cursor_events.is_empty() && txn_events.is_empty() {
         eprintln!("No events to analyze");
         return Ok(());
     }
@@ -80,6 +89,7 @@ fn main() -> anyhow::Result<()> {
     // Sort by timestamp
     events.sort_by_key(|e| e.timestamp_ns);
     cursor_events.sort_by_key(|e| e.timestamp_ns);
+    txn_events.sort_by_key(|e| e.timestamp_ns);
 
     // Load MDBX metadata if path provided
     let attribution = if let Some(mdbx_path) = &cli.mdbx_path {
@@ -99,10 +109,21 @@ fn main() -> anyhow::Result<()> {
 
     match cli.format.as_str() {
         "html" => {
-            generate_html_viewer(&events, &cursor_events, attribution.as_ref(), &cli)?;
+            generate_html_viewer(
+                &events,
+                &cursor_events,
+                &txn_events,
+                attribution.as_ref(),
+                &cli,
+            )?;
         }
         "json" => {
-            let data = viewer::generate_viewer_data(&events, &cursor_events, attribution.as_ref());
+            let data = viewer::generate_viewer_data(
+                &events,
+                &cursor_events,
+                &txn_events,
+                attribution.as_ref(),
+            );
             println!("{}", serde_json::to_string_pretty(&data)?);
         }
         "csv" => {
@@ -120,12 +141,13 @@ fn main() -> anyhow::Result<()> {
 fn generate_html_viewer(
     events: &[PageFaultEvent],
     cursor_events: &[CursorEvent],
+    txn_events: &[TxnEvent],
     attribution: Option<&PageAttribution>,
     cli: &Cli,
 ) -> anyhow::Result<()> {
     eprintln!("Generating viewer data...");
 
-    let data = viewer::generate_viewer_data(events, cursor_events, attribution);
+    let data = viewer::generate_viewer_data(events, cursor_events, txn_events, attribution);
 
     // Determine output path
     let output_path = cli.output.clone().unwrap_or_else(|| {
@@ -176,6 +198,33 @@ fn generate_html_viewer(
         eprintln!(
             "Seek ratio:      {:.1}%",
             data.cursor_data.summary.seek_ratio
+        );
+    }
+
+    // Print transaction stats if available
+    if data.txn_data.has_data {
+        eprintln!("\n=== Transactions ===");
+        eprintln!("Total txns:      {}", data.txn_data.summary.begin_count);
+        eprintln!(
+            "Txn rate:        {:.1}/s",
+            data.txn_data.summary.txn_rate_per_sec
+        );
+        eprintln!(
+            "RO/RW:           {} / {}",
+            data.txn_data.summary.ro_count, data.txn_data.summary.rw_count
+        );
+        eprintln!(
+            "Commits/Aborts:  {} / {}",
+            data.txn_data.summary.commit_count, data.txn_data.summary.abort_count
+        );
+        eprintln!(
+            "Avg commit lat:  {:.1} μs",
+            data.txn_data.summary.avg_commit_latency_us
+        );
+        eprintln!(
+            "Max concurrent:  {} RO, {} RW",
+            data.txn_data.concurrency.max_concurrent_ro,
+            data.txn_data.concurrency.max_concurrent_rw
         );
     }
 

@@ -76,6 +76,94 @@ pub enum EventType {
     CursorGet = 3,
     CursorPut = 4,
     DirectGet = 5,
+    CursorDel = 6,
+    TxnBegin = 7,
+    TxnCommit = 8,
+    TxnAbort = 9,
+}
+
+/// Write flags for cursor put operations (from libmdbx)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WriteFlags(pub u32);
+
+impl WriteFlags {
+    pub const UPSERT: u32 = 0x00000;
+    pub const NO_OVERWRITE: u32 = 0x00010;
+    pub const NO_DUP_DATA: u32 = 0x00020;
+    pub const CURRENT: u32 = 0x00040;
+    pub const APPEND: u32 = 0x20000;
+    pub const APPEND_DUP: u32 = 0x40000;
+
+    pub fn is_upsert(&self) -> bool {
+        self.0 == Self::UPSERT
+    }
+
+    pub fn is_append(&self) -> bool {
+        (self.0 & Self::APPEND) != 0
+    }
+
+    pub fn is_append_dup(&self) -> bool {
+        (self.0 & Self::APPEND_DUP) != 0
+    }
+
+    pub fn is_no_overwrite(&self) -> bool {
+        (self.0 & Self::NO_OVERWRITE) != 0
+    }
+
+    pub fn name(&self) -> &'static str {
+        if self.0 == Self::UPSERT {
+            "UPSERT"
+        } else if (self.0 & Self::APPEND_DUP) != 0 {
+            "APPEND_DUP"
+        } else if (self.0 & Self::APPEND) != 0 {
+            "APPEND"
+        } else if (self.0 & Self::NO_OVERWRITE) != 0 {
+            "NO_OVERWRITE"
+        } else if (self.0 & Self::CURRENT) != 0 {
+            "CURRENT"
+        } else if (self.0 & Self::NO_DUP_DATA) != 0 {
+            "NO_DUP_DATA"
+        } else {
+            "UNKNOWN"
+        }
+    }
+}
+
+impl std::fmt::Display for WriteFlags {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name())
+    }
+}
+
+/// Transaction flags (from libmdbx)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TxnFlags(pub u32);
+
+impl TxnFlags {
+    pub const READWRITE: u32 = 0;
+    pub const RDONLY: u32 = 1;
+
+    pub fn is_read_only(&self) -> bool {
+        (self.0 & Self::RDONLY) != 0
+    }
+
+    pub fn is_read_write(&self) -> bool {
+        !self.is_read_only()
+    }
+
+    pub fn name(&self) -> &'static str {
+        if self.is_read_only() {
+            "RO"
+        } else {
+            "RW"
+        }
+    }
+}
+
+impl std::fmt::Display for TxnFlags {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name())
+    }
 }
 
 /// MDBX cursor operations matching libmdbx MDBX_cursor_op enum
@@ -291,7 +379,7 @@ impl PageFaultEvent {
 /// MDBX cursor operation event from BPF
 ///
 /// This struct must match the layout of cursor_event in mdbx_tracer.bpf.c exactly.
-/// Layout on x86_64 Linux (112 bytes total):
+/// Layout on x86_64 Linux (128 bytes total):
 ///   - timestamp_ns: offset 0, size 8
 ///   - pid: offset 8, size 4
 ///   - tid: offset 12, size 4
@@ -301,8 +389,10 @@ impl PageFaultEvent {
 ///   - key_size: offset 28, size 4
 ///   - key_data: offset 32, size 64
 ///   - return_code: offset 96, size 4
-///   - padding: offset 100, size 4 (implicit for u64 alignment)
+///   - value_size: offset 100, size 4
 ///   - latency_ns: offset 104, size 8
+///   - write_flags: offset 112, size 4
+///   - _pad2: offset 116, size 4
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct CursorEvent {
@@ -312,9 +402,9 @@ pub struct CursorEvent {
     pub pid: u32,
     /// Thread ID
     pub tid: u32,
-    /// Event type (EVENT_CURSOR_GET=3, EVENT_CURSOR_PUT=4, or EVENT_DIRECT_GET=5)
+    /// Event type (EVENT_CURSOR_GET=3, EVENT_CURSOR_PUT=4, EVENT_DIRECT_GET=5, EVENT_CURSOR_DEL=6)
     pub event_type: u32,
-    /// MDBX cursor operation (SET_RANGE, NEXT, etc.)
+    /// MDBX cursor operation (SET_RANGE, NEXT, etc.) - for get operations
     pub cursor_op: u32,
     /// Database index (table identifier in MDBX)
     pub dbi: u32,
@@ -324,10 +414,14 @@ pub struct CursorEvent {
     pub key_data: [u8; MAX_KEY_SIZE],
     /// Return code from the operation
     pub return_code: i32,
-    /// Explicit padding for u64 alignment (to match C struct layout)
-    pub _pad: u32,
+    /// Size of value (for put operations)
+    pub value_size: u32,
     /// Time spent in the operation (nanoseconds)
     pub latency_ns: u64,
+    /// Write flags (for put/del operations): UPSERT, APPEND, etc.
+    pub write_flags: u32,
+    /// Padding for alignment
+    pub _pad2: u32,
 }
 
 // Custom Serialize implementation for CursorEvent since [u8; 64] doesn't impl Serialize
@@ -337,7 +431,7 @@ impl Serialize for CursorEvent {
         S: serde::Serializer,
     {
         use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("CursorEvent", 10)?;
+        let mut state = serializer.serialize_struct("CursorEvent", 12)?;
         state.serialize_field("timestamp_ns", &self.timestamp_ns)?;
         state.serialize_field("pid", &self.pid)?;
         state.serialize_field("tid", &self.tid)?;
@@ -348,7 +442,9 @@ impl Serialize for CursorEvent {
         // Serialize key_data as hex string for readability
         state.serialize_field("key_data", &self.key_hex())?;
         state.serialize_field("return_code", &self.return_code)?;
+        state.serialize_field("value_size", &self.value_size)?;
         state.serialize_field("latency_ns", &self.latency_ns)?;
+        state.serialize_field("write_flags", &self.write_flags)?;
         state.end()
     }
 }
@@ -370,7 +466,11 @@ impl<'de> Deserialize<'de> for CursorEvent {
             key_size: u32,
             key_data: String, // Hex string
             return_code: i32,
+            #[serde(default)]
+            value_size: u32,
             latency_ns: u64,
+            #[serde(default)]
+            write_flags: u32,
         }
 
         let helper = CursorEventHelper::deserialize(deserializer)?;
@@ -391,8 +491,10 @@ impl<'de> Deserialize<'de> for CursorEvent {
             key_size: helper.key_size,
             key_data,
             return_code: helper.return_code,
-            _pad: 0,
+            value_size: helper.value_size,
             latency_ns: helper.latency_ns,
+            write_flags: helper.write_flags,
+            _pad2: 0,
         })
     }
 }
@@ -461,6 +563,107 @@ impl CursorEvent {
     }
 }
 
+/// MDBX transaction lifecycle event from BPF
+///
+/// This struct must match the layout of txn_event in mdbx_tracer.bpf.c exactly.
+/// Layout on x86_64 Linux (48 bytes total):
+///   - timestamp_ns: offset 0, size 8
+///   - pid: offset 8, size 4
+///   - tid: offset 12, size 4
+///   - event_type: offset 16, size 4
+///   - txn_flags: offset 20, size 4
+///   - txn_ptr: offset 24, size 8
+///   - parent_txn_ptr: offset 32, size 8
+///   - latency_ns: offset 40, size 8
+///   - return_code: offset 48, size 4
+///   - _pad: offset 52, size 4
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct TxnEvent {
+    /// Kernel timestamp in nanoseconds
+    pub timestamp_ns: u64,
+    /// Process ID
+    pub pid: u32,
+    /// Thread ID
+    pub tid: u32,
+    /// Event type (EVENT_TXN_BEGIN=7, EVENT_TXN_COMMIT=8, EVENT_TXN_ABORT=9)
+    pub event_type: u32,
+    /// Transaction flags (0=RW, 1=RO, see TxnFlags)
+    pub txn_flags: u32,
+    /// Transaction pointer (for correlation between begin/commit/abort)
+    pub txn_ptr: u64,
+    /// Parent transaction pointer (0 if not nested)
+    pub parent_txn_ptr: u64,
+    /// Time spent in operation (for commit: total commit latency)
+    pub latency_ns: u64,
+    /// Return code from the operation
+    pub return_code: i32,
+    /// Padding for alignment
+    pub _pad: u32,
+}
+
+impl TxnEvent {
+    /// Get the transaction flags as a TxnFlags wrapper
+    pub fn flags(&self) -> TxnFlags {
+        TxnFlags(self.txn_flags)
+    }
+
+    /// Returns true if this is a read-only transaction
+    pub fn is_read_only(&self) -> bool {
+        self.flags().is_read_only()
+    }
+
+    /// Returns true if this is a read-write transaction
+    pub fn is_read_write(&self) -> bool {
+        self.flags().is_read_write()
+    }
+
+    /// Returns true if this is a nested transaction
+    pub fn is_nested(&self) -> bool {
+        self.parent_txn_ptr != 0
+    }
+
+    /// Returns true if the operation succeeded (return code 0)
+    pub fn is_success(&self) -> bool {
+        self.return_code == 0
+    }
+
+    /// Get the event type as an EventType enum
+    pub fn event_type(&self) -> Option<EventType> {
+        match self.event_type {
+            7 => Some(EventType::TxnBegin),
+            8 => Some(EventType::TxnCommit),
+            9 => Some(EventType::TxnAbort),
+            _ => None,
+        }
+    }
+
+    /// Get the latency in microseconds
+    pub fn latency_us(&self) -> f64 {
+        self.latency_ns as f64 / 1000.0
+    }
+
+    /// Get the latency in milliseconds
+    pub fn latency_ms(&self) -> f64 {
+        self.latency_ns as f64 / 1_000_000.0
+    }
+
+    /// Get a human-readable description of the event
+    pub fn description(&self) -> String {
+        let event_name = match self.event_type {
+            7 => "TXN_BEGIN",
+            8 => "TXN_COMMIT",
+            9 => "TXN_ABORT",
+            _ => "TXN_UNKNOWN",
+        };
+        let flags_str = self.flags().name();
+        format!(
+            "{} {} txn=0x{:x} tid={}",
+            event_name, flags_str, self.txn_ptr, self.tid
+        )
+    }
+}
+
 /// Statistics for a trace session
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct TraceStats {
@@ -472,13 +675,22 @@ pub struct TraceStats {
     pub random_accesses: u64,
     pub unique_pages: u64,
     pub duration_ns: u64,
-    // Cursor operation stats
+    // Cursor read operation stats
     pub cursor_ops: u64,
     pub cursor_seeks: u64,
     pub cursor_nexts: u64,
     pub cursor_errors: u64,
     // Direct get stats (mdbx_get calls, not cursor-based)
     pub direct_gets: u64,
+    // Cursor write operation stats
+    pub cursor_puts: u64,
+    pub cursor_dels: u64,
+    // Transaction lifecycle stats
+    pub txn_begins: u64,
+    pub txn_commits: u64,
+    pub txn_aborts: u64,
+    pub txn_ro_count: u64,
+    pub txn_rw_count: u64,
 }
 
 impl TraceStats {
