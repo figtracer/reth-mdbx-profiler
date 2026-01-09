@@ -136,12 +136,15 @@ impl std::fmt::Display for WriteFlags {
 }
 
 /// Transaction flags (from libmdbx)
+/// See: https://github.com/erthink/libmdbx/blob/master/mdbx.h
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TxnFlags(pub u32);
 
 impl TxnFlags {
+    /// MDBX_TXN_READWRITE = 0 (default, read-write transaction)
     pub const READWRITE: u32 = 0;
-    pub const RDONLY: u32 = 1;
+    /// MDBX_TXN_RDONLY = 0x20000 (read-only transaction)
+    pub const RDONLY: u32 = 0x20000;
 
     pub fn is_read_only(&self) -> bool {
         (self.0 & Self::RDONLY) != 0

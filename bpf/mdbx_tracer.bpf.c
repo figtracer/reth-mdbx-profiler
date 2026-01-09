@@ -97,7 +97,7 @@ struct txn_event {
     __u32 pid;               // Process ID
     __u32 tid;               // Thread ID
     __u32 event_type;        // EVENT_TXN_BEGIN, EVENT_TXN_COMMIT, EVENT_TXN_ABORT
-    __u32 txn_flags;         // Transaction flags (MDBX_TXN_RDONLY=1, MDBX_TXN_READWRITE=0)
+    __u32 txn_flags;         // Transaction flags (MDBX_TXN_RDONLY=0x20000, MDBX_TXN_READWRITE=0)
     __u64 txn_ptr;           // Transaction pointer (for correlation)
     __u64 parent_txn_ptr;    // Parent transaction pointer (0 if none)
     __u64 latency_ns;        // Time spent (for commit)
