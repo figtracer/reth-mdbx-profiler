@@ -396,23 +396,6 @@ pub fn generate_html(data: &ViewerData) -> String {
                         <tbody></tbody>
                     </table>
 
-                    <h3>Transaction Log (Sample)</h3>
-                    <div class="cursor-log-container" style="max-height:400px; overflow-y:auto; background:#0a0a0f; border-radius:8px; border:1px solid #252530;">
-                        <table class="data-table" id="txn-log-table">
-                            <thead>
-                                <tr>
-                                    <th>Time (ms)</th>
-                                    <th>Thread ID</th>
-                                    <th>Event</th>
-                                    <th>Type</th>
-                                    <th>Txn Ptr</th>
-                                    <th>Latency</th>
-                                    <th>Status</th>
-                                </tr>
-                            </thead>
-                            <tbody></tbody>
-                        </table>
-                    </div>
                 </div>
             </section>
         </main>
@@ -2285,29 +2268,6 @@ function initTransactions() {
         });
     }
 
-    // Transaction log table
-    const logBody = document.querySelector('#txn-log-table tbody');
-    if (txnData.recent_txns) {
-        txnData.recent_txns.forEach(txn => {
-            const row = document.createElement('tr');
-            const eventColor = txn.event_type === 'BEGIN' ? '#6366f1' :
-                              txn.event_type === 'COMMIT' ? '#22c55e' : '#f87171';
-            const typeColor = txn.txn_type === 'RO' ? '#34d399' : '#f87171';
-            const statusColor = txn.success ? '#34d399' : '#f87171';
-            const latencyStr = txn.latency_us ? txn.latency_us.toFixed(1) + ' μs' : '-';
-
-            row.innerHTML = `
-                <td>${txn.timestamp_ms}</td>
-                <td>${txn.tid}</td>
-                <td style="color: ${eventColor}">${txn.event_type}</td>
-                <td style="color: ${typeColor}">${txn.txn_type}</td>
-                <td style="font-family: monospace;">${txn.txn_ptr_short}</td>
-                <td>${latencyStr}</td>
-                <td style="color: ${statusColor}">${txn.success ? 'OK' : 'ERR'}</td>
-            `;
-            logBody.appendChild(row);
-        });
-    }
 }
 
 // Initialize the viewer

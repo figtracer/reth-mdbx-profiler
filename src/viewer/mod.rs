@@ -5,7 +5,7 @@
 
 mod template;
 
-use crate::event::{dbi_to_table_name, is_pre_trace_cursor, CursorEvent, PageFaultEvent, TxnEvent};
+use crate::event::{CursorEvent, PageFaultEvent, TxnEvent, dbi_to_table_name, is_pre_trace_cursor};
 use crate::mdbx_metadata::{PageAttribution, RethTable};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -281,8 +281,6 @@ pub struct TxnData {
     pub thread_stats: Vec<TxnThreadStats>,
     /// Concurrent transaction analysis
     pub concurrency: TxnConcurrencyStats,
-    /// Recent transaction samples for log view
-    pub recent_txns: Vec<TxnSample>,
 }
 
 /// Transaction summary statistics
@@ -357,18 +355,6 @@ pub struct ConcurrencyPoint {
     pub time_ms: u64,
     pub concurrent_ro: u32,
     pub concurrent_rw: u32,
-}
-
-/// Sample transaction for log view
-#[derive(Debug, Serialize)]
-pub struct TxnSample {
-    pub timestamp_ms: u64,
-    pub tid: u32,
-    pub event_type: String,
-    pub txn_type: String,
-    pub txn_ptr_short: String,
-    pub latency_us: Option<f64>,
-    pub success: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1302,40 +1288,6 @@ fn generate_txn_data(events: &[TxnEvent]) -> TxnData {
         }
     }
 
-    // Sample recent transactions for log view
-    let sample_size = 200.min(events.len());
-    let step = events.len() / sample_size.max(1);
-    let recent_txns: Vec<TxnSample> = events
-        .iter()
-        .step_by(step.max(1))
-        .take(sample_size)
-        .map(|e| {
-            let event_type = match e.event_type {
-                7 => "BEGIN",
-                8 => "COMMIT",
-                9 => "ABORT",
-                _ => "UNKNOWN",
-            };
-            TxnSample {
-                timestamp_ms: (e.timestamp_ns - min_ts) / 1_000_000,
-                tid: e.tid,
-                event_type: event_type.to_string(),
-                txn_type: if e.is_read_only() {
-                    "RO".to_string()
-                } else {
-                    "RW".to_string()
-                },
-                txn_ptr_short: format!("0x{:x}", e.txn_ptr & 0xFFFF),
-                latency_us: if e.event_type == 8 {
-                    Some(e.latency_ns as f64 / 1000.0)
-                } else {
-                    None
-                },
-                success: e.return_code == 0,
-            }
-        })
-        .collect();
-
     TxnData {
         has_data: true,
         summary: TxnSummary {
@@ -1365,7 +1317,6 @@ fn generate_txn_data(events: &[TxnEvent]) -> TxnData {
             avg_concurrent_ro,
             concurrency_timeline,
         },
-        recent_txns,
     }
 }
 
