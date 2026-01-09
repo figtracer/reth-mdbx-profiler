@@ -1056,8 +1056,9 @@ fn generate_txn_data(events: &[TxnEvent]) -> TxnData {
     let mut rw_count = 0u64;
     let mut commit_latencies: Vec<u64> = Vec::new();
 
-    // Track active transactions: txn_ptr -> (start_time, tid, is_ro)
-    let mut active_txns: HashMap<u64, (u64, u32, bool)> = HashMap::new();
+    // Track active transactions: (txn_ptr, tid) -> (start_time, is_ro)
+    // Key by both ptr and tid since MDBX reuses transaction pointers
+    let mut active_txns: HashMap<(u64, u32), (u64, bool)> = HashMap::new();
 
     // Build timeline entries
     let mut timeline_entries: Vec<TxnTimelineEntry> = Vec::new();
@@ -1087,8 +1088,8 @@ fn generate_txn_data(events: &[TxnEvent]) -> TxnData {
                 }
                 thread_entry.0 += 1;
 
-                // Track active transaction
-                active_txns.insert(event.txn_ptr, (event.timestamp_ns, event.tid, is_ro));
+                // Track active transaction by (ptr, tid) pair
+                active_txns.insert((event.txn_ptr, event.tid), (event.timestamp_ns, is_ro));
 
                 // Track concurrency
                 concurrency_events.push((event.timestamp_ns, 1, is_ro));
@@ -1100,12 +1101,12 @@ fn generate_txn_data(events: &[TxnEvent]) -> TxnData {
                 commit_latencies.push(event.latency_ns);
                 thread_entry.5 += event.latency_ns;
 
-                // Create timeline entry if we have the begin
-                if let Some((start_ts, tid, is_ro)) = active_txns.remove(&event.txn_ptr) {
+                // Create timeline entry if we have the begin (keyed by ptr + tid)
+                if let Some((start_ts, is_ro)) = active_txns.remove(&(event.txn_ptr, event.tid)) {
                     let start_ms = (start_ts - min_ts) as f64 / 1_000_000.0;
                     let end_ms = (event.timestamp_ns - min_ts) as f64 / 1_000_000.0;
                     timeline_entries.push(TxnTimelineEntry {
-                        tid,
+                        tid: event.tid,
                         txn_ptr: event.txn_ptr,
                         start_ms,
                         end_ms: Some(end_ms),
@@ -1128,12 +1129,12 @@ fn generate_txn_data(events: &[TxnEvent]) -> TxnData {
                 abort_count += 1;
                 thread_entry.4 += 1;
 
-                // Create timeline entry if we have the begin
-                if let Some((start_ts, tid, is_ro)) = active_txns.remove(&event.txn_ptr) {
+                // Create timeline entry if we have the begin (keyed by ptr + tid)
+                if let Some((start_ts, is_ro)) = active_txns.remove(&(event.txn_ptr, event.tid)) {
                     let start_ms = (start_ts - min_ts) as f64 / 1_000_000.0;
                     let end_ms = (event.timestamp_ns - min_ts) as f64 / 1_000_000.0;
                     timeline_entries.push(TxnTimelineEntry {
-                        tid,
+                        tid: event.tid,
                         txn_ptr: event.txn_ptr,
                         start_ms,
                         end_ms: Some(end_ms),
@@ -1156,7 +1157,7 @@ fn generate_txn_data(events: &[TxnEvent]) -> TxnData {
     }
 
     // Add entries for transactions still open at end of trace
-    for (txn_ptr, (start_ts, tid, is_ro)) in active_txns {
+    for ((txn_ptr, tid), (start_ts, is_ro)) in active_txns {
         let start_ms = (start_ts - min_ts) as f64 / 1_000_000.0;
         timeline_entries.push(TxnTimelineEntry {
             tid,

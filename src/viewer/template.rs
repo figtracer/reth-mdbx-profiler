@@ -375,8 +375,8 @@ pub fn generate_html(data: &ViewerData) -> String {
                     </div>
 
                     <h3>Transaction Timeline (Gantt View)</h3>
-                    <div class="chart-full" style="height: 500px; overflow-y: auto;">
-                        <canvas id="txn-gantt-chart" style="height: 100%;"></canvas>
+                    <div id="txn-gantt-container" class="chart-full" style="min-height: 400px; max-height: 800px; overflow-y: auto;">
+                        <canvas id="txn-gantt-chart"></canvas>
                     </div>
 
                     <h3>Thread Transaction Distribution</h3>
@@ -1843,132 +1843,356 @@ function initTransactions() {
         );
     }
 
-    // Gantt chart for transaction timeline
+    // Interactive Gantt chart for transaction timeline
     if (txnData.timeline && txnData.timeline.length > 0) {
+        const ganttContainer = document.getElementById('txn-gantt-chart').parentElement;
         const ganttCanvas = document.getElementById('txn-gantt-chart');
-        const rect = ganttCanvas.parentElement.getBoundingClientRect();
 
         // Get unique threads and sort
         const threads = [...new Set(txnData.timeline.map(t => t.tid))].sort((a, b) => a - b);
         const threadMap = new Map(threads.map((tid, i) => [tid, i]));
 
-        // Calculate chart dimensions
-        const rowHeight = 25;
-        const padding = { top: 40, right: 30, bottom: 50, left: 80 };
-        const chartHeight = Math.max(200, threads.length * rowHeight + padding.top + padding.bottom);
+        // Much larger dimensions for better visibility
+        const rowHeight = 50;
+        const padding = { top: 60, right: 40, bottom: 60, left: 100 };
+        const minHeight = 500;
+        const chartHeight = Math.max(minHeight, threads.length * rowHeight + padding.top + padding.bottom);
 
-        ganttCanvas.style.height = chartHeight + 'px';
-        ganttCanvas.width = rect.width * window.devicePixelRatio;
-        ganttCanvas.height = chartHeight * window.devicePixelRatio;
-
-        const ctx = ganttCanvas.getContext('2d');
-        ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
-
-        const width = rect.width;
-        const chartWidth = width - padding.left - padding.right;
-        const innerHeight = chartHeight - padding.top - padding.bottom;
+        // Set container to be scrollable
+        ganttContainer.style.height = Math.min(700, chartHeight) + 'px';
+        ganttContainer.style.overflow = 'auto';
+        ganttContainer.style.position = 'relative';
 
         // Find time range
-        const minTime = Math.min(...txnData.timeline.map(t => t.start_ms));
-        const maxTime = Math.max(...txnData.timeline.map(t => t.end_ms || t.start_ms + 100));
-        const timeRange = maxTime - minTime || 1;
+        const dataMinTime = Math.min(...txnData.timeline.map(t => t.start_ms));
+        const dataMaxTime = Math.max(...txnData.timeline.map(t => t.end_ms || t.start_ms + 100));
+        const dataTimeRange = dataMaxTime - dataMinTime || 1;
 
-        // Background
-        ctx.fillStyle = '#0a0a0f';
-        ctx.fillRect(0, 0, width, chartHeight);
+        // Interactive state
+        let viewMinTime = dataMinTime;
+        let viewMaxTime = dataMaxTime;
+        let isDragging = false;
+        let dragStartX = 0;
+        let dragStartMinTime = 0;
+        let hoveredTxn = null;
 
-        // Draw grid
-        ctx.strokeStyle = 'rgba(255,255,255,0.1)';
-        ctx.lineWidth = 1;
+        // Create tooltip element
+        const tooltip = document.createElement('div');
+        tooltip.style.cssText = `
+            position: fixed;
+            background: rgba(20, 20, 30, 0.95);
+            border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 8px;
+            padding: 12px 16px;
+            font-size: 13px;
+            color: #fff;
+            pointer-events: none;
+            z-index: 10000;
+            display: none;
+            max-width: 350px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+        `;
+        document.body.appendChild(tooltip);
 
-        // Horizontal grid lines for each thread
-        threads.forEach((tid, i) => {
-            const y = padding.top + i * rowHeight + rowHeight / 2;
-            ctx.beginPath();
-            ctx.moveTo(padding.left, y);
-            ctx.lineTo(width - padding.right, y);
-            ctx.stroke();
+        // Calculate transaction rectangles for hit testing
+        function calcTxnRects() {
+            const width = ganttCanvas.width / window.devicePixelRatio;
+            const chartWidth = width - padding.left - padding.right;
+            const viewRange = viewMaxTime - viewMinTime || 1;
 
-            // Thread label
-            ctx.fillStyle = '#888';
-            ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
-            ctx.textAlign = 'right';
-            ctx.fillText('TID ' + tid, padding.left - 10, y + 4);
-        });
+            return txnData.timeline.map(txn => {
+                const threadIdx = threadMap.get(txn.tid);
+                if (threadIdx === undefined) return null;
 
-        // Vertical time grid
-        for (let i = 0; i <= 5; i++) {
-            const x = padding.left + (i / 5) * chartWidth;
-            ctx.beginPath();
-            ctx.moveTo(x, padding.top);
-            ctx.lineTo(x, chartHeight - padding.bottom);
-            ctx.stroke();
+                const y = padding.top + threadIdx * rowHeight + 8;
+                const x = padding.left + ((txn.start_ms - viewMinTime) / viewRange) * chartWidth;
+                const endMs = txn.end_ms || (txn.start_ms + 100);
+                const barWidth = Math.max(4, ((endMs - txn.start_ms) / viewRange) * chartWidth);
+                const barHeight = rowHeight - 16;
 
-            // Time label
-            const time = minTime + (timeRange * i / 5);
-            ctx.fillStyle = '#888';
-            ctx.textAlign = 'center';
-            ctx.fillText((time / 1000).toFixed(2) + 's', x, chartHeight - padding.bottom + 20);
+                return { txn, x, y, width: barWidth, height: barHeight };
+            }).filter(r => r !== null);
         }
 
-        // Draw transactions as bars
-        txnData.timeline.forEach(txn => {
-            const threadIdx = threadMap.get(txn.tid);
-            if (threadIdx === undefined) return;
+        function render() {
+            const rect = ganttContainer.getBoundingClientRect();
+            const width = rect.width;
 
-            const y = padding.top + threadIdx * rowHeight + 5;
-            const x = padding.left + ((txn.start_ms - minTime) / timeRange) * chartWidth;
-            const endMs = txn.end_ms || (txn.start_ms + 100);
-            const barWidth = Math.max(2, ((endMs - txn.start_ms) / timeRange) * chartWidth);
-            const barHeight = rowHeight - 10;
+            ganttCanvas.style.width = width + 'px';
+            ganttCanvas.style.height = chartHeight + 'px';
+            ganttCanvas.width = width * window.devicePixelRatio;
+            ganttCanvas.height = chartHeight * window.devicePixelRatio;
 
-            // Color based on type and status
-            let color;
-            if (txn.txn_type === 'RW') {
-                color = txn.end_type === 'commit' ? '#ef4444' :
-                        txn.end_type === 'abort' ? '#7c2d12' : '#dc2626';
-            } else {
-                color = txn.end_type === 'commit' ? '#22c55e' :
-                        txn.end_type === 'abort' ? '#14532d' : '#16a34a';
+            const ctx = ganttCanvas.getContext('2d');
+            ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+
+            const chartWidth = width - padding.left - padding.right;
+            const viewRange = viewMaxTime - viewMinTime || 1;
+
+            // Background
+            ctx.fillStyle = '#0a0a0f';
+            ctx.fillRect(0, 0, width, chartHeight);
+
+            // Draw alternating row backgrounds
+            threads.forEach((tid, i) => {
+                const y = padding.top + i * rowHeight;
+                ctx.fillStyle = i % 2 === 0 ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.1)';
+                ctx.fillRect(padding.left, y, chartWidth, rowHeight);
+            });
+
+            // Draw grid
+            ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+            ctx.lineWidth = 1;
+
+            // Horizontal grid lines
+            threads.forEach((tid, i) => {
+                const y = padding.top + i * rowHeight + rowHeight;
+                ctx.beginPath();
+                ctx.moveTo(padding.left, y);
+                ctx.lineTo(width - padding.right, y);
+                ctx.stroke();
+
+                // Thread label with larger font
+                ctx.fillStyle = '#aaa';
+                ctx.font = '13px -apple-system, BlinkMacSystemFont, sans-serif';
+                ctx.textAlign = 'right';
+                ctx.fillText('TID ' + tid, padding.left - 15, padding.top + i * rowHeight + rowHeight / 2 + 5);
+            });
+
+            // Vertical time grid with more lines
+            const numGridLines = 10;
+            for (let i = 0; i <= numGridLines; i++) {
+                const x = padding.left + (i / numGridLines) * chartWidth;
+                ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+                ctx.beginPath();
+                ctx.moveTo(x, padding.top);
+                ctx.lineTo(x, chartHeight - padding.bottom);
+                ctx.stroke();
+
+                // Time label
+                const time = viewMinTime + (viewRange * i / numGridLines);
+                ctx.fillStyle = '#888';
+                ctx.font = '12px -apple-system, BlinkMacSystemFont, sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText((time / 1000).toFixed(3) + 's', x, chartHeight - padding.bottom + 25);
             }
 
-            // Draw bar with rounded corners
-            ctx.fillStyle = color;
-            ctx.beginPath();
-            const radius = 3;
-            ctx.roundRect(x, y, barWidth, barHeight, radius);
-            ctx.fill();
+            // Draw transactions as bars
+            const txnRects = calcTxnRects();
+            txnRects.forEach(({ txn, x, y, width: barWidth, height: barHeight }) => {
+                // Skip if outside visible area
+                if (x + barWidth < padding.left || x > width - padding.right) return;
 
-            // Border
-            ctx.strokeStyle = 'rgba(255,255,255,0.2)';
-            ctx.lineWidth = 1;
-            ctx.stroke();
+                // Color based on type and status
+                let color, borderColor;
+                if (txn.txn_type === 'RW') {
+                    color = txn.end_type === 'commit' ? '#ef4444' :
+                            txn.end_type === 'abort' ? '#7c2d12' : '#dc2626';
+                    borderColor = txn.end_type === 'commit' ? '#f87171' : '#991b1b';
+                } else {
+                    color = txn.end_type === 'commit' ? '#22c55e' :
+                            txn.end_type === 'abort' ? '#14532d' : '#16a34a';
+                    borderColor = txn.end_type === 'commit' ? '#4ade80' : '#15803d';
+                }
+
+                // Highlight hovered transaction
+                const isHovered = hoveredTxn && hoveredTxn.txn_ptr === txn.txn_ptr;
+                if (isHovered) {
+                    ctx.shadowColor = color;
+                    ctx.shadowBlur = 15;
+                }
+
+                // Draw bar with rounded corners
+                ctx.fillStyle = isHovered ? borderColor : color;
+                ctx.beginPath();
+                const radius = 4;
+                ctx.roundRect(x, y, barWidth, barHeight, radius);
+                ctx.fill();
+
+                ctx.shadowBlur = 0;
+
+                // Border
+                ctx.strokeStyle = isHovered ? '#fff' : 'rgba(255,255,255,0.3)';
+                ctx.lineWidth = isHovered ? 2 : 1;
+                ctx.stroke();
+
+                // Draw type label if bar is wide enough
+                if (barWidth > 40) {
+                    ctx.fillStyle = '#fff';
+                    ctx.font = 'bold 11px -apple-system, BlinkMacSystemFont, sans-serif';
+                    ctx.textAlign = 'center';
+                    const label = txn.txn_type + (txn.end_type ? ' ' + txn.end_type[0].toUpperCase() : '');
+                    ctx.fillText(label, x + barWidth / 2, y + barHeight / 2 + 4);
+                }
+            });
+
+            // Legend at top
+            ctx.font = '12px -apple-system, BlinkMacSystemFont, sans-serif';
+            ctx.textAlign = 'left';
+            const legendY = 30;
+            let legendX = padding.left;
+
+            const legendItems = [
+                { color: '#22c55e', label: 'RO Commit' },
+                { color: '#ef4444', label: 'RW Commit' },
+                { color: '#14532d', label: 'RO Abort' },
+                { color: '#7c2d12', label: 'RW Abort' },
+                { color: '#16a34a', label: 'RO Open' },
+                { color: '#dc2626', label: 'RW Open' }
+            ];
+
+            legendItems.forEach(item => {
+                ctx.fillStyle = item.color;
+                ctx.beginPath();
+                ctx.roundRect(legendX, legendY - 10, 16, 16, 3);
+                ctx.fill();
+                ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+                ctx.stroke();
+
+                ctx.fillStyle = '#ccc';
+                ctx.fillText(item.label, legendX + 22, legendY + 2);
+                legendX += ctx.measureText(item.label).width + 45;
+            });
+
+            // Zoom controls hint
+            ctx.fillStyle = '#666';
+            ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
+            ctx.textAlign = 'right';
+            ctx.fillText('Scroll to zoom | Drag to pan | Hover for details', width - padding.right, 25);
+        }
+
+        // Mouse event handlers
+        ganttCanvas.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const rect = ganttCanvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const chartWidth = rect.width - padding.left - padding.right;
+            const mouseRatio = (mouseX - padding.left) / chartWidth;
+
+            const viewRange = viewMaxTime - viewMinTime;
+            const zoomFactor = e.deltaY > 0 ? 1.15 : 0.87;
+            const newRange = Math.min(dataTimeRange * 2, Math.max(viewRange * zoomFactor, 10));
+
+            const mouseTime = viewMinTime + viewRange * mouseRatio;
+            viewMinTime = mouseTime - newRange * mouseRatio;
+            viewMaxTime = mouseTime + newRange * (1 - mouseRatio);
+
+            // Clamp to data bounds with some padding
+            const dataPadding = dataTimeRange * 0.1;
+            viewMinTime = Math.max(dataMinTime - dataPadding, viewMinTime);
+            viewMaxTime = Math.min(dataMaxTime + dataPadding, viewMaxTime);
+
+            render();
+        }, { passive: false });
+
+        ganttCanvas.addEventListener('mousedown', (e) => {
+            isDragging = true;
+            dragStartX = e.clientX;
+            dragStartMinTime = viewMinTime;
+            ganttCanvas.style.cursor = 'grabbing';
         });
 
-        // Legend
-        ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
-        ctx.textAlign = 'left';
-        const legendY = 20;
-        let legendX = padding.left;
+        window.addEventListener('mousemove', (e) => {
+            if (isDragging) {
+                const rect = ganttCanvas.getBoundingClientRect();
+                const chartWidth = rect.width - padding.left - padding.right;
+                const dx = e.clientX - dragStartX;
+                const viewRange = viewMaxTime - viewMinTime;
+                const timeDelta = -(dx / chartWidth) * viewRange;
 
-        const legendItems = [
-            { color: '#22c55e', label: 'RO Commit' },
-            { color: '#ef4444', label: 'RW Commit' },
-            { color: '#14532d', label: 'RO Abort' },
-            { color: '#7c2d12', label: 'RW Abort' },
-            { color: '#16a34a', label: 'RO Open' },
-            { color: '#dc2626', label: 'RW Open' }
-        ];
+                viewMinTime = dragStartMinTime + timeDelta;
+                viewMaxTime = viewMinTime + viewRange;
 
-        legendItems.forEach(item => {
-            ctx.fillStyle = item.color;
-            ctx.fillRect(legendX, legendY - 8, 12, 12);
-            ctx.strokeStyle = 'rgba(255,255,255,0.3)';
-            ctx.strokeRect(legendX, legendY - 8, 12, 12);
+                // Clamp
+                const dataPadding = dataTimeRange * 0.1;
+                if (viewMinTime < dataMinTime - dataPadding) {
+                    viewMinTime = dataMinTime - dataPadding;
+                    viewMaxTime = viewMinTime + viewRange;
+                }
+                if (viewMaxTime > dataMaxTime + dataPadding) {
+                    viewMaxTime = dataMaxTime + dataPadding;
+                    viewMinTime = viewMaxTime - viewRange;
+                }
 
-            ctx.fillStyle = '#aaa';
-            ctx.fillText(item.label, legendX + 16, legendY);
-            legendX += ctx.measureText(item.label).width + 35;
+                render();
+            } else {
+                // Hit test for hover
+                const rect = ganttCanvas.getBoundingClientRect();
+                const mouseX = e.clientX - rect.left;
+                const mouseY = e.clientY - rect.top + ganttContainer.scrollTop;
+
+                const txnRects = calcTxnRects();
+                let found = null;
+                for (const r of txnRects) {
+                    if (mouseX >= r.x && mouseX <= r.x + r.width &&
+                        mouseY >= r.y && mouseY <= r.y + r.height) {
+                        found = r.txn;
+                        break;
+                    }
+                }
+
+                if (found !== hoveredTxn) {
+                    hoveredTxn = found;
+                    render();
+                }
+
+                if (hoveredTxn) {
+                    ganttCanvas.style.cursor = 'pointer';
+                    const txn = hoveredTxn;
+                    const duration = txn.end_ms ? (txn.end_ms - txn.start_ms).toFixed(2) : 'ongoing';
+                    tooltip.innerHTML = `
+                        <div style="font-weight:bold;margin-bottom:8px;color:${txn.txn_type === 'RW' ? '#f87171' : '#34d399'}">
+                            ${txn.txn_type} Transaction
+                        </div>
+                        <div style="margin-bottom:4px;"><span style="color:#888">Thread:</span> TID ${txn.tid}</div>
+                        <div style="margin-bottom:4px;"><span style="color:#888">Ptr:</span> <code style="background:#222;padding:2px 6px;border-radius:3px;font-size:11px">${txn.txn_ptr}</code></div>
+                        <div style="margin-bottom:4px;"><span style="color:#888">Start:</span> ${(txn.start_ms / 1000).toFixed(4)}s</div>
+                        <div style="margin-bottom:4px;"><span style="color:#888">Duration:</span> ${duration}ms</div>
+                        <div style="margin-bottom:4px;"><span style="color:#888">Status:</span>
+                            <span style="color:${txn.end_type === 'commit' ? '#22c55e' : txn.end_type === 'abort' ? '#ef4444' : '#fbbf24'}">
+                                ${txn.end_type || 'open'}
+                            </span>
+                        </div>
+                        ${txn.latency_us ? `<div><span style="color:#888">Commit latency:</span> ${txn.latency_us.toFixed(1)} μs</div>` : ''}
+                    `;
+                    tooltip.style.display = 'block';
+                    tooltip.style.left = (e.clientX + 15) + 'px';
+                    tooltip.style.top = (e.clientY + 15) + 'px';
+                } else {
+                    ganttCanvas.style.cursor = 'grab';
+                    tooltip.style.display = 'none';
+                }
+            }
+        });
+
+        window.addEventListener('mouseup', () => {
+            if (isDragging) {
+                isDragging = false;
+                ganttCanvas.style.cursor = hoveredTxn ? 'pointer' : 'grab';
+            }
+        });
+
+        ganttCanvas.addEventListener('mouseleave', () => {
+            tooltip.style.display = 'none';
+            if (hoveredTxn) {
+                hoveredTxn = null;
+                render();
+            }
+        });
+
+        // Double click to reset zoom
+        ganttCanvas.addEventListener('dblclick', () => {
+            viewMinTime = dataMinTime;
+            viewMaxTime = dataMaxTime;
+            render();
+        });
+
+        // Initial render
+        render();
+
+        // Re-render on window resize
+        window.addEventListener('resize', () => {
+            render();
         });
     }
 
