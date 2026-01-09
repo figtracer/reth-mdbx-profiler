@@ -1799,3 +1799,383 @@ pub fn write_html(data: &ViewerData, path: impl AsRef<Path>) -> std::io::Result<
     let html = generate_html(data);
     std::fs::write(path, html)
 }
+
+// ============================================================================
+// Compact Export Format (for LLM analysis)
+// ============================================================================
+
+/// Compact export format optimized for LLM analysis.
+/// Contains key metrics and insights without raw data arrays.
+#[derive(Debug, Serialize)]
+pub struct CompactExport {
+    /// Overall trace summary
+    pub trace: TraceSummaryCompact,
+    /// Page fault analysis
+    pub page_faults: PageFaultAnalysis,
+    /// Per-table breakdown (sorted by impact)
+    pub tables: Vec<TableAnalysis>,
+    /// Cursor operation analysis
+    pub cursor_ops: Option<CursorAnalysis>,
+    /// Transaction analysis
+    pub transactions: Option<TxnAnalysis>,
+    /// Top slow operations (potential optimization targets)
+    pub slow_operations: Vec<SlowOpSummary>,
+    /// Key insights and recommendations
+    pub insights: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TraceSummaryCompact {
+    pub duration_secs: f64,
+    pub total_events: u64,
+    pub file_size_gb: f64,
+    pub file_offset_range_gb: (f64, f64),
+}
+
+#[derive(Debug, Serialize)]
+pub struct PageFaultAnalysis {
+    pub total: u64,
+    pub major: u64,
+    pub minor: u64,
+    pub major_ratio: f64,
+    pub rate_per_sec: f64,
+    pub unique_pages: u64,
+    /// Sequential vs random access ratio
+    pub sequential_ratio: f64,
+    pub random_ratio: f64,
+    /// Burst characteristics
+    pub burst_median: u32,
+    pub burst_p95: u32,
+    pub burst_max: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TableAnalysis {
+    pub name: String,
+    pub category: String,
+    pub faults: u64,
+    pub major_faults: u64,
+    pub fault_percentage: f64,
+    pub cursor_ops: u64,
+    /// Faults per cursor op (higher = more cache misses)
+    pub faults_per_op: Option<f64>,
+    /// Whether fault attribution is direct correlation or estimated
+    pub correlation_method: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CursorAnalysis {
+    pub total_ops: u64,
+    pub rate_per_sec: f64,
+    pub seek_count: u64,
+    pub seek_ratio: f64,
+    pub nav_count: u64,
+    pub direct_get_count: u64,
+    pub error_count: u64,
+    pub latency_avg_us: f64,
+    pub latency_p50_us: f64,
+    pub latency_p99_us: f64,
+    /// Ops by type (sorted by count)
+    pub by_operation: Vec<OpBreakdown>,
+    /// Top tables by ops
+    pub top_tables: Vec<TableOpBreakdown>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OpBreakdown {
+    pub name: String,
+    pub count: u64,
+    pub percentage: f64,
+    pub avg_latency_us: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TableOpBreakdown {
+    pub name: String,
+    pub ops: u64,
+    pub percentage: f64,
+    pub avg_latency_us: f64,
+    pub slow_ops: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TxnAnalysis {
+    pub total_txns: u64,
+    pub rate_per_sec: f64,
+    pub ro_count: u64,
+    pub rw_count: u64,
+    pub ro_ratio: f64,
+    pub commit_count: u64,
+    pub abort_count: u64,
+    pub commit_latency_avg_us: f64,
+    pub commit_latency_p50_us: f64,
+    pub commit_latency_p99_us: f64,
+    pub commit_latency_max_us: f64,
+    /// Thread breakdown (top threads by activity)
+    pub top_threads: Vec<ThreadTxnBreakdown>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ThreadTxnBreakdown {
+    pub tid: u32,
+    pub total: u64,
+    pub ro: u64,
+    pub rw: u64,
+    pub commits: u64,
+    pub aborts: u64,
+    pub avg_commit_latency_us: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SlowOpSummary {
+    pub table: String,
+    pub operation: String,
+    pub count: u64,
+    pub avg_latency_us: f64,
+    pub max_latency_us: f64,
+}
+
+/// Generate compact export from viewer data
+pub fn generate_compact_export(data: &ViewerData) -> CompactExport {
+    let mut insights = Vec::new();
+
+    // Generate insights based on data
+    if data.summary.major_fault_ratio > 0.1 {
+        insights.push(format!(
+            "High major fault ratio ({:.1}%) indicates significant disk I/O. Consider increasing system RAM or optimizing access patterns.",
+            data.summary.major_fault_ratio * 100.0
+        ));
+    }
+
+    if data.patterns.random_ratio > 0.7 {
+        insights.push(format!(
+            "High random access ratio ({:.1}%) suggests poor locality. Tables may benefit from different indexing or access order.",
+            data.patterns.random_ratio * 100.0
+        ));
+    }
+
+    if let Some(ref cursor) = data.cursor_data.has_data.then_some(&data.cursor_data) {
+        if cursor.summary.seek_ratio > 0.8 {
+            insights.push(format!(
+                "Seek-heavy workload ({:.1}% seeks). Each seek traverses B+ tree. Consider batching or caching.",
+                cursor.summary.seek_ratio * 100.0
+            ));
+        }
+        if cursor.summary.error_count > 0 {
+            let error_rate = cursor.summary.error_count as f64 / cursor.summary.total_ops as f64;
+            if error_rate > 0.01 {
+                insights.push(format!(
+                    "Notable error rate ({:.2}%). Most are MDBX_NOTFOUND which may be normal for existence checks.",
+                    error_rate * 100.0
+                ));
+            }
+        }
+    }
+
+    if data.txn_data.has_data {
+        let rw_ratio =
+            data.txn_data.summary.rw_count as f64 / data.txn_data.summary.begin_count.max(1) as f64;
+        if rw_ratio > 0.1 {
+            insights.push(format!(
+                "Higher than typical RW transaction ratio ({:.1}%). Reth usually has <1% RW transactions.",
+                rw_ratio * 100.0
+            ));
+        }
+        if data.txn_data.summary.avg_commit_latency_us > 200_000.0 {
+            insights.push(format!(
+                "High average commit latency ({:.1}ms). May indicate I/O bottleneck or large write batches.",
+                data.txn_data.summary.avg_commit_latency_us / 1000.0
+            ));
+        }
+    }
+
+    // Find tables with high faults-per-op ratio
+    let mut high_fault_tables: Vec<_> = data
+        .tables
+        .iter()
+        .filter(|t| t.has_cursor_ops && t.cursor_ops > 100)
+        .filter_map(|t| {
+            let faults_per_op = t.faults as f64 / t.cursor_ops as f64;
+            if faults_per_op > 0.5 {
+                Some((t.name.clone(), faults_per_op))
+            } else {
+                None
+            }
+        })
+        .collect();
+    high_fault_tables.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    for (table, ratio) in high_fault_tables.iter().take(3) {
+        insights.push(format!(
+            "Table '{}' has high fault-per-op ratio ({:.2}). Consider prefetching or access pattern optimization.",
+            table, ratio
+        ));
+    }
+
+    // Build table analysis
+    let tables: Vec<TableAnalysis> = data
+        .tables
+        .iter()
+        .filter(|t| t.faults > 0 || t.cursor_ops > 0)
+        .map(|t| {
+            let faults_per_op = if t.cursor_ops > 0 {
+                Some(t.faults as f64 / t.cursor_ops as f64)
+            } else {
+                None
+            };
+            TableAnalysis {
+                name: t.name.clone(),
+                category: t.category.clone(),
+                faults: t.faults,
+                major_faults: t.major_faults,
+                fault_percentage: t.percentage,
+                cursor_ops: t.cursor_ops,
+                faults_per_op,
+                correlation_method: if t.faults_correlated {
+                    "direct".to_string()
+                } else {
+                    "estimated".to_string()
+                },
+            }
+        })
+        .collect();
+
+    // Build cursor analysis
+    let cursor_ops = if data.cursor_data.has_data {
+        let by_operation: Vec<OpBreakdown> = data
+            .cursor_data
+            .operations
+            .iter()
+            .filter(|o| o.count > 0)
+            .map(|o| OpBreakdown {
+                name: o.name.clone(),
+                count: o.count,
+                percentage: o.percentage,
+                avg_latency_us: o.avg_latency_us,
+            })
+            .collect();
+
+        let top_tables: Vec<TableOpBreakdown> = data
+            .cursor_data
+            .table_stats
+            .iter()
+            .filter(|t| t.ops > 0)
+            .take(15)
+            .map(|t| TableOpBreakdown {
+                name: t.name.clone(),
+                ops: t.ops,
+                percentage: t.percentage,
+                avg_latency_us: t.avg_latency_us,
+                slow_ops: t.slow_ops,
+            })
+            .collect();
+
+        Some(CursorAnalysis {
+            total_ops: data.cursor_data.summary.total_ops,
+            rate_per_sec: data.cursor_data.summary.op_rate_per_sec,
+            seek_count: data.cursor_data.summary.seek_count,
+            seek_ratio: data.cursor_data.summary.seek_ratio,
+            nav_count: data.cursor_data.summary.nav_count,
+            direct_get_count: data.cursor_data.summary.direct_get_count,
+            error_count: data.cursor_data.summary.error_count,
+            latency_avg_us: data.cursor_data.summary.avg_latency_us,
+            latency_p50_us: data.cursor_data.summary.p50_latency_us,
+            latency_p99_us: data.cursor_data.summary.p99_latency_us,
+            by_operation,
+            top_tables,
+        })
+    } else {
+        None
+    };
+
+    // Build transaction analysis
+    let transactions = if data.txn_data.has_data {
+        let top_threads: Vec<ThreadTxnBreakdown> = data
+            .txn_data
+            .thread_stats
+            .iter()
+            .take(10)
+            .map(|t| ThreadTxnBreakdown {
+                tid: t.tid,
+                total: t.total_txns,
+                ro: t.ro_txns,
+                rw: t.rw_txns,
+                commits: t.commits,
+                aborts: t.aborts,
+                avg_commit_latency_us: t.avg_commit_latency_us,
+            })
+            .collect();
+
+        Some(TxnAnalysis {
+            total_txns: data.txn_data.summary.begin_count,
+            rate_per_sec: data.txn_data.summary.txn_rate_per_sec,
+            ro_count: data.txn_data.summary.ro_count,
+            rw_count: data.txn_data.summary.rw_count,
+            ro_ratio: data.txn_data.summary.ro_count as f64
+                / data.txn_data.summary.begin_count.max(1) as f64,
+            commit_count: data.txn_data.summary.commit_count,
+            abort_count: data.txn_data.summary.abort_count,
+            commit_latency_avg_us: data.txn_data.summary.avg_commit_latency_us,
+            commit_latency_p50_us: data.txn_data.summary.p50_commit_latency_us,
+            commit_latency_p99_us: data.txn_data.summary.p99_commit_latency_us,
+            commit_latency_max_us: data.txn_data.summary.max_commit_latency_us,
+            top_threads,
+        })
+    } else {
+        None
+    };
+
+    // Build slow operations summary
+    let slow_operations: Vec<SlowOpSummary> = data
+        .cursor_data
+        .slow_ops
+        .by_table
+        .iter()
+        .take(10)
+        .map(|s| SlowOpSummary {
+            table: s.table.clone(),
+            operation: s.top_operation.clone(),
+            count: s.count,
+            avg_latency_us: s.avg_latency_us,
+            max_latency_us: s.max_latency_us,
+        })
+        .collect();
+
+    CompactExport {
+        trace: TraceSummaryCompact {
+            duration_secs: data.summary.duration_secs,
+            total_events: data.summary.total_events,
+            file_size_gb: data.summary.file_size_gb,
+            file_offset_range_gb: (
+                data.summary.min_offset as f64 / 1e9,
+                data.summary.max_offset as f64 / 1e9,
+            ),
+        },
+        page_faults: PageFaultAnalysis {
+            total: data.summary.page_faults,
+            major: data.summary.major_faults,
+            minor: data.summary.minor_faults,
+            major_ratio: data.summary.major_fault_ratio,
+            rate_per_sec: data.summary.fault_rate_per_sec,
+            unique_pages: data.summary.unique_pages,
+            sequential_ratio: data.patterns.sequential_ratio,
+            random_ratio: data.patterns.random_ratio,
+            burst_median: data.patterns.burst_stats.median_events,
+            burst_p95: data.patterns.burst_stats.p95_events,
+            burst_max: data.patterns.burst_stats.max_events,
+        },
+        tables,
+        cursor_ops,
+        transactions,
+        slow_operations,
+        insights,
+    }
+}
+
+/// Write compact export to JSON file
+pub fn write_compact_export(data: &ViewerData, path: impl AsRef<Path>) -> std::io::Result<()> {
+    let export = generate_compact_export(data);
+    let json = serde_json::to_string_pretty(&export)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    std::fs::write(path, json)
+}

@@ -28,6 +28,7 @@ pub fn generate_html(data: &ViewerData) -> String {
             <button class="tab" data-tab="patterns">Patterns</button>
             <button class="tab" data-tab="cursors">Cursor Ops</button>
             <button class="tab" data-tab="transactions">Transactions</button>
+            <button class="export-btn" id="export-compact-btn" title="Download compact JSON for LLM analysis">Export JSON</button>
         </nav>
 
         <main>
@@ -467,6 +468,26 @@ body {
     color: #fff;
     font-weight: 600;
     box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);
+}
+
+.export-btn {
+    margin-left: auto;
+    padding: 10px 20px;
+    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+    color: #fff;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    font-size: 0.85em;
+    font-weight: 600;
+    transition: all 0.2s ease;
+    box-shadow: 0 2px 8px rgba(16, 185, 129, 0.3);
+}
+
+.export-btn:hover {
+    background: linear-gradient(135deg, #34d399 0%, #10b981 100%);
+    box-shadow: 0 4px 15px rgba(16, 185, 129, 0.4);
+    transform: translateY(-1px);
 }
 
 .panel {
@@ -2271,6 +2292,186 @@ function initTransactions() {
 }
 
 // Initialize the viewer
+// Generate compact export for LLM analysis
+function generateCompactExport() {
+    const data = DATA;
+    const insights = [];
+
+    // Generate insights
+    if (data.summary.major_fault_ratio > 0.1) {
+        insights.push(`High major fault ratio (${(data.summary.major_fault_ratio * 100).toFixed(1)}%) indicates significant disk I/O. Consider increasing system RAM or optimizing access patterns.`);
+    }
+    if (data.patterns.random_ratio > 0.7) {
+        insights.push(`High random access ratio (${(data.patterns.random_ratio * 100).toFixed(1)}%) suggests poor locality. Tables may benefit from different indexing or access order.`);
+    }
+    if (data.cursor_data && data.cursor_data.has_data) {
+        if (data.cursor_data.summary.seek_ratio > 0.8) {
+            insights.push(`Seek-heavy workload (${(data.cursor_data.summary.seek_ratio * 100).toFixed(1)}% seeks). Each seek traverses B+ tree. Consider batching or caching.`);
+        }
+        if (data.cursor_data.summary.error_count > 0) {
+            const errorRate = data.cursor_data.summary.error_count / data.cursor_data.summary.total_ops;
+            if (errorRate > 0.01) {
+                insights.push(`Notable error rate (${(errorRate * 100).toFixed(2)}%). Most are MDBX_NOTFOUND which may be normal for existence checks.`);
+            }
+        }
+    }
+    if (data.txn_data && data.txn_data.has_data) {
+        const rwRatio = data.txn_data.summary.rw_count / Math.max(1, data.txn_data.summary.begin_count);
+        if (rwRatio > 0.1) {
+            insights.push(`Higher than typical RW transaction ratio (${(rwRatio * 100).toFixed(1)}%). Reth usually has <1% RW transactions.`);
+        }
+        if (data.txn_data.summary.avg_commit_latency_us > 200000) {
+            insights.push(`High average commit latency (${(data.txn_data.summary.avg_commit_latency_us / 1000).toFixed(1)}ms). May indicate I/O bottleneck or large write batches.`);
+        }
+    }
+
+    // Find tables with high faults-per-op
+    const highFaultTables = data.tables
+        .filter(t => t.has_cursor_ops && t.cursor_ops > 100)
+        .map(t => ({ name: t.name, ratio: t.faults / t.cursor_ops }))
+        .filter(t => t.ratio > 0.5)
+        .sort((a, b) => b.ratio - a.ratio)
+        .slice(0, 3);
+
+    highFaultTables.forEach(t => {
+        insights.push(`Table '${t.name}' has high fault-per-op ratio (${t.ratio.toFixed(2)}). Consider prefetching or access pattern optimization.`);
+    });
+
+    // Build compact export
+    const compact = {
+        trace: {
+            duration_secs: data.summary.duration_secs,
+            total_events: data.summary.total_events,
+            file_size_gb: data.summary.file_size_gb,
+            file_offset_range_gb: [data.summary.min_offset / 1e9, data.summary.max_offset / 1e9]
+        },
+        page_faults: {
+            total: data.summary.page_faults,
+            major: data.summary.major_faults,
+            minor: data.summary.minor_faults,
+            major_ratio: data.summary.major_fault_ratio,
+            rate_per_sec: data.summary.fault_rate_per_sec,
+            unique_pages: data.summary.unique_pages,
+            sequential_ratio: data.patterns.sequential_ratio,
+            random_ratio: data.patterns.random_ratio,
+            burst_median: data.patterns.burst_stats.median_events,
+            burst_p95: data.patterns.burst_stats.p95_events,
+            burst_max: data.patterns.burst_stats.max_events
+        },
+        tables: data.tables
+            .filter(t => t.faults > 0 || t.cursor_ops > 0)
+            .map(t => ({
+                name: t.name,
+                category: t.category,
+                faults: t.faults,
+                major_faults: t.major_faults,
+                fault_percentage: t.percentage,
+                cursor_ops: t.cursor_ops,
+                faults_per_op: t.cursor_ops > 0 ? (t.faults / t.cursor_ops) : null,
+                correlation_method: t.faults_correlated ? 'direct' : 'estimated'
+            })),
+        cursor_ops: data.cursor_data && data.cursor_data.has_data ? {
+            total_ops: data.cursor_data.summary.total_ops,
+            rate_per_sec: data.cursor_data.summary.op_rate_per_sec,
+            seek_count: data.cursor_data.summary.seek_count,
+            seek_ratio: data.cursor_data.summary.seek_ratio,
+            nav_count: data.cursor_data.summary.nav_count,
+            direct_get_count: data.cursor_data.summary.direct_get_count,
+            error_count: data.cursor_data.summary.error_count,
+            latency_avg_us: data.cursor_data.summary.avg_latency_us,
+            latency_p50_us: data.cursor_data.summary.p50_latency_us,
+            latency_p99_us: data.cursor_data.summary.p99_latency_us,
+            by_operation: data.cursor_data.operations
+                .filter(o => o.count > 0)
+                .map(o => ({
+                    name: o.name,
+                    count: o.count,
+                    percentage: o.percentage,
+                    avg_latency_us: o.avg_latency_us
+                })),
+            top_tables: data.cursor_data.table_stats
+                .filter(t => t.ops > 0)
+                .slice(0, 15)
+                .map(t => ({
+                    name: t.name,
+                    ops: t.ops,
+                    percentage: t.percentage,
+                    avg_latency_us: t.avg_latency_us,
+                    slow_ops: t.slow_ops
+                }))
+        } : null,
+        transactions: data.txn_data && data.txn_data.has_data ? {
+            total_txns: data.txn_data.summary.begin_count,
+            rate_per_sec: data.txn_data.summary.txn_rate_per_sec,
+            ro_count: data.txn_data.summary.ro_count,
+            rw_count: data.txn_data.summary.rw_count,
+            ro_ratio: data.txn_data.summary.ro_count / Math.max(1, data.txn_data.summary.begin_count),
+            commit_count: data.txn_data.summary.commit_count,
+            abort_count: data.txn_data.summary.abort_count,
+            commit_latency_avg_us: data.txn_data.summary.avg_commit_latency_us,
+            commit_latency_p50_us: data.txn_data.summary.p50_commit_latency_us,
+            commit_latency_p99_us: data.txn_data.summary.p99_commit_latency_us,
+            commit_latency_max_us: data.txn_data.summary.max_commit_latency_us,
+            concurrency: {
+                max_concurrent_ro: data.txn_data.concurrency.max_concurrent_ro,
+                max_concurrent_rw: data.txn_data.concurrency.max_concurrent_rw,
+                max_concurrent_total: data.txn_data.concurrency.max_concurrent_total,
+                avg_concurrent_ro: data.txn_data.concurrency.avg_concurrent_ro
+            },
+            top_threads: data.txn_data.thread_stats
+                .slice(0, 15)
+                .map(t => ({
+                    tid: t.tid,
+                    total: t.total_txns,
+                    ro: t.ro_txns,
+                    rw: t.rw_txns,
+                    commits: t.commits,
+                    aborts: t.aborts,
+                    avg_commit_latency_us: t.avg_commit_latency_us
+                }))
+        } : null,
+        slow_operations: data.cursor_data && data.cursor_data.slow_ops ?
+            data.cursor_data.slow_ops.by_table.slice(0, 15).map(s => ({
+                table: s.table,
+                operation: s.top_operation,
+                count: s.count,
+                avg_latency_us: s.avg_latency_us,
+                max_latency_us: s.max_latency_us
+            })) : [],
+        slow_keys: data.cursor_data && data.cursor_data.slow_keys ?
+            data.cursor_data.slow_keys.slice(0, 20).map(k => ({
+                key_hex: k.key_hex,
+                table: k.table_name,
+                total_accesses: k.total_accesses,
+                slow_accesses: k.slow_accesses,
+                slow_ratio: k.slow_accesses / k.total_accesses,
+                operations: k.operations
+            })) : [],
+        thread_distribution: data.threads.slice(0, 20).map(t => ({
+            tid: t.tid,
+            faults: t.faults,
+            percentage: t.percentage
+        })),
+        insights: insights
+    };
+
+    return compact;
+}
+
+function downloadCompactExport() {
+    const compact = generateCompactExport();
+    const json = JSON.stringify(compact, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'mdbx-trace-analysis.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
 function init() {
     // Tab switching with lazy initialization
     document.querySelectorAll('.tab').forEach(tab => {
@@ -2287,6 +2488,9 @@ function init() {
             });
         });
     });
+
+    // Export button
+    document.getElementById('export-compact-btn').addEventListener('click', downloadCompactExport);
 
     // Initialize summary tab (it's visible by default)
     initTab('summary');
