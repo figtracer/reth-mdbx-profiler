@@ -2397,7 +2397,8 @@ function generateCompactExport() {
                     ops: t.ops,
                     percentage: t.percentage,
                     avg_latency_us: t.avg_latency_us,
-                    slow_ops: t.slow_ops
+                    seeks: t.seeks,
+                    navs: t.navs
                 }))
         } : null,
         transactions: data.txn_data && data.txn_data.has_data ? {
@@ -2430,13 +2431,17 @@ function generateCompactExport() {
                     avg_commit_latency_us: t.avg_commit_latency_us
                 }))
         } : null,
-        slow_operations: data.cursor_data && data.cursor_data.slow_ops ?
-            data.cursor_data.slow_ops.by_table.slice(0, 15).map(s => ({
+        slow_operations: data.cursor_data && data.cursor_data.slow_ops_by_table ?
+            data.cursor_data.slow_ops_by_table.slice(0, 15).map(s => ({
                 table: s.table,
-                operation: s.top_operation,
-                count: s.count,
-                avg_latency_us: s.avg_latency_us,
-                max_latency_us: s.max_latency_us
+                dbi: s.dbi,
+                slow_count: s.slow_op_count,
+                total_count: s.total_op_count,
+                slow_percentage: s.slow_op_percentage,
+                avg_slow_latency_us: s.avg_slow_latency_us,
+                max_latency_us: s.max_latency_us,
+                total_slow_time_ms: s.total_slow_time_ms,
+                by_operation: s.by_operation
             })) : [],
         slow_keys: data.cursor_data && data.cursor_data.slow_keys ?
             data.cursor_data.slow_keys.slice(0, 20).map(k => ({
