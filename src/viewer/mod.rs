@@ -5,7 +5,7 @@
 
 mod template;
 
-use crate::event::{dbi_to_table_name, is_pre_trace_cursor, CursorEvent, PageFaultEvent, TxnEvent};
+use crate::event::{CursorEvent, PageFaultEvent, TxnEvent, dbi_to_table_name, is_pre_trace_cursor};
 use crate::mdbx_metadata::{PageAttribution, RethTable};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -1164,15 +1164,30 @@ fn generate_txn_data(events: &[TxnEvent]) -> TxnData {
     // Sort timeline by start time
     timeline_entries.sort_by(|a, b| a.start_ms.partial_cmp(&b.start_ms).unwrap());
 
-    // Limit timeline entries for performance
+    // Limit timeline entries for performance, but always keep ALL RW transactions
     if timeline_entries.len() > 1000 {
-        // Sample evenly
-        let step = timeline_entries.len() / 1000;
-        timeline_entries = timeline_entries
+        // Separate RW and RO transactions - RW are rare and important
+        let (rw_entries, ro_entries): (Vec<_>, Vec<_>) = timeline_entries
             .into_iter()
-            .step_by(step)
-            .take(1000)
-            .collect();
+            .partition(|e| e.txn_type == "RW");
+
+        // Keep all RW transactions, sample RO transactions
+        let ro_budget = 1000usize.saturating_sub(rw_entries.len());
+        let sampled_ro: Vec<_> = if ro_entries.len() > ro_budget && ro_budget > 0 {
+            let step = ro_entries.len() / ro_budget;
+            ro_entries
+                .into_iter()
+                .step_by(step)
+                .take(ro_budget)
+                .collect()
+        } else {
+            ro_entries
+        };
+
+        // Merge and re-sort by start time
+        timeline_entries = rw_entries;
+        timeline_entries.extend(sampled_ro);
+        timeline_entries.sort_by(|a, b| a.start_ms.partial_cmp(&b.start_ms).unwrap());
     }
 
     // Calculate commit latency stats
