@@ -5,7 +5,7 @@
 
 mod template;
 
-use crate::event::{CursorEvent, PageFaultEvent, TxnEvent, dbi_to_table_name, is_pre_trace_cursor};
+use crate::event::{dbi_to_table_name, is_pre_trace_cursor, CursorEvent, PageFaultEvent, TxnEvent};
 use crate::mdbx_metadata::{PageAttribution, RethTable};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -456,7 +456,7 @@ pub fn generate_viewer_data(
     let txn_data = generate_txn_data(txn_events);
 
     // Build a set of tables that have cursor operations (by name)
-    let tables_with_ops: std::collections::HashSet<String> = cursor_data
+    let _tables_with_ops: std::collections::HashSet<String> = cursor_data
         .table_stats
         .iter()
         .filter(|t| t.ops > 0)
@@ -1895,7 +1895,8 @@ pub struct TableOpBreakdown {
     pub ops: u64,
     pub percentage: f64,
     pub avg_latency_us: f64,
-    pub slow_ops: u64,
+    pub seeks: u64,
+    pub navs: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -2066,7 +2067,8 @@ pub fn generate_compact_export(data: &ViewerData) -> CompactExport {
                 ops: t.ops,
                 percentage: t.percentage,
                 avg_latency_us: t.avg_latency_us,
-                slow_ops: t.slow_ops,
+                seeks: t.seeks,
+                navs: t.navs,
             })
             .collect();
 
@@ -2128,16 +2130,23 @@ pub fn generate_compact_export(data: &ViewerData) -> CompactExport {
     // Build slow operations summary
     let slow_operations: Vec<SlowOpSummary> = data
         .cursor_data
-        .slow_ops
-        .by_table
+        .slow_ops_by_table
         .iter()
         .take(10)
-        .map(|s| SlowOpSummary {
-            table: s.table.clone(),
-            operation: s.top_operation.clone(),
-            count: s.count,
-            avg_latency_us: s.avg_latency_us,
-            max_latency_us: s.max_latency_us,
+        .map(|s| {
+            // Get top operation from by_operation breakdown
+            let top_op = s
+                .by_operation
+                .first()
+                .map(|op| op.operation.clone())
+                .unwrap_or_default();
+            SlowOpSummary {
+                table: s.table.clone(),
+                operation: top_op,
+                count: s.slow_op_count,
+                avg_latency_us: s.avg_slow_latency_us,
+                max_latency_us: s.max_latency_us,
+            }
         })
         .collect();
 
