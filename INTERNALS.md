@@ -46,13 +46,25 @@ the profiler uses ebpf to trace memory-mapped file accesses in the linux kernel.
 │    ├─► uprobe: save (cursor_ptr_ptr, dbi)                                   │
 │    └─► uretprobe: map cursor_addr → dbi                                     │
 │                                                                             │
-│    mdbx_cursor_get(cursor, key, data, op)                                   │
+│    mdbx_cursor_get(cursor, key, data, op)           [READ OPERATIONS]       │
 │    │                                                                        │
 │    ├─► uprobe: lookup dbi, save context                                     │
 │    │   • reads key data via bpf_probe_read_user                             │
 │    │   • page faults may occur here! ◄──────────────────────────────────────┤
 │    │                                                                        │
 │    └─► uretprobe: emit cursor_event to ring buffer                          │
+│                                                                             │
+│    mdbx_cursor_put(cursor, key, data, flags)        [WRITE OPERATIONS]      │
+│    │                                                                        │
+│    ├─► uprobe: lookup dbi, capture key + value_size + flags                 │
+│    │   • page faults during b-tree traversal and page splits               │
+│    │                                                                        │
+│    └─► uretprobe: emit cursor_event with event_type=PUT                     │
+│                                                                             │
+│    mdbx_cursor_del(cursor, flags)                   [DELETE OPERATIONS]     │
+│    │                                                                        │
+│    ├─► uprobe: lookup dbi, capture flags                                    │
+│    └─► uretprobe: emit cursor_event with event_type=DEL                     │
 │                                                                             │
 │    mdbx_cursor_close(cursor)                                                │
 │    └─► uprobe: remove cursor from cursor_to_dbi map                         │  
@@ -132,7 +144,7 @@ typically 50-70% of faults can be correlated. the remainder are faults from the 
 
 - **cursor open/close**: we only time `mdbx_cursor_get`, not setup/teardown. faults during `mdbx_cursor_open` aren't correlated
 - **transaction begin/commit**: mdbx transaction operations touch pages but we don't trace them
-- **write operations**: we trace reads (`mdbx_cursor_get`, `mdbx_get`) but not writes (`mdbx_cursor_put`, `mdbx_put`)
+- **write operations**: page faults during `mdbx_cursor_put` and `mdbx_cursor_del` are now correlated (see write operation tracing below)
 - **between cursor operations**: faults while reth processes results between cursor calls
 - **kernel readahead**: when reth touches a page, linux may prefetch nearby pages asynchronously
 
@@ -205,6 +217,13 @@ int BPF_UPROBE(trace_cursor_open, void *txn, __u32 dbi, void **cursor_ptr)
 
 SEC("uprobe/mdbx_get")
 int BPF_UPROBE(trace_direct_get, void *txn, __u32 dbi, struct mdbx_val *key, void *data)
+
+SEC("uprobe/mdbx_cursor_put")
+int BPF_UPROBE(trace_cursor_put, void *cursor, struct mdbx_val *key,
+               struct mdbx_val *data, __u32 flags)
+
+SEC("uprobe/mdbx_cursor_del")
+int BPF_UPROBE(trace_cursor_del, void *cursor, __u32 flags)
 ```
 
 these require the reth binary to have symbols (not stripped).
@@ -272,9 +291,15 @@ struct {
     __type(key, __u64);    // pid_tgid
     __type(value, struct fault_context);
 } pending_faults SEC(".maps");
+
+// similar maps for cursor operations:
+} pending_cursors SEC(".maps");      // for mdbx_cursor_get
+} pending_cursor_puts SEC(".maps");  // for mdbx_cursor_put
+} pending_cursor_dels SEC(".maps");  // for mdbx_cursor_del
+} pending_direct_gets SEC(".maps");  // for mdbx_get
 ```
 
-correlates kprobe entry with kretprobe return. since bpf programs are stateless between calls, we save context on entry and retrieve it on return using the thread id as key.
+correlates kprobe/uprobe entry with kretprobe/uretprobe return. since bpf programs are stateless between calls, we save context on entry and retrieve it on return using the thread id as key.
 
 ### event structures
 
@@ -303,13 +328,15 @@ struct cursor_event {
     __u64 timestamp_ns;
     __u32 pid;
     __u32 tid;
-    __u32 event_type;        // 3=cursor_get, 4=cursor_put, 5=direct_get
-    __u32 cursor_op;         // MDBX_SET_RANGE, MDBX_NEXT, etc.
+    __u32 event_type;        // 3=cursor_get, 4=cursor_put, 5=direct_get, 6=cursor_del
+    __u32 cursor_op;         // MDBX_SET_RANGE, MDBX_NEXT, etc. (for get ops)
     __u32 dbi;               // database index (table id)
     __u32 key_size;
     __u8  key_data[64];      // first 64 bytes of lookup key
     __s32 return_code;       // 0=success, -30798=not_found
+    __u32 value_size;        // size of value (for put operations)
     __u64 latency_ns;
+    __u32 write_flags;       // MDBX_UPSERT, MDBX_APPEND, etc. (for put/del ops)
 };
 ```
 
@@ -452,8 +479,10 @@ pub fn correlate_faults_with_cursors(
    
 7. simultaneously, uprobes trace cursor operations:
    - mdbx_cursor_open: maps cursor pointer -> dbi
-   - mdbx_cursor_get: records operation with dbi, key, latency
+   - mdbx_cursor_get: records read operation with dbi, key, latency
    - mdbx_get: records direct get with dbi, key, latency
+   - mdbx_cursor_put: records write operation with dbi, key, value_size, flags, latency
+   - mdbx_cursor_del: records delete operation with dbi, flags, latency
    
 8. userspace polls ring buffer:
    - deserializes events
@@ -521,6 +550,84 @@ when we later see `mdbx_cursor_get`, we look up the cursor address to find its d
 
 cursors opened before tracing started won't be in our `cursor_to_dbi` map. these show as "Unknown (pre-trace cursors)" in the output. using `--process-name` and restarting the node after the profiler starts avoids this issue.
 
+## mdbx write operations
+
+write operations are traced to understand database mutation patterns and correlate page faults during writes.
+
+### mdbx_cursor_put
+
+```c
+int mdbx_cursor_put(MDBX_cursor *cursor, MDBX_val *key, 
+                    MDBX_val *data, MDBX_put_flags_t flags);
+```
+
+cursor-based write operations. reth uses this heavily for:
+- `MDBX_UPSERT` (0): insert or update
+- `MDBX_NOOVERWRITE` (16): insert only, fail if key exists
+- `MDBX_APPEND` (0x20000): append to end (optimization for sequential inserts)
+- `MDBX_APPENDDUP` (0x40000): append duplicate in dupsort table
+
+we capture:
+- the key being written (first 64 bytes)
+- value size (not content, to limit overhead)
+- write flags to understand the operation type
+- latency to identify slow writes (b-tree splits, page allocations)
+
+### mdbx_cursor_del
+
+```c
+int mdbx_cursor_del(MDBX_cursor *cursor, MDBX_put_flags_t flags);
+```
+
+deletes the current key/value pair. flags include:
+- `MDBX_NODUPDATA` (32): remove all duplicates for key (dupsort tables)
+- `MDBX_CURRENT` (64): delete at current cursor position
+
+this is used during pruning operations where reth removes old history.
+
+### write operation tracking
+
+```c
+SEC("uprobe/mdbx_cursor_put")
+int BPF_UPROBE(trace_cursor_put, void *cursor, struct mdbx_val *key,
+               struct mdbx_val *data, __u32 flags)
+{
+    // lookup DBI from cursor_to_dbi map (same as cursor_get)
+    // capture key data and value size
+    // save context for uretprobe
+}
+
+SEC("uretprobe/mdbx_cursor_put")
+int BPF_URETPROBE(trace_cursor_put_ret, int ret)
+{
+    // calculate latency
+    // emit cursor_event with event_type=EVENT_CURSOR_PUT
+}
+```
+
+### write patterns in reth
+
+typical write patterns observed:
+
+1. **state updates**: `PlainAccountState`, `PlainStorageState` updates after block execution
+2. **hashed state**: `HashedAccounts`, `HashedStorages` populated before trie computation
+3. **trie updates**: `AccountsTrie`, `StoragesTrie` branch node insertions
+4. **history**: `AccountsHistory`, `StoragesHistory` append-only inserts
+5. **changesets**: `AccountChangeSets`, `StorageChangeSets` batch inserts per block
+
+### write latency characteristics
+
+write latency is typically higher than reads due to:
+- **copy-on-write**: mdbx copies pages before modification
+- **b-tree splits**: inserting into full pages triggers splits
+- **page allocation**: new pages allocated from freelist or file growth
+- **dirty page tracking**: pages marked dirty for eventual commit
+
+high write latency (>1ms) often indicates:
+- page splits in hot tables
+- large value insertions (bytecodes)
+- freelist exhaustion requiring file growth
+
 ## performance considerations
 
 ### bpf overhead
@@ -581,9 +688,16 @@ under extreme load, the ring buffer may fill before userspace can drain it. the 
 
 ### correlation coverage
 
-not all page faults can be correlated. we only trace `mdbx_cursor_get` and `mdbx_get` - faults during other operations (cursor open/close, transaction begin/commit, writes) won't be attributed to tables.
+not all page faults can be correlated. we trace:
+- `mdbx_cursor_get` and `mdbx_get` (reads)
+- `mdbx_cursor_put` and `mdbx_cursor_del` (writes)
 
-expect 50-70% correlation rate in typical workloads. this can be improved by adding tracing for write operations and transaction management.
+faults during other operations (cursor open/close, transaction begin/commit) won't be attributed to tables.
+
+expect 70-90% correlation rate in typical workloads with write tracing enabled. uncorrelated faults are typically from:
+- transaction management overhead
+- cursor setup/teardown
+- kernel readahead prefetching
 
 ## transaction lifecycle tracing
 
