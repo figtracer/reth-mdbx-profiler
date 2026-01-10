@@ -312,28 +312,31 @@ pub fn generate_html(data: &ViewerData) -> String {
                         </div>
                         <div class="card">
                             <div class="card-header">Commit Latency</div>
-                            <div class="card-body latency-card-body">
-                                <div class="latency-stats centered">
+                            <div class="card-body">
+                                <div class="latency-stats" style="margin-bottom: 16px;">
                                     <div class="lat-stat">
-                                        <span class="lat-label">Avg</span>
+                                        <span class="lat-label">AVG</span>
                                         <span class="lat-value" id="txn-avg-latency"></span>
                                     </div>
                                     <div class="lat-stat">
-                                        <span class="lat-label">p50</span>
+                                        <span class="lat-label">P50</span>
                                         <span class="lat-value" id="txn-p50-latency"></span>
                                     </div>
                                     <div class="lat-stat">
-                                        <span class="lat-label">p95</span>
+                                        <span class="lat-label">P95</span>
                                         <span class="lat-value" id="txn-p95-latency"></span>
                                     </div>
                                     <div class="lat-stat">
-                                        <span class="lat-label">p99</span>
+                                        <span class="lat-label">P99</span>
                                         <span class="lat-value major" id="txn-p99-latency"></span>
                                     </div>
                                     <div class="lat-stat">
-                                        <span class="lat-label">Max</span>
+                                        <span class="lat-label">MAX</span>
                                         <span class="lat-value major" id="txn-max-latency"></span>
                                     </div>
+                                </div>
+                                <div class="chart-container" style="height: 120px;">
+                                    <canvas id="txn-latency-chart"></canvas>
                                 </div>
                             </div>
                         </div>
@@ -875,6 +878,63 @@ class Chart {
         });
     }
 
+    drawHistogram(values, numBuckets = 20, color = '#6366f1') {
+        if (!this.resize() || !values.length) return;
+        this.clear();
+
+        const pad = { t: 15, r: 15, b: 35, l: 50 };
+        const w = this.w - pad.l - pad.r;
+        const h = this.h - pad.t - pad.b;
+
+        // Create histogram buckets
+        const min = Math.min(...values);
+        const max = Math.max(...values);
+        const range = max - min || 1;
+        const bucketSize = range / numBuckets;
+        const buckets = new Array(numBuckets).fill(0);
+
+        values.forEach(v => {
+            let idx = Math.floor((v - min) / bucketSize);
+            if (idx >= numBuckets) idx = numBuckets - 1;
+            buckets[idx]++;
+        });
+
+        const maxCount = Math.max(...buckets) * 1.1 || 1;
+        const barW = w / numBuckets - 2;
+
+        // Y-axis labels
+        this.ctx.fillStyle = '#71717a';
+        this.ctx.font = '10px sans-serif';
+        this.ctx.textAlign = 'right';
+        for (let i = 0; i <= 3; i++) {
+            const val = maxCount * (1 - i / 3);
+            const y = pad.t + (h / 3) * i;
+            this.ctx.fillText(Math.round(val).toString(), pad.l - 6, y + 3);
+        }
+
+        // Draw bars
+        buckets.forEach((count, i) => {
+            const barH = (count / maxCount) * h;
+            const x = pad.l + i * (w / numBuckets) + 1;
+            const y = pad.t + h - barH;
+
+            this.ctx.fillStyle = color;
+            this.ctx.fillRect(x, y, barW, barH);
+        });
+
+        // X-axis labels (latency values)
+        this.ctx.fillStyle = '#71717a';
+        this.ctx.font = '10px sans-serif';
+        this.ctx.textAlign = 'center';
+        const xLabels = [0, 0.25, 0.5, 0.75, 1];
+        xLabels.forEach(pct => {
+            const x = pad.l + pct * w;
+            const val = min + pct * range;
+            const label = val < 1 ? val.toFixed(2) + 'ms' : val < 1000 ? val.toFixed(0) + 'ms' : (val / 1000).toFixed(1) + 's';
+            this.ctx.fillText(label, x, this.h - pad.b + 14);
+        });
+    }
+
     drawHeatmap(data, opts = {}) {
         if (!this.resize()) return;
         const { time_buckets, offset_buckets, data: cells, max_count, min_offset_gb, max_offset_gb, min_time_ms, max_time_ms } = data;
@@ -1159,6 +1219,12 @@ function initTxns() {
     document.getElementById('txn-p95-latency').textContent = fmtLat(s.p95_commit_latency_us);
     document.getElementById('txn-p99-latency').textContent = fmtLat(s.p99_commit_latency_us);
     document.getElementById('txn-max-latency').textContent = fmtLat(s.max_commit_latency_us);
+
+    // Latency histogram
+    if (t.commit_latencies_ms && t.commit_latencies_ms.length > 0) {
+        new Chart(document.getElementById('txn-latency-chart'))
+            .drawHistogram(t.commit_latencies_ms, 15, '#22c55e');
+    }
 
     // Threads
     const tbody = document.querySelector('#txn-threads-table tbody');

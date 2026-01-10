@@ -377,6 +377,8 @@ pub struct TxnData {
     pub thread_stats: Vec<TxnThreadStats>,
     /// Concurrent transaction analysis
     pub concurrency: TxnConcurrencyStats,
+    /// Individual commit latencies in ms (for histogram visualization)
+    pub commit_latencies_ms: Vec<f64>,
 }
 
 /// Transaction summary statistics
@@ -1437,6 +1439,12 @@ fn generate_txn_data(events: &[TxnEvent]) -> TxnData {
         }
     }
 
+    // Convert commit latencies to ms for histogram
+    let commit_latencies_ms: Vec<f64> = commit_latencies
+        .iter()
+        .map(|&ns| ns as f64 / 1_000_000.0)
+        .collect();
+
     TxnData {
         has_data: true,
         summary: TxnSummary {
@@ -1467,6 +1475,7 @@ fn generate_txn_data(events: &[TxnEvent]) -> TxnData {
             avg_concurrent_ro,
             concurrency_timeline,
         },
+        commit_latencies_ms,
     }
 }
 
