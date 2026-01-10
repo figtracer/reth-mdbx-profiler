@@ -312,8 +312,8 @@ pub fn generate_html(data: &ViewerData) -> String {
                         </div>
                         <div class="card">
                             <div class="card-header">Commit Latency</div>
-                            <div class="card-body">
-                                <div class="latency-stats">
+                            <div class="card-body latency-card-body">
+                                <div class="latency-stats centered">
                                     <div class="lat-stat">
                                         <span class="lat-label">Avg</span>
                                         <span class="lat-value" id="txn-avg-latency"></span>
@@ -703,6 +703,19 @@ body {
 
 .lat-value.major { color: #f87171; }
 
+/* Centered latency card */
+.latency-card-body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 200px;
+}
+
+.latency-stats.centered {
+    justify-content: center;
+    gap: 32px;
+}
+
 /* No data state */
 .no-data {
     text-align: center;
@@ -751,10 +764,11 @@ class Chart {
         if (!this.resize() || !data.length) return;
         this.clear();
 
-        const pad = { t: 20, r: 20, b: 35, l: 55 };
+        const pad = { t: 20, r: 20, b: 40, l: 55 };
         const w = this.w - pad.l - pad.r;
         const h = this.h - pad.t - pad.b;
         const max = Math.max(...data) * 1.1 || 1;
+        const durationSecs = opts.durationSecs || 0;
 
         // Y-axis labels
         this.ctx.fillStyle = '#71717a';
@@ -774,12 +788,20 @@ class Chart {
             this.ctx.stroke();
         }
 
-        // X-axis label
-        if (opts.xLabel) {
-            this.ctx.fillStyle = '#52525b';
-            this.ctx.font = '10px sans-serif';
-            this.ctx.textAlign = 'center';
-            this.ctx.fillText(opts.xLabel, pad.l + w / 2, this.h - 5);
+        // X-axis time labels
+        this.ctx.fillStyle = '#71717a';
+        this.ctx.font = '10px sans-serif';
+        this.ctx.textAlign = 'center';
+        for (let i = 0; i <= 4; i++) {
+            const x = pad.l + (w / 4) * i;
+            let label;
+            if (durationSecs > 0) {
+                const secs = durationSecs * (i / 4);
+                label = secs < 60 ? secs.toFixed(0) + 's' : (secs / 60).toFixed(1) + 'm';
+            } else {
+                label = (i * 25) + '%';
+            }
+            this.ctx.fillText(label, x, this.h - pad.b + 16);
         }
 
         // Y-axis label
@@ -988,7 +1010,7 @@ function initOverview() {
     // Timeline
     if (DATA.timeline.length) {
         new Chart(document.getElementById('timeline-chart'))
-            .drawLine(DATA.timeline.map(t => t.faults), '#6366f1', { xLabel: 'Time', yLabel: 'Faults' });
+            .drawLine(DATA.timeline.map(t => t.faults), '#6366f1', { durationSecs: s.duration_secs, yLabel: 'Faults' });
     }
 
     // Heatmap
@@ -1128,7 +1150,7 @@ function initTxns() {
     // Concurrency chart
     if (c.concurrency_timeline.length) {
         new Chart(document.getElementById('txn-concurrency-chart'))
-            .drawLine(c.concurrency_timeline.map(p => p.concurrent_ro), '#6366f1', { xLabel: 'Time', yLabel: 'Concurrent RO' });
+            .drawLine(c.concurrency_timeline.map(p => p.concurrent_ro), '#6366f1', { durationSecs: s.duration_secs, yLabel: 'Concurrent RO' });
     }
 
     // Latency

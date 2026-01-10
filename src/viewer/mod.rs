@@ -12,20 +12,15 @@ use std::collections::HashMap;
 use std::path::Path;
 
 /// DBI numbers for tables that encode block numbers as the first 8 bytes of their keys.
-/// These are the ChangeSet and History tables in reth:
-/// - 16: AccountsHistory
-/// - 17: StoragesHistory
-/// - 18: AccountChangeSets
-/// - 19: StorageChangeSets
-/// - 24: AccountsTrieChangeSets
-/// - 25: StoragesTrieChangeSets
+/// Based on reth's table definitions:
+/// - AccountChangeSets: Key = BlockNumber (u64 big-endian)
+/// - StorageChangeSets: Key = BlockNumberAddress (first 8 bytes = BlockNumber big-endian)
+///
+/// NOTE: History tables (AccountsHistory, StoragesHistory) use ShardedKey which does NOT
+/// have block number as the first bytes - they store address first.
 const BLOCK_PREFIXED_DBIS: &[u32] = &[
-    18, // AccountChangeSets
-    19, // StorageChangeSets
-    24, // AccountsTrieChangeSets
-    25, // StoragesTrieChangeSets
-    16, // AccountsHistory
-    17, // StoragesHistory
+    18, // AccountChangeSets - Key: BlockNumber (u64)
+    19, // StorageChangeSets - Key: BlockNumberAddress (block_number || address)
 ];
 
 /// Extract block number from a key if it's from a block-prefixed table.
@@ -53,8 +48,10 @@ fn extract_block_from_key(dbi: u32, key_data: &[u8], key_size: u32) -> Option<u6
         key_data[7],
     ]);
 
-    // Sanity check: block numbers should be reasonable (< 100 million for now)
-    if block > 100_000_000 {
+    // Sanity check: block numbers should be reasonable
+    // Ethereum mainnet is around 21 million blocks as of 2025
+    // Allow up to 50 million for future growth and testnets
+    if block > 50_000_000 {
         return None;
     }
 
