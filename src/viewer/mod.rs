@@ -377,7 +377,7 @@ pub struct TxnData {
     pub thread_stats: Vec<TxnThreadStats>,
     /// Concurrent transaction analysis
     pub concurrency: TxnConcurrencyStats,
-    /// Individual commit latencies in ms (for histogram visualization)
+    /// RW commit latencies in ms (for histogram visualization)
     pub commit_latencies_ms: Vec<f64>,
 }
 
@@ -1184,7 +1184,8 @@ fn generate_txn_data(events: &[TxnEvent]) -> TxnData {
     let mut abort_count = 0u64;
     let mut ro_count = 0u64;
     let mut rw_count = 0u64;
-    let mut commit_latencies: Vec<u64> = Vec::new();
+    let mut commit_latencies: Vec<u64> = Vec::new(); // All commits (for stats)
+    let mut rw_commit_latencies: Vec<u64> = Vec::new(); // RW only (for histogram)
 
     // Track active transactions: (txn_ptr, tid) -> (start_time, is_ro)
     // Key by both ptr and tid since MDBX reuses transaction pointers
@@ -1235,6 +1236,12 @@ fn generate_txn_data(events: &[TxnEvent]) -> TxnData {
                 if let Some((start_ts, is_ro)) = active_txns.remove(&(event.txn_ptr, event.tid)) {
                     let start_ms = (start_ts - min_ts) as f64 / 1_000_000.0;
                     let end_ms = (event.timestamp_ns - min_ts) as f64 / 1_000_000.0;
+
+                    // Collect RW commit latencies for histogram (RO commits are just cleanup, ~microseconds)
+                    if !is_ro {
+                        rw_commit_latencies.push(event.latency_ns);
+                    }
+
                     timeline_entries.push(TxnTimelineEntry {
                         tid: event.tid,
                         txn_ptr: format!("0x{:x}", event.txn_ptr),
@@ -1439,8 +1446,8 @@ fn generate_txn_data(events: &[TxnEvent]) -> TxnData {
         }
     }
 
-    // Convert commit latencies to ms for histogram
-    let commit_latencies_ms: Vec<f64> = commit_latencies
+    // Convert RW commit latencies to ms for histogram
+    let commit_latencies_ms: Vec<f64> = rw_commit_latencies
         .iter()
         .map(|&ns| ns as f64 / 1_000_000.0)
         .collect();

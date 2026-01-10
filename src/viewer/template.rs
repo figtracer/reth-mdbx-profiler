@@ -311,7 +311,7 @@ pub fn generate_html(data: &ViewerData) -> String {
                             </div>
                         </div>
                         <div class="card">
-                            <div class="card-header">Commit Latency</div>
+                            <div class="card-header">Commit Latency <span style="font-size: 11px; color: #71717a; font-weight: normal;">(RW only)</span></div>
                             <div class="card-body">
                                 <div class="latency-stats" style="margin-bottom: 16px;">
                                     <div class="lat-stat">
