@@ -1111,27 +1111,14 @@ class Chart {
     }
 
     heatColor(i) {
-        if (i === 0) return '#0a0a12';  // Dark background for empty cells
-        if (i < 0.01) return '#0f172a'; // Very low activity - dark blue-gray
-        // Blue gradient: dark blue -> light blue -> cyan (matching blob-exex scheme)
-        // #1e3a5f (dark) -> #3b82f6 (blue) -> #60a5fa (light blue) -> #22d3ee (cyan for hot)
-        if (i < 0.25) {
-            // Dark blue to blue
-            const t = i / 0.25;
-            return `rgb(${Math.floor(30 + t * 29)}, ${Math.floor(58 + t * 72)}, ${Math.floor(95 + t * 151)})`;
-        } else if (i < 0.5) {
-            // Blue to light blue
-            const t = (i - 0.25) / 0.25;
-            return `rgb(${Math.floor(59 + t * 37)}, ${Math.floor(130 + t * 35)}, ${Math.floor(246 - t * 10)})`;
-        } else if (i < 0.75) {
-            // Light blue to cyan
-            const t = (i - 0.5) / 0.25;
-            return `rgb(${Math.floor(96 - t * 62)}, ${Math.floor(165 + t * 46)}, ${Math.floor(236 + t * 2)})`;
-        } else {
-            // Cyan to bright cyan/white for hotspots
-            const t = (i - 0.75) / 0.25;
-            return `rgb(${Math.floor(34 + t * 100)}, ${Math.floor(211 + t * 44)}, ${Math.floor(238 + t * 17)})`;
-        }
+        if (i === 0) return '#000000';
+        // Smooth gradient: black -> dark blue -> blue -> cyan
+        // Use power curve for better low-end visibility
+        const t = Math.pow(i, 0.6);
+        const r = Math.floor(t * 96);
+        const g = Math.floor(t * 165 + (1 - t) * 20);
+        const b = Math.floor(t * 255 + (1 - t) * 40);
+        return `rgb(${r}, ${g}, ${b})`;
     }
 
     fmtAxisVal(n) {
