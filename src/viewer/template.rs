@@ -72,9 +72,10 @@ pub fn generate_html(data: &ViewerData) -> String {
                         </div>
                     </div>
                     <div class="card">
-                        <div class="card-header">Access Heatmap <span class="axis-hint">(X: Time, Y: File Offset)</span></div>
-                        <div class="card-body chart-container">
+                        <div class="card-header">Access Heatmap <span class="axis-hint">(hover for details)</span></div>
+                        <div class="card-body chart-container" style="position: relative;">
                             <canvas id="heatmap-canvas"></canvas>
+                            <div id="heatmap-tooltip" class="chart-tooltip" style="display: none;"></div>
                         </div>
                     </div>
                 </div>
@@ -312,7 +313,7 @@ pub fn generate_html(data: &ViewerData) -> String {
                             </div>
                         </div>
                         <div class="card">
-                            <div class="card-header">Commit Latency <span style="font-size: 11px; color: #71717a; font-weight: normal;">(RW only)</span></div>
+                            <div class="card-header">RW Commit Latency Timeline <span class="axis-hint">(drag to zoom, dbl-click to reset)</span></div>
                             <div class="card-body">
                                 <div class="latency-stats" style="margin-bottom: 16px;">
                                     <div class="lat-stat">
@@ -336,8 +337,7 @@ pub fn generate_html(data: &ViewerData) -> String {
                                         <span class="lat-value major" id="txn-max-latency"></span>
                                     </div>
                                 </div>
-                                <div class="chart-container" style="height: 120px;">
-                                    <canvas id="txn-latency-chart"></canvas>
+                                <div class="uplot-container" id="txn-latency-chart" style="height: 140px;">
                                 </div>
                             </div>
                         </div>
@@ -384,7 +384,7 @@ const CSS: &str = r##"
 
 body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: #0a0a0f;
+    background: #000000;
     color: #e4e4e7;
     font-size: 14px;
     line-height: 1.5;
@@ -502,7 +502,7 @@ body {
 
 .card-header {
     padding: 12px 16px;
-    background: #0a0a0f;
+    background: #000000;
     font-size: 12px;
     font-weight: 600;
     color: #a1a1aa;
@@ -593,15 +593,6 @@ body {
     color: #60a5fa;
     font-weight: 600;
     font-size: 14px;
-}
-
-.chart-hint {
-    position: absolute;
-    bottom: 4px;
-    right: 8px;
-    font-size: 10px;
-    color: #52525b;
-    pointer-events: none;
 }
 
 /* Compact tables */
@@ -797,7 +788,7 @@ body {
 
 /* Scrollbar */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-track { background: #0a0a0f; }
+::-webkit-scrollbar-track { background: #000000; }
 ::-webkit-scrollbar-thumb { background: #2a2a3a; border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: #3a3a4a; }
 "##;
@@ -896,6 +887,118 @@ function createUPlotChart(container, data, opts = {}) {
     return uplot;
 }
 
+// uPlot scatter chart for commit latency timeline
+function createCommitTimelineChart(container, commitData, opts = {}) {
+    const el = typeof container === 'string' ? document.getElementById(container) : container;
+    if (!el || !commitData.length) return null;
+
+    const rect = el.getBoundingClientRect();
+    const width = rect.width || 400;
+    const height = rect.height || 140;
+
+    // Extract timestamps (seconds) and latencies (ms)
+    const timestamps = commitData.map(p => p.time_secs);
+    const latencies = commitData.map(p => p.latency_ms);
+
+    const uplotData = [timestamps, latencies];
+
+    const color = opts.color || '#3b82f6';
+
+    const uplotOpts = {
+        width,
+        height,
+        cursor: {
+            show: true,
+            x: true,
+            y: true,
+            drag: { x: true, y: false, setScale: true }
+        },
+        select: {
+            show: true,
+        },
+        scales: {
+            x: { time: false },
+            y: { auto: true }
+        },
+        axes: [
+            {
+                stroke: '#71717a',
+                grid: { stroke: '#1e1e2a', width: 1 },
+                ticks: { stroke: '#1e1e2a', width: 1 },
+                font: '11px sans-serif',
+                values: (u, vals) => vals.map(v => {
+                    if (v < 60) return v.toFixed(0) + 's';
+                    return (v / 60).toFixed(1) + 'm';
+                })
+            },
+            {
+                stroke: '#71717a',
+                grid: { stroke: '#1e1e2a', width: 1 },
+                ticks: { stroke: '#1e1e2a', width: 1 },
+                font: '11px sans-serif',
+                size: 55,
+                values: (u, vals) => vals.map(v => {
+                    if (v < 1) return v.toFixed(2) + 'ms';
+                    if (v < 1000) return v.toFixed(0) + 'ms';
+                    return (v / 1000).toFixed(1) + 's';
+                })
+            }
+        ],
+        series: [
+            {},
+            {
+                stroke: color,
+                width: 0,
+                fill: color + '80',
+                label: 'Commit Latency',
+                paths: (u, seriesIdx, idx0, idx1) => {
+                    // Draw vertical bars from 0 to value
+                    const s = u.series[seriesIdx];
+                    const xdata = u.data[0];
+                    const ydata = u.data[seriesIdx];
+
+                    let path = new Path2D();
+                    const barWidth = Math.max(2, Math.min(8, u.bbox.width / ydata.length * 0.6));
+
+                    for (let i = idx0; i <= idx1; i++) {
+                        const x = u.valToPos(xdata[i], 'x', true);
+                        const y0 = u.valToPos(0, 'y', true);
+                        const y1 = u.valToPos(ydata[i], 'y', true);
+
+                        path.rect(x - barWidth/2, y1, barWidth, y0 - y1);
+                    }
+
+                    return { stroke: path, fill: path };
+                },
+                points: { show: false }
+            }
+        ],
+        hooks: {
+            setSelect: [
+                u => {
+                    if (u.select.width > 0) {
+                        const min = u.posToVal(u.select.left, 'x');
+                        const max = u.posToVal(u.select.left + u.select.width, 'x');
+                        u.setScale('x', { min, max });
+                    }
+                    u.setSelect({ width: 0, height: 0 }, false);
+                }
+            ]
+        }
+    };
+
+    // Clear container and create chart
+    el.innerHTML = '';
+    const uplot = new uPlot(uplotOpts, uplotData, el);
+
+    // Double-click to reset zoom
+    el.addEventListener('dblclick', () => {
+        uplot.setScale('x', { min: timestamps[0], max: timestamps[timestamps.length - 1] });
+    });
+
+    return uplot;
+}
+
 // Canvas-based Chart class for bar charts, histograms, and heatmaps
 class Chart {
     constructor(canvas) {
@@ -947,63 +1050,6 @@ class Chart {
             this.ctx.fillStyle = '#71717a';
             this.ctx.textAlign = 'left';
             this.ctx.fillText(this.fmtAxisVal(v), x + barW + 8, y + barH / 2 + 4);
-        });
-    }
-
-    drawHistogram(values, numBuckets = 20, color = '#6366f1') {
-        if (!this.resize() || !values.length) return;
-        this.clear();
-
-        const pad = { t: 15, r: 15, b: 35, l: 50 };
-        const w = this.w - pad.l - pad.r;
-        const h = this.h - pad.t - pad.b;
-
-        // Create histogram buckets
-        const min = Math.min(...values);
-        const max = Math.max(...values);
-        const range = max - min || 1;
-        const bucketSize = range / numBuckets;
-        const buckets = new Array(numBuckets).fill(0);
-
-        values.forEach(v => {
-            let idx = Math.floor((v - min) / bucketSize);
-            if (idx >= numBuckets) idx = numBuckets - 1;
-            buckets[idx]++;
-        });
-
-        const maxCount = Math.max(...buckets) * 1.1 || 1;
-        const barW = w / numBuckets - 2;
-
-        // Y-axis labels
-        this.ctx.fillStyle = '#71717a';
-        this.ctx.font = '10px sans-serif';
-        this.ctx.textAlign = 'right';
-        for (let i = 0; i <= 3; i++) {
-            const val = maxCount * (1 - i / 3);
-            const y = pad.t + (h / 3) * i;
-            this.ctx.fillText(Math.round(val).toString(), pad.l - 6, y + 3);
-        }
-
-        // Draw bars
-        buckets.forEach((count, i) => {
-            const barH = (count / maxCount) * h;
-            const x = pad.l + i * (w / numBuckets) + 1;
-            const y = pad.t + h - barH;
-
-            this.ctx.fillStyle = color;
-            this.ctx.fillRect(x, y, barW, barH);
-        });
-
-        // X-axis labels (latency values)
-        this.ctx.fillStyle = '#71717a';
-        this.ctx.font = '10px sans-serif';
-        this.ctx.textAlign = 'center';
-        const xLabels = [0, 0.25, 0.5, 0.75, 1];
-        xLabels.forEach(pct => {
-            const x = pad.l + pct * w;
-            const val = min + pct * range;
-            const label = val < 1 ? val.toFixed(2) + 'ms' : val < 1000 ? val.toFixed(0) + 'ms' : (val / 1000).toFixed(1) + 's';
-            this.ctx.fillText(label, x, this.h - pad.b + 14);
         });
     }
 
@@ -1162,9 +1208,68 @@ function initOverview() {
         });
     }
 
-    // Heatmap
+    // Heatmap with interactivity
     if (DATA.heatmap.data.length) {
-        new Chart(document.getElementById('heatmap-canvas')).drawHeatmap(DATA.heatmap);
+        const heatmapChart = new Chart(document.getElementById('heatmap-canvas'));
+        heatmapChart.drawHeatmap(DATA.heatmap);
+
+        // Add hover tooltip
+        const canvas = document.getElementById('heatmap-canvas');
+        const tooltip = document.getElementById('heatmap-tooltip');
+        const hm = DATA.heatmap;
+
+        canvas.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            // Calculate which cell we're hovering over
+            const pad = { t: 20, r: 20, b: 40, l: 60 };
+            const w = rect.width - pad.l - pad.r;
+            const h = rect.height - pad.t - pad.b;
+
+            if (x < pad.l || x > rect.width - pad.r || y < pad.t || y > rect.height - pad.b) {
+                tooltip.style.display = 'none';
+                return;
+            }
+
+            const relX = (x - pad.l) / w;
+            const relY = (y - pad.t) / h;
+
+            const timeIdx = Math.floor(relX * hm.time_buckets);
+            const offsetIdx = hm.offset_buckets - 1 - Math.floor(relY * hm.offset_buckets);
+
+            if (timeIdx >= 0 && timeIdx < hm.time_buckets && offsetIdx >= 0 && offsetIdx < hm.offset_buckets) {
+                const cellIdx = timeIdx * hm.offset_buckets + offsetIdx;
+                const count = hm.data[cellIdx] || 0;
+
+                // Calculate actual values
+                const timeRange = hm.max_time_ms - hm.min_time_ms;
+                const timeMs = hm.min_time_ms + (timeIdx / hm.time_buckets) * timeRange;
+                const offsetRange = hm.max_offset_gb - hm.min_offset_gb;
+                const offsetGb = hm.min_offset_gb + (offsetIdx / hm.offset_buckets) * offsetRange;
+
+                const timeStr = timeMs < 60000 ? (timeMs/1000).toFixed(1) + 's' : (timeMs/60000).toFixed(1) + 'm';
+                const intensity = hm.max_count > 0 ? (count / hm.max_count * 100).toFixed(0) : 0;
+
+                tooltip.innerHTML = `
+                    <div class="chart-tooltip-label">Time: ${timeStr}</div>
+                    <div class="chart-tooltip-label">Offset: ${offsetGb.toFixed(1)} GB</div>
+                    <div class="chart-tooltip-value">${count} faults</div>
+                    <div class="chart-tooltip-label">${intensity}% intensity</div>
+                `;
+
+                tooltip.style.display = 'block';
+                tooltip.style.left = Math.min(x + 10, rect.width - 120) + 'px';
+                tooltip.style.top = Math.min(y + 10, rect.height - 80) + 'px';
+            } else {
+                tooltip.style.display = 'none';
+            }
+        });
+
+        canvas.addEventListener('mouseleave', () => {
+            tooltip.style.display = 'none';
+        });
     }
 
     // Tables
@@ -1312,10 +1417,11 @@ function initTxns() {
     document.getElementById('txn-p99-latency').textContent = fmtLat(s.p99_commit_latency_us);
     document.getElementById('txn-max-latency').textContent = fmtLat(s.max_commit_latency_us);
 
-    // Latency histogram (blue scheme)
-    if (t.commit_latencies_ms && t.commit_latencies_ms.length > 0) {
-        new Chart(document.getElementById('txn-latency-chart'))
-            .drawHistogram(t.commit_latencies_ms, 15, '#3b82f6');
+    // RW Commit latency timeline (shows WHEN commits happen and their latency)
+    if (t.rw_commit_timeline && t.rw_commit_timeline.length > 0) {
+        createCommitTimelineChart('txn-latency-chart', t.rw_commit_timeline, {
+            color: '#3b82f6'
+        });
     }
 
     // Threads

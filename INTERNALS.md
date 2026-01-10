@@ -110,6 +110,99 @@ the profiler uses ebpf to trace memory-mapped file accesses in the linux kernel.
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
+## viewer visualizations
+
+the html viewer has three tabs: overview, cursor ops, and mdbx txns. each visualization serves a specific purpose for understanding database performance.
+
+### overview tab
+
+#### fault timeline (interactive)
+- **what it shows**: page faults over time during the trace
+- **x-axis**: time since trace start (seconds/minutes)
+- **y-axis**: number of faults per time bucket
+- **interaction**: drag to zoom into a time range, double-click to reset
+- **what to look for**: spikes indicate I/O-heavy periods (block execution, trie computation)
+
+#### access heatmap (interactive)
+- **what it shows**: 2D density of page faults by time and file offset
+- **x-axis**: time during trace
+- **y-axis**: file offset in mdbx.dat (GB)
+- **color**: blue gradient - darker = fewer faults, brighter = more faults
+- **interaction**: hover to see exact time, offset, and fault count
+- **what to look for**: 
+  - horizontal bands = sequential access to a file region
+  - scattered dots = random access (bad for performance)
+  - bright spots = hot regions causing many faults
+
+#### page faults by table
+- **what it shows**: which tables caused the most page faults
+- **columns**: table name, total faults, major faults, percentage
+- **note**: faults are attributed via timestamp correlation with cursor ops
+
+#### access patterns
+- **sequential vs random**: ratio of sequential (stride ≤4 pages) vs random access
+- **top stride patterns**: common access strides (e.g., "sequential-forward", "random-jump")
+- **top threads**: which threads cause the most faults
+
+### cursor ops tab
+
+requires `--trace-cursors` flag during tracing.
+
+#### metrics row
+- **total ops**: total cursor operations traced
+- **ops/sec**: operation throughput
+- **avg/p50/p95/p99 latency**: operation latency distribution
+- **seeks vs navigation**: seek ops traverse B+ tree, navigation ops move to adjacent keys
+
+#### operations by type
+- **what it shows**: breakdown of cursor operations (SET_RANGE, NEXT, PREV, etc.)
+- **what to look for**: high seek ratio = random access pattern, high NEXT ratio = sequential scan
+
+#### operations by table
+- **what it shows**: which tables have the most cursor activity
+- **what to look for**: tables with high ops but low faults = good cache hit rate
+
+#### slow operations (>100μs)
+- **what it shows**: operations that took >100μs - likely caused page faults
+- **columns**: table, slow count, total count, %, avg/max latency, time lost
+- **what to look for**: tables with high slow % are causing disk I/O
+
+#### hot keys
+- **what it shows**: specific keys that are frequently slow
+- **what to look for**: repeated slow access to same key = cache thrashing
+
+### mdbx txns tab
+
+requires `--trace-cursors` flag during tracing.
+
+#### metrics row
+- **total txns**: transaction count (begin events)
+- **txns/sec**: transaction throughput
+- **RO/RW**: read-only vs read-write transaction counts
+- **commits/aborts**: how transactions ended (RO txns typically "abort" - this is normal)
+
+#### concurrency chart (interactive)
+- **what it shows**: concurrent read-only transactions over time
+- **x-axis**: time during trace
+- **y-axis**: number of concurrent RO transactions
+- **interaction**: drag to zoom, double-click to reset
+- **what to look for**: high concurrency = good parallelism, drops = writer blocking readers
+
+#### rw commit latency timeline (interactive)
+- **what it shows**: when RW commits happen and how long they take
+- **x-axis**: time during trace (seconds)
+- **y-axis**: commit latency (milliseconds)
+- **each bar**: one RW commit at that point in time
+- **interaction**: drag to zoom, double-click to reset
+- **what to look for**:
+  - regular spacing = block-by-block commits (~12s apart on mainnet)
+  - tall bars = slow commits (large write batches or disk pressure)
+  - clusters = multiple commits in quick succession
+
+#### thread distribution
+- **what it shows**: which threads are doing transaction work
+- **what to look for**: RW transactions should be on dedicated writer thread
+
 ## the table attribution problem
 
 mdbx stores all tables in a single file (mdbx.dat) as interleaved b+ tree pages. unlike databases with separate files per table, you **cannot** map a file offset directly to a table - page 1000 might belong to HashedStorages, page 1001 to AccountsTrie.
