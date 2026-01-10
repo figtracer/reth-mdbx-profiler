@@ -5,7 +5,7 @@ ebpf-based profiler for analyzing mdbx page fault patterns and cursor operations
 ## what it does
 
 - traces page faults on mdbx memory-mapped regions
-- traces mdbx cursor operations (seeks, gets, navigation)
+- traces mdbx cursor operations (seeks, gets, navigation, puts)
 - correlates page faults with cursor operations to attribute faults to specific tables
 - generates interactive html visualizations
 
@@ -75,30 +75,6 @@ generate interactive html visualizations from traces:
 ```
 
 the analyzer runs on macos/linux without ebpf - collect traces on your node and analyze locally.
-
-## example output
-
-```
-Table Breakdown
-Correlated 59.1% of page faults (207698 of 351526) with cursor operations.
-
-Table              Category      Faults    Major     %
-HashedStorages     HashedState   46.5K     11.4K     13.2%
-StoragesTrie       Trie          41.5K     8.0K      11.8%
-HashedAccounts     HashedState   39.9K     7.9K      11.3%
-PlainStorageState  State         20.7K     5.1K      5.9%
-AccountsTrie       Trie          18.5K     3.4K      5.3%
-```
-
-the ~40% uncorrelated faults occur outside cursor operation windows - during transaction begin/commit, cursor open/close, write operations, or kernel readahead triggered by reth's access patterns.
-
-## known limitations
-
-- only works with 4kb page sizes (standard on most linux systems)
-- requires btf support in the kernel (`/sys/kernel/btf/vmlinux` must exist)
-- cursor tracing requires symbols in the reth binary (not stripped)
-- page fault tracing may miss faults during very high load due to ring buffer drops
-- correlation rate depends on how much i/o happens inside vs outside cursor operations
 
 ## license
 
