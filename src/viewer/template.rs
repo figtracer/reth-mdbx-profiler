@@ -65,19 +65,19 @@ pub fn generate_html(data: &ViewerData) -> String {
                 <div class="two-col">
                     <div class="card">
                         <div class="card-header">Fault Timeline</div>
-                        <div class="card-body">
+                        <div class="card-body chart-container">
                             <canvas id="timeline-chart"></canvas>
                         </div>
                     </div>
                     <div class="card">
-                        <div class="card-header">Access Heatmap</div>
-                        <div class="card-body">
+                        <div class="card-header">Access Heatmap <span class="axis-hint">(X: Time, Y: File Offset)</span></div>
+                        <div class="card-body chart-container">
                             <canvas id="heatmap-canvas"></canvas>
                         </div>
                     </div>
                 </div>
 
-                <!-- Tables and Threads side by side -->
+                <!-- Tables and Patterns side by side -->
                 <div class="two-col">
                     <div class="card">
                         <div class="card-header">
@@ -101,7 +101,7 @@ pub fn generate_html(data: &ViewerData) -> String {
                     <div class="card">
                         <div class="card-header">Access Patterns</div>
                         <div class="card-body">
-                            <div class="pattern-bars">
+                            <div class="pattern-section">
                                 <div class="pattern-bar">
                                     <span class="pattern-label">Sequential</span>
                                     <div class="bar-container">
@@ -117,7 +117,14 @@ pub fn generate_html(data: &ViewerData) -> String {
                                     <span class="pattern-value" id="rand-ratio"></span>
                                 </div>
                             </div>
-                            <div class="threads-summary" id="threads-summary"></div>
+                            <div class="stride-section" id="stride-section">
+                                <div class="section-title">Top Stride Patterns</div>
+                                <div id="stride-list"></div>
+                            </div>
+                            <div class="threads-section">
+                                <div class="section-title">Top Threads</div>
+                                <div id="threads-summary"></div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -169,13 +176,13 @@ pub fn generate_html(data: &ViewerData) -> String {
                     <div class="two-col">
                         <div class="card">
                             <div class="card-header">Operations by Type</div>
-                            <div class="card-body">
+                            <div class="card-body chart-container">
                                 <canvas id="cursor-ops-chart"></canvas>
                             </div>
                         </div>
                         <div class="card">
                             <div class="card-header">Operations by Table</div>
-                            <div class="card-body">
+                            <div class="card-body chart-container">
                                 <canvas id="cursor-tables-chart"></canvas>
                             </div>
                         </div>
@@ -228,7 +235,7 @@ pub fn generate_html(data: &ViewerData) -> String {
                     <!-- Slow keys -->
                     <div class="card full-width">
                         <div class="card-header">Hot Keys (Frequently Slow)</div>
-                        <div class="card-body compact-table-container" style="max-height: 300px;">
+                        <div class="card-body compact-table-container" style="max-height: 350px;">
                             <table class="compact-table" id="slow-keys-table">
                                 <thead>
                                     <tr>
@@ -298,7 +305,9 @@ pub fn generate_html(data: &ViewerData) -> String {
                                         <span class="conc-value" id="txn-avg-ro"></span>
                                     </div>
                                 </div>
-                                <canvas id="txn-concurrency-chart"></canvas>
+                                <div class="chart-container">
+                                    <canvas id="txn-concurrency-chart"></canvas>
+                                </div>
                             </div>
                         </div>
                         <div class="card">
@@ -332,7 +341,7 @@ pub fn generate_html(data: &ViewerData) -> String {
 
                     <div class="card full-width">
                         <div class="card-header">Thread Distribution</div>
-                        <div class="card-body compact-table-container" style="max-height: 250px;">
+                        <div class="card-body compact-table-container" style="max-height: 300px;">
                             <table class="compact-table" id="txn-threads-table">
                                 <thead>
                                     <tr>
@@ -373,34 +382,34 @@ body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     background: #0a0a0f;
     color: #e4e4e7;
-    font-size: 13px;
-    line-height: 1.4;
+    font-size: 14px;
+    line-height: 1.5;
 }
 
 #app {
-    max-width: 1400px;
+    max-width: 1600px;
     margin: 0 auto;
-    padding: 12px 16px;
+    padding: 16px 24px;
 }
 
 /* Tabs */
 .tabs {
     display: flex;
-    gap: 4px;
-    margin-bottom: 12px;
+    gap: 6px;
+    margin-bottom: 16px;
     background: #12121a;
-    padding: 4px;
-    border-radius: 8px;
+    padding: 6px;
+    border-radius: 10px;
 }
 
 .tab {
-    padding: 8px 16px;
+    padding: 10px 20px;
     background: transparent;
     border: none;
     color: #71717a;
     cursor: pointer;
-    border-radius: 6px;
-    font-size: 12px;
+    border-radius: 8px;
+    font-size: 14px;
     font-weight: 500;
     transition: all 0.15s;
 }
@@ -410,13 +419,13 @@ body {
 
 .export-btn {
     margin-left: auto;
-    padding: 8px 14px;
+    padding: 10px 18px;
     background: #059669;
     color: #fff;
     border: none;
-    border-radius: 6px;
+    border-radius: 8px;
     cursor: pointer;
-    font-size: 11px;
+    font-size: 13px;
     font-weight: 600;
 }
 .export-btn:hover { background: #10b981; }
@@ -428,23 +437,23 @@ body {
 /* Metrics row */
 .metrics-row {
     display: flex;
-    gap: 8px;
-    margin-bottom: 12px;
+    gap: 12px;
+    margin-bottom: 16px;
     flex-wrap: wrap;
 }
 
 .metric {
     background: #12121a;
-    padding: 10px 14px;
-    border-radius: 6px;
+    padding: 14px 18px;
+    border-radius: 8px;
     text-align: center;
-    min-width: 90px;
+    min-width: 110px;
     flex: 1;
 }
 
 .metric-value {
     display: block;
-    font-size: 16px;
+    font-size: 20px;
     font-weight: 700;
     color: #6366f1;
 }
@@ -453,28 +462,29 @@ body {
 
 .metric-label {
     display: block;
-    font-size: 10px;
+    font-size: 11px;
     color: #71717a;
     text-transform: uppercase;
-    margin-top: 2px;
+    margin-top: 4px;
+    letter-spacing: 0.5px;
 }
 
 /* Two column layout */
 .two-col {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 12px;
-    margin-bottom: 12px;
+    gap: 16px;
+    margin-bottom: 16px;
 }
 
-@media (max-width: 900px) {
+@media (max-width: 1000px) {
     .two-col { grid-template-columns: 1fr; }
 }
 
 /* Cards */
 .card {
     background: #12121a;
-    border-radius: 8px;
+    border-radius: 10px;
     border: 1px solid #1e1e2a;
     overflow: hidden;
 }
@@ -483,13 +493,13 @@ body {
 
 .card.highlight {
     border-color: #f87171;
-    box-shadow: 0 0 20px rgba(248, 113, 113, 0.1);
+    box-shadow: 0 0 24px rgba(248, 113, 113, 0.15);
 }
 
 .card-header {
-    padding: 10px 14px;
+    padding: 12px 16px;
     background: #0a0a0f;
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 600;
     color: #a1a1aa;
     text-transform: uppercase;
@@ -497,119 +507,178 @@ body {
     display: flex;
     justify-content: space-between;
     align-items: center;
+    border-bottom: 1px solid #1e1e2a;
 }
 
 .card-badge {
-    font-size: 10px;
-    padding: 2px 6px;
+    font-size: 11px;
+    padding: 3px 8px;
     border-radius: 4px;
     background: #22c55e20;
     color: #22c55e;
     font-weight: 500;
 }
 
-.card-body {
-    padding: 12px;
+.axis-hint {
+    font-size: 10px;
+    color: #52525b;
+    font-weight: 400;
+    text-transform: none;
 }
 
-.card-body canvas {
+.card-body {
+    padding: 16px;
+}
+
+/* Chart containers */
+.chart-container {
+    position: relative;
+    height: 220px;
+}
+
+.chart-container canvas {
     width: 100% !important;
-    height: 180px !important;
+    height: 100% !important;
 }
 
 /* Compact tables */
 .compact-table-container {
     overflow-x: auto;
     overflow-y: auto;
-    max-height: 400px;
+    max-height: 450px;
 }
 
 .compact-table {
     width: 100%;
-    border-collapse: collapse;
-    font-size: 11px;
+    border-collapse: separate;
+    border-spacing: 0;
+    font-size: 13px;
 }
 
 .compact-table th,
 .compact-table td {
-    padding: 6px 8px;
+    padding: 10px 12px;
     text-align: left;
     border-bottom: 1px solid #1e1e2a;
     white-space: nowrap;
 }
 
-.compact-table th {
-    background: #0a0a0f;
-    font-weight: 600;
-    color: #6366f1;
+.compact-table thead {
     position: sticky;
     top: 0;
-    z-index: 1;
+    z-index: 10;
 }
 
-.compact-table tr:hover { background: #1a1a24; }
+.compact-table th {
+    background: #0f0f17;
+    font-weight: 600;
+    color: #6366f1;
+    border-bottom: 2px solid #2a2a3a;
+}
+
+.compact-table tbody tr:hover { background: #1a1a24; }
 
 .compact-table td { font-variant-numeric: tabular-nums; }
 
-/* Pattern bars */
-.pattern-bars { margin-bottom: 16px; }
+/* Pattern section */
+.pattern-section {
+    margin-bottom: 20px;
+}
 
 .pattern-bar {
     display: flex;
     align-items: center;
-    gap: 8px;
-    margin-bottom: 8px;
+    gap: 12px;
+    margin-bottom: 10px;
 }
 
 .pattern-label {
-    width: 70px;
-    font-size: 11px;
-    color: #71717a;
+    width: 80px;
+    font-size: 13px;
+    color: #a1a1aa;
+    font-weight: 500;
 }
 
 .bar-container {
     flex: 1;
-    height: 8px;
+    height: 12px;
     background: #1e1e2a;
-    border-radius: 4px;
+    border-radius: 6px;
     overflow: hidden;
 }
 
 .bar {
     height: 100%;
-    border-radius: 4px;
+    border-radius: 6px;
     transition: width 0.3s;
 }
 
-.bar.sequential { background: #6366f1; }
-.bar.random { background: #fbbf24; }
+.bar.sequential { background: linear-gradient(90deg, #6366f1, #818cf8); }
+.bar.random { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
 
 .pattern-value {
-    width: 45px;
+    width: 55px;
     text-align: right;
+    font-size: 13px;
+    font-weight: 600;
+    color: #e4e4e7;
+}
+
+/* Section titles */
+.section-title {
     font-size: 11px;
     font-weight: 600;
+    color: #6366f1;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 10px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid #1e1e2a;
+}
+
+/* Stride section */
+.stride-section {
+    margin-bottom: 20px;
+}
+
+.stride-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 0;
+    font-size: 12px;
     color: #a1a1aa;
 }
 
-/* Threads summary */
-.threads-summary {
-    font-size: 11px;
+.stride-item .stride-type {
+    color: #6366f1;
+    font-weight: 500;
+}
+
+.stride-item .stride-count {
     color: #71717a;
 }
 
-.threads-summary .thread-item {
+/* Threads section */
+.threads-section {
+    font-size: 13px;
+}
+
+.thread-item {
     display: flex;
     justify-content: space-between;
-    padding: 4px 0;
+    padding: 8px 0;
     border-bottom: 1px solid #1e1e2a;
+    color: #a1a1aa;
 }
+
+.thread-item:last-child { border-bottom: none; }
 
 /* Concurrency stats */
 .concurrency-stats, .latency-stats {
     display: flex;
-    gap: 16px;
-    margin-bottom: 12px;
+    gap: 24px;
+    margin-bottom: 16px;
     flex-wrap: wrap;
 }
 
@@ -619,14 +688,15 @@ body {
 
 .conc-label, .lat-label {
     display: block;
-    font-size: 10px;
+    font-size: 11px;
     color: #71717a;
     text-transform: uppercase;
+    margin-bottom: 4px;
 }
 
 .conc-value, .lat-value {
     display: block;
-    font-size: 18px;
+    font-size: 24px;
     font-weight: 700;
     color: #6366f1;
 }
@@ -636,26 +706,28 @@ body {
 /* No data state */
 .no-data {
     text-align: center;
-    padding: 40px;
+    padding: 60px;
     color: #71717a;
+    font-size: 15px;
 }
 
 .no-data code {
     background: #1e1e2a;
-    padding: 2px 6px;
+    padding: 4px 8px;
     border-radius: 4px;
     font-family: monospace;
+    color: #a1a1aa;
 }
 
 /* Scrollbar */
-::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: #0a0a0f; }
-::-webkit-scrollbar-thumb { background: #2a2a3a; border-radius: 3px; }
+::-webkit-scrollbar-thumb { background: #2a2a3a; border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: #3a3a4a; }
 "##;
 
 const JAVASCRIPT: &str = r##"
-// Minimal chart library
+// Chart library with axis labels
 class Chart {
     constructor(canvas) {
         this.canvas = canvas;
@@ -675,37 +747,64 @@ class Chart {
 
     clear() { this.ctx.clearRect(0, 0, this.w, this.h); }
 
-    drawLine(data, color = '#6366f1') {
+    drawLine(data, color = '#6366f1', opts = {}) {
         if (!this.resize() || !data.length) return;
         this.clear();
 
-        const pad = { t: 10, r: 10, b: 20, l: 40 };
+        const pad = { t: 20, r: 20, b: 35, l: 55 };
         const w = this.w - pad.l - pad.r;
         const h = this.h - pad.t - pad.b;
         const max = Math.max(...data) * 1.1 || 1;
 
-        // Grid
-        this.ctx.strokeStyle = '#1e1e2a';
-        this.ctx.lineWidth = 1;
+        // Y-axis labels
+        this.ctx.fillStyle = '#71717a';
+        this.ctx.font = '11px sans-serif';
+        this.ctx.textAlign = 'right';
         for (let i = 0; i <= 4; i++) {
+            const val = max * (1 - i / 4);
             const y = pad.t + (h / 4) * i;
+            this.ctx.fillText(this.fmtAxisVal(val), pad.l - 8, y + 4);
+
+            // Grid line
+            this.ctx.strokeStyle = '#1e1e2a';
+            this.ctx.lineWidth = 1;
             this.ctx.beginPath();
             this.ctx.moveTo(pad.l, y);
             this.ctx.lineTo(this.w - pad.r, y);
             this.ctx.stroke();
         }
 
-        // Area
+        // X-axis label
+        if (opts.xLabel) {
+            this.ctx.fillStyle = '#52525b';
+            this.ctx.font = '10px sans-serif';
+            this.ctx.textAlign = 'center';
+            this.ctx.fillText(opts.xLabel, pad.l + w / 2, this.h - 5);
+        }
+
+        // Y-axis label
+        if (opts.yLabel) {
+            this.ctx.save();
+            this.ctx.fillStyle = '#52525b';
+            this.ctx.font = '10px sans-serif';
+            this.ctx.translate(12, pad.t + h / 2);
+            this.ctx.rotate(-Math.PI / 2);
+            this.ctx.textAlign = 'center';
+            this.ctx.fillText(opts.yLabel, 0, 0);
+            this.ctx.restore();
+        }
+
+        // Area fill
         this.ctx.beginPath();
-        this.ctx.moveTo(pad.l, this.h - pad.b);
+        this.ctx.moveTo(pad.l, pad.t + h);
         data.forEach((v, i) => {
             const x = pad.l + (i / (data.length - 1)) * w;
             const y = pad.t + ((max - v) / max) * h;
             this.ctx.lineTo(x, y);
         });
-        this.ctx.lineTo(pad.l + w, this.h - pad.b);
+        this.ctx.lineTo(pad.l + w, pad.t + h);
         this.ctx.closePath();
-        this.ctx.fillStyle = color + '20';
+        this.ctx.fillStyle = color + '25';
         this.ctx.fill();
 
         // Line
@@ -716,51 +815,55 @@ class Chart {
             i === 0 ? this.ctx.moveTo(x, y) : this.ctx.lineTo(x, y);
         });
         this.ctx.strokeStyle = color;
-        this.ctx.lineWidth = 1.5;
+        this.ctx.lineWidth = 2;
         this.ctx.stroke();
     }
 
-    drawBar(labels, values, color = '#6366f1') {
+    drawHorizontalBar(labels, values, color = '#6366f1') {
         if (!this.resize() || !values.length) return;
         this.clear();
 
-        const pad = { t: 10, r: 10, b: 50, l: 10 };
+        const pad = { t: 10, r: 60, b: 10, l: 120 };
         const w = this.w - pad.l - pad.r;
         const h = this.h - pad.t - pad.b;
         const max = Math.max(...values) * 1.1 || 1;
-        const barW = (w / values.length) * 0.7;
-        const gap = (w / values.length) * 0.3;
+        const barH = Math.min(24, (h / values.length) * 0.7);
+        const gap = (h / values.length) - barH;
 
         values.forEach((v, i) => {
-            const barH = (v / max) * h;
-            const x = pad.l + i * (barW + gap) + gap / 2;
-            const y = pad.t + h - barH;
+            const barW = (v / max) * w;
+            const x = pad.l;
+            const y = pad.t + i * (barH + gap) + gap / 2;
 
+            // Bar
             this.ctx.fillStyle = color;
             this.ctx.fillRect(x, y, barW, barH);
 
-            // Label
+            // Label (left)
+            this.ctx.fillStyle = '#a1a1aa';
+            this.ctx.font = '11px sans-serif';
+            this.ctx.textAlign = 'right';
+            const labelText = labels[i].length > 16 ? labels[i].substring(0, 14) + '...' : labels[i];
+            this.ctx.fillText(labelText, pad.l - 8, y + barH / 2 + 4);
+
+            // Value (right)
             this.ctx.fillStyle = '#71717a';
-            this.ctx.font = '9px sans-serif';
-            this.ctx.textAlign = 'center';
-            this.ctx.save();
-            this.ctx.translate(x + barW / 2, this.h - pad.b + 8);
-            this.ctx.rotate(Math.PI / 4);
-            this.ctx.fillText(labels[i].substring(0, 12), 0, 0);
-            this.ctx.restore();
+            this.ctx.textAlign = 'left';
+            this.ctx.fillText(this.fmtAxisVal(v), x + barW + 8, y + barH / 2 + 4);
         });
     }
 
-    drawHeatmap(data) {
+    drawHeatmap(data, opts = {}) {
         if (!this.resize()) return;
-        const { time_buckets, offset_buckets, data: cells, max_count } = data;
+        const { time_buckets, offset_buckets, data: cells, max_count, min_offset_gb, max_offset_gb, min_time_ms, max_time_ms } = data;
 
-        const pad = { t: 10, r: 10, b: 30, l: 40 };
+        const pad = { t: 20, r: 20, b: 40, l: 60 };
         const w = this.w - pad.l - pad.r;
         const h = this.h - pad.t - pad.b;
         const cellW = w / time_buckets;
         const cellH = h / offset_buckets;
 
+        // Draw cells
         for (let t = 0; t < time_buckets; t++) {
             for (let o = 0; o < offset_buckets; o++) {
                 const idx = t * offset_buckets + o;
@@ -772,19 +875,61 @@ class Chart {
                 this.ctx.fillRect(x, y, cellW + 1, cellH + 1);
             }
         }
+
+        // Y-axis labels (file offset in GB)
+        this.ctx.fillStyle = '#71717a';
+        this.ctx.font = '10px sans-serif';
+        this.ctx.textAlign = 'right';
+        const offsetRange = max_offset_gb - min_offset_gb;
+        for (let i = 0; i <= 4; i++) {
+            const gb = min_offset_gb + offsetRange * (1 - i / 4);
+            const y = pad.t + (h / 4) * i;
+            this.ctx.fillText(gb.toFixed(0) + 'GB', pad.l - 8, y + 4);
+        }
+
+        // X-axis labels (time)
+        this.ctx.textAlign = 'center';
+        const timeRange = max_time_ms - min_time_ms;
+        for (let i = 0; i <= 4; i++) {
+            const ms = min_time_ms + timeRange * (i / 4);
+            const x = pad.l + (w / 4) * i;
+            const label = ms < 60000 ? (ms/1000).toFixed(0) + 's' : (ms/60000).toFixed(1) + 'm';
+            this.ctx.fillText(label, x, this.h - pad.b + 16);
+        }
+
+        // Axis titles
+        this.ctx.fillStyle = '#52525b';
+        this.ctx.font = '10px sans-serif';
+        this.ctx.textAlign = 'center';
+        this.ctx.fillText('Time', pad.l + w / 2, this.h - 5);
+
+        this.ctx.save();
+        this.ctx.translate(12, pad.t + h / 2);
+        this.ctx.rotate(-Math.PI / 2);
+        this.ctx.fillText('File Offset', 0, 0);
+        this.ctx.restore();
     }
 
     heatColor(i) {
-        if (i === 0) return '#0a0a0f';
-        const r = Math.min(255, Math.floor(i * 400));
-        const g = Math.min(255, Math.floor(i * 150));
-        const b = Math.min(255, 100 + Math.floor(i * 155));
+        if (i === 0) return '#151520';  // Dark but visible for empty cells
+        if (i < 0.01) return '#1a1a2e'; // Very low activity
+        // Blue to purple to red gradient
+        const r = Math.min(255, Math.floor(50 + i * 205));
+        const g = Math.min(255, Math.floor(i * 80));
+        const b = Math.min(255, Math.floor(150 - i * 50));
         return `rgb(${r},${g},${b})`;
+    }
+
+    fmtAxisVal(n) {
+        if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+        if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
+        return n.toFixed(0);
     }
 }
 
 // Utilities
 const fmt = n => n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'K' : n.toFixed(0);
+const fmtBlock = n => n.toLocaleString();  // Full block numbers with commas
 const fmtDur = s => s < 60 ? s.toFixed(1)+'s' : s < 3600 ? (s/60).toFixed(1)+'m' : (s/3600).toFixed(1)+'h';
 const fmtLat = us => us >= 1000 ? (us/1000).toFixed(1)+'ms' : us.toFixed(0)+'μs';
 
@@ -833,17 +978,17 @@ function initOverview() {
     document.getElementById('fault-rate').textContent = fmt(s.fault_rate_per_sec);
     document.getElementById('major-ratio').textContent = (s.major_fault_ratio * 100).toFixed(1) + '%';
 
-    // Block range
+    // Block range - show full block numbers
     if (s.block_range) {
         document.getElementById('block-range-metric').style.display = 'block';
         document.getElementById('block-range').textContent =
-            fmt(s.block_range.min_block) + ' - ' + fmt(s.block_range.max_block);
+            fmtBlock(s.block_range.min_block) + ' → ' + fmtBlock(s.block_range.max_block);
     }
 
     // Timeline
     if (DATA.timeline.length) {
         new Chart(document.getElementById('timeline-chart'))
-            .drawLine(DATA.timeline.map(t => t.faults));
+            .drawLine(DATA.timeline.map(t => t.faults), '#6366f1', { xLabel: 'Time', yLabel: 'Faults' });
     }
 
     // Heatmap
@@ -853,7 +998,7 @@ function initOverview() {
 
     // Tables
     const tbody = document.querySelector('#tables-table tbody');
-    DATA.tables.slice(0, 15).forEach(t => {
+    DATA.tables.forEach(t => {
         const tr = document.createElement('tr');
         tr.innerHTML = `<td>${t.name}</td><td>${fmt(t.faults)}</td><td>${fmt(t.major_faults)}</td><td>${t.percentage.toFixed(1)}%</td>`;
         tbody.appendChild(tr);
@@ -872,9 +1017,24 @@ function initOverview() {
     document.getElementById('seq-ratio').textContent = seqPct.toFixed(1) + '%';
     document.getElementById('rand-ratio').textContent = randPct.toFixed(1) + '%';
 
+    // Stride patterns
+    const strideList = document.getElementById('stride-list');
+    if (DATA.patterns.top_strides && DATA.patterns.top_strides.length > 0) {
+        DATA.patterns.top_strides.slice(0, 5).forEach(stride => {
+            const div = document.createElement('div');
+            div.className = 'stride-item';
+            div.innerHTML = `
+                <span><span class="stride-type">${stride.pattern_type}</span> (${stride.stride_pages} pages)</span>
+                <span class="stride-count">${fmt(stride.count)} (${stride.percentage.toFixed(1)}%)</span>
+            `;
+            strideList.appendChild(div);
+        });
+    } else {
+        document.getElementById('stride-section').style.display = 'none';
+    }
+
     // Threads summary
     const threadsDiv = document.getElementById('threads-summary');
-    threadsDiv.innerHTML = '<div style="margin-bottom:8px;color:#a1a1aa;font-weight:600;">Top Threads</div>';
     DATA.threads.slice(0, 5).forEach(t => {
         const div = document.createElement('div');
         div.className = 'thread-item';
@@ -904,15 +1064,15 @@ function initCursors() {
     document.getElementById('cursor-seeks').textContent = fmt(s.seek_count);
     document.getElementById('cursor-navs').textContent = fmt(s.nav_count);
 
-    // Operations chart
-    const ops = c.operations.slice(0, 10);
+    // Operations chart - horizontal bars
+    const ops = c.operations.slice(0, 8);
     new Chart(document.getElementById('cursor-ops-chart'))
-        .drawBar(ops.map(o => o.name), ops.map(o => o.count));
+        .drawHorizontalBar(ops.map(o => o.name), ops.map(o => o.count));
 
-    // Tables chart
-    const tables = c.table_stats.slice(0, 10);
+    // Tables chart - horizontal bars
+    const tables = c.table_stats.slice(0, 8);
     new Chart(document.getElementById('cursor-tables-chart'))
-        .drawBar(tables.map(t => t.name), tables.map(t => t.ops), '#34d399');
+        .drawHorizontalBar(tables.map(t => t.name), tables.map(t => t.ops), '#34d399');
 
     // Table details
     const tbody = document.querySelector('#cursor-tables-table tbody');
@@ -927,15 +1087,15 @@ function initCursors() {
     c.slow_ops_by_table.forEach(t => {
         const topOps = t.by_operation.slice(0, 2).map(o => `${o.operation}: ${fmt(o.count)}`).join(', ');
         const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${t.table}</td><td>${fmt(t.slow_op_count)}</td><td>${fmt(t.total_op_count)}</td><td style="color:${t.slow_op_percentage > 20 ? '#f87171' : '#a1a1aa'}">${t.slow_op_percentage.toFixed(1)}%</td><td>${fmtLat(t.avg_slow_latency_us)}</td><td>${fmtLat(t.max_latency_us)}</td><td>${(t.total_slow_time_ms/1000).toFixed(1)}s</td><td style="font-size:10px;color:#71717a">${topOps}</td>`;
+        tr.innerHTML = `<td>${t.table}</td><td>${fmt(t.slow_op_count)}</td><td>${fmt(t.total_op_count)}</td><td style="color:${t.slow_op_percentage > 20 ? '#f87171' : '#a1a1aa'}">${t.slow_op_percentage.toFixed(1)}%</td><td>${fmtLat(t.avg_slow_latency_us)}</td><td>${fmtLat(t.max_latency_us)}</td><td>${(t.total_slow_time_ms/1000).toFixed(1)}s</td><td style="font-size:11px;color:#71717a">${topOps}</td>`;
         slowTbody.appendChild(tr);
     });
 
     // Slow keys
     const keysTbody = document.querySelector('#slow-keys-table tbody');
-    c.slow_keys.slice(0, 20).forEach(k => {
+    c.slow_keys.slice(0, 25).forEach(k => {
         const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${k.table}</td><td style="font-family:monospace;font-size:10px">${k.key_prefix}</td><td>${fmt(k.slow_access_count)}</td><td>${fmt(k.total_access_count)}</td><td>${fmtLat(k.avg_latency_us)}</td><td>${fmtLat(k.max_latency_us)}</td>`;
+        tr.innerHTML = `<td>${k.table}</td><td style="font-family:monospace;font-size:11px">${k.key_prefix}</td><td>${fmt(k.slow_access_count)}</td><td>${fmt(k.total_access_count)}</td><td>${fmtLat(k.avg_latency_us)}</td><td>${fmtLat(k.max_latency_us)}</td>`;
         keysTbody.appendChild(tr);
     });
 }
@@ -968,7 +1128,7 @@ function initTxns() {
     // Concurrency chart
     if (c.concurrency_timeline.length) {
         new Chart(document.getElementById('txn-concurrency-chart'))
-            .drawLine(c.concurrency_timeline.map(p => p.concurrent_ro));
+            .drawLine(c.concurrency_timeline.map(p => p.concurrent_ro), '#6366f1', { xLabel: 'Time', yLabel: 'Concurrent RO' });
     }
 
     // Latency
@@ -980,7 +1140,7 @@ function initTxns() {
 
     // Threads
     const tbody = document.querySelector('#txn-threads-table tbody');
-    t.thread_stats.slice(0, 15).forEach(th => {
+    t.thread_stats.slice(0, 20).forEach(th => {
         const tr = document.createElement('tr');
         tr.innerHTML = `<td>${th.tid}</td><td>${fmt(th.total_txns)}</td><td>${fmt(th.ro_txns)}</td><td>${fmt(th.rw_txns)}</td><td>${fmt(th.commits)}</td><td>${fmt(th.aborts)}</td>`;
         tbody.appendChild(tr);
