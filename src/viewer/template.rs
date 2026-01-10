@@ -13,6 +13,9 @@ pub fn generate_html(data: &ViewerData) -> String {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MDBX Trace</title>
+    <!-- uPlot for interactive charts -->
+    <link rel="stylesheet" href="https://unpkg.com/uplot@1.6.30/dist/uPlot.min.css">
+    <script src="https://unpkg.com/uplot@1.6.30/dist/uPlot.iife.min.js"></script>
     <style>
 {css}
     </style>
@@ -64,9 +67,8 @@ pub fn generate_html(data: &ViewerData) -> String {
                 <!-- Two column layout: Timeline + Heatmap -->
                 <div class="two-col">
                     <div class="card">
-                        <div class="card-header">Fault Timeline</div>
-                        <div class="card-body chart-container">
-                            <canvas id="timeline-chart"></canvas>
+                        <div class="card-header">Fault Timeline <span class="axis-hint">(drag to zoom, dbl-click to reset)</span></div>
+                        <div class="card-body uplot-container" id="timeline-chart">
                         </div>
                     </div>
                     <div class="card">
@@ -305,8 +307,7 @@ pub fn generate_html(data: &ViewerData) -> String {
                                         <span class="conc-value" id="txn-avg-ro"></span>
                                     </div>
                                 </div>
-                                <div class="chart-container">
-                                    <canvas id="txn-concurrency-chart"></canvas>
+                                <div class="uplot-container" id="txn-concurrency-chart">
                                 </div>
                             </div>
                         </div>
@@ -418,7 +419,7 @@ body {
 }
 
 .tab:hover { background: #1a1a24; color: #a1a1aa; }
-.tab.active { background: #6366f1; color: #fff; }
+.tab.active { background: #3b82f6; color: #fff; }
 
 .export-btn {
     margin-left: auto;
@@ -458,7 +459,7 @@ body {
     display: block;
     font-size: 20px;
     font-weight: 700;
-    color: #6366f1;
+    color: #3b82f6;
 }
 .metric-value.major { color: #f87171; }
 .metric-value.minor { color: #34d399; }
@@ -544,6 +545,65 @@ body {
     height: 100% !important;
 }
 
+/* uPlot styling */
+.uplot-container {
+    position: relative;
+    height: 220px;
+    width: 100%;
+}
+
+.uplot {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+}
+
+.u-legend {
+    display: none !important;
+}
+
+.u-select {
+    background: rgba(99, 102, 241, 0.15) !important;
+}
+
+.u-cursor-x, .u-cursor-y {
+    border-color: rgba(99, 102, 241, 0.5) !important;
+}
+
+.chart-tooltip {
+    position: absolute;
+    background: #1e1e2a;
+    border: 1px solid #3b82f6;
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 12px;
+    color: #e4e4e7;
+    pointer-events: none;
+    z-index: 100;
+    white-space: nowrap;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+.chart-tooltip-label {
+    color: #71717a;
+    font-size: 10px;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+}
+
+.chart-tooltip-value {
+    color: #60a5fa;
+    font-weight: 600;
+    font-size: 14px;
+}
+
+.chart-hint {
+    position: absolute;
+    bottom: 4px;
+    right: 8px;
+    font-size: 10px;
+    color: #52525b;
+    pointer-events: none;
+}
+
 /* Compact tables */
 .compact-table-container {
     overflow-x: auto;
@@ -575,7 +635,7 @@ body {
 .compact-table th {
     background: #0f0f17;
     font-weight: 600;
-    color: #6366f1;
+    color: #3b82f6;
     border-bottom: 2px solid #2a2a3a;
 }
 
@@ -616,8 +676,8 @@ body {
     transition: width 0.3s;
 }
 
-.bar.sequential { background: linear-gradient(90deg, #6366f1, #818cf8); }
-.bar.random { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+.bar.sequential { background: linear-gradient(90deg, #3b82f6, #60a5fa); }
+.bar.random { background: linear-gradient(90deg, #4f46e5, #818cf8); }
 
 .pattern-value {
     width: 55px;
@@ -631,7 +691,7 @@ body {
 .section-title {
     font-size: 11px;
     font-weight: 600;
-    color: #6366f1;
+    color: #3b82f6;
     text-transform: uppercase;
     letter-spacing: 0.5px;
     margin-bottom: 10px;
@@ -654,7 +714,7 @@ body {
 }
 
 .stride-item .stride-type {
-    color: #6366f1;
+    color: #60a5fa;
     font-weight: 500;
 }
 
@@ -701,7 +761,7 @@ body {
     display: block;
     font-size: 24px;
     font-weight: 700;
-    color: #6366f1;
+    color: #3b82f6;
 }
 
 .lat-value.major { color: #f87171; }
@@ -743,7 +803,100 @@ body {
 "##;
 
 const JAVASCRIPT: &str = r##"
-// Chart library with axis labels
+// uPlot interactive chart helper
+function createUPlotChart(container, data, opts = {}) {
+    const el = typeof container === 'string' ? document.getElementById(container) : container;
+    if (!el || !data.length) return null;
+
+    const rect = el.getBoundingClientRect();
+    const width = rect.width || 400;
+    const height = rect.height || 200;
+
+    // Build time series: timestamps and values
+    const durationSecs = opts.durationSecs || data.length;
+    const timestamps = data.map((_, i) => i * (durationSecs / data.length));
+
+    const uplotData = [timestamps, data];
+
+    const color = opts.color || '#3b82f6';
+
+    const uplotOpts = {
+        width,
+        height,
+        cursor: {
+            show: true,
+            x: true,
+            y: true,
+            drag: { x: true, y: false, setScale: true }
+        },
+        select: {
+            show: true,
+        },
+        scales: {
+            x: { time: false },
+            y: { auto: true }
+        },
+        axes: [
+            {
+                stroke: '#71717a',
+                grid: { stroke: '#1e1e2a', width: 1 },
+                ticks: { stroke: '#1e1e2a', width: 1 },
+                font: '11px sans-serif',
+                values: (u, vals) => vals.map(v => {
+                    if (v < 60) return v.toFixed(0) + 's';
+                    return (v / 60).toFixed(1) + 'm';
+                })
+            },
+            {
+                stroke: '#71717a',
+                grid: { stroke: '#1e1e2a', width: 1 },
+                ticks: { stroke: '#1e1e2a', width: 1 },
+                font: '11px sans-serif',
+                size: 55,
+                values: (u, vals) => vals.map(v => {
+                    if (v >= 1e6) return (v/1e6).toFixed(1) + 'M';
+                    if (v >= 1e3) return (v/1e3).toFixed(1) + 'K';
+                    return v.toFixed(0);
+                })
+            }
+        ],
+        series: [
+            {},
+            {
+                stroke: color,
+                width: 2,
+                fill: color + '30',
+                label: opts.label || 'Value',
+                points: { show: false }
+            }
+        ],
+        hooks: {
+            setSelect: [
+                u => {
+                    if (u.select.width > 0) {
+                        const min = u.posToVal(u.select.left, 'x');
+                        const max = u.posToVal(u.select.left + u.select.width, 'x');
+                        u.setScale('x', { min, max });
+                    }
+                    u.setSelect({ width: 0, height: 0 }, false);
+                }
+            ]
+        }
+    };
+
+    // Clear container and create chart
+    el.innerHTML = '';
+    const uplot = new uPlot(uplotOpts, uplotData, el);
+
+    // Double-click to reset zoom
+    el.addEventListener('dblclick', () => {
+        uplot.setScale('x', { min: timestamps[0], max: timestamps[timestamps.length - 1] });
+    });
+
+    return uplot;
+}
+
+// Canvas-based Chart class for bar charts, histograms, and heatmaps
 class Chart {
     constructor(canvas) {
         this.canvas = canvas;
@@ -762,87 +915,6 @@ class Chart {
     }
 
     clear() { this.ctx.clearRect(0, 0, this.w, this.h); }
-
-    drawLine(data, color = '#6366f1', opts = {}) {
-        if (!this.resize() || !data.length) return;
-        this.clear();
-
-        const pad = { t: 20, r: 20, b: 40, l: 55 };
-        const w = this.w - pad.l - pad.r;
-        const h = this.h - pad.t - pad.b;
-        const max = Math.max(...data) * 1.1 || 1;
-        const durationSecs = opts.durationSecs || 0;
-
-        // Y-axis labels
-        this.ctx.fillStyle = '#71717a';
-        this.ctx.font = '11px sans-serif';
-        this.ctx.textAlign = 'right';
-        for (let i = 0; i <= 4; i++) {
-            const val = max * (1 - i / 4);
-            const y = pad.t + (h / 4) * i;
-            this.ctx.fillText(this.fmtAxisVal(val), pad.l - 8, y + 4);
-
-            // Grid line
-            this.ctx.strokeStyle = '#1e1e2a';
-            this.ctx.lineWidth = 1;
-            this.ctx.beginPath();
-            this.ctx.moveTo(pad.l, y);
-            this.ctx.lineTo(this.w - pad.r, y);
-            this.ctx.stroke();
-        }
-
-        // X-axis time labels
-        this.ctx.fillStyle = '#71717a';
-        this.ctx.font = '10px sans-serif';
-        this.ctx.textAlign = 'center';
-        for (let i = 0; i <= 4; i++) {
-            const x = pad.l + (w / 4) * i;
-            let label;
-            if (durationSecs > 0) {
-                const secs = durationSecs * (i / 4);
-                label = secs < 60 ? secs.toFixed(0) + 's' : (secs / 60).toFixed(1) + 'm';
-            } else {
-                label = (i * 25) + '%';
-            }
-            this.ctx.fillText(label, x, this.h - pad.b + 16);
-        }
-
-        // Y-axis label
-        if (opts.yLabel) {
-            this.ctx.save();
-            this.ctx.fillStyle = '#52525b';
-            this.ctx.font = '10px sans-serif';
-            this.ctx.translate(12, pad.t + h / 2);
-            this.ctx.rotate(-Math.PI / 2);
-            this.ctx.textAlign = 'center';
-            this.ctx.fillText(opts.yLabel, 0, 0);
-            this.ctx.restore();
-        }
-
-        // Area fill
-        this.ctx.beginPath();
-        this.ctx.moveTo(pad.l, pad.t + h);
-        data.forEach((v, i) => {
-            const x = pad.l + (i / (data.length - 1)) * w;
-            const y = pad.t + ((max - v) / max) * h;
-            this.ctx.lineTo(x, y);
-        });
-        this.ctx.lineTo(pad.l + w, pad.t + h);
-        this.ctx.closePath();
-        this.ctx.fillStyle = color + '25';
-        this.ctx.fill();
-
-        // Line
-        this.ctx.beginPath();
-        data.forEach((v, i) => {
-            const x = pad.l + (i / (data.length - 1)) * w;
-            const y = pad.t + ((max - v) / max) * h;
-            i === 0 ? this.ctx.moveTo(x, y) : this.ctx.lineTo(x, y);
-        });
-        this.ctx.strokeStyle = color;
-        this.ctx.lineWidth = 2;
-        this.ctx.stroke();
-    }
 
     drawHorizontalBar(labels, values, color = '#6366f1') {
         if (!this.resize() || !values.length) return;
@@ -993,13 +1065,27 @@ class Chart {
     }
 
     heatColor(i) {
-        if (i === 0) return '#151520';  // Dark but visible for empty cells
-        if (i < 0.01) return '#1a1a2e'; // Very low activity
-        // Blue to purple to red gradient
-        const r = Math.min(255, Math.floor(50 + i * 205));
-        const g = Math.min(255, Math.floor(i * 80));
-        const b = Math.min(255, Math.floor(150 - i * 50));
-        return `rgb(${r},${g},${b})`;
+        if (i === 0) return '#0a0a12';  // Dark background for empty cells
+        if (i < 0.01) return '#0f172a'; // Very low activity - dark blue-gray
+        // Blue gradient: dark blue -> light blue -> cyan (matching blob-exex scheme)
+        // #1e3a5f (dark) -> #3b82f6 (blue) -> #60a5fa (light blue) -> #22d3ee (cyan for hot)
+        if (i < 0.25) {
+            // Dark blue to blue
+            const t = i / 0.25;
+            return `rgb(${Math.floor(30 + t * 29)}, ${Math.floor(58 + t * 72)}, ${Math.floor(95 + t * 151)})`;
+        } else if (i < 0.5) {
+            // Blue to light blue
+            const t = (i - 0.25) / 0.25;
+            return `rgb(${Math.floor(59 + t * 37)}, ${Math.floor(130 + t * 35)}, ${Math.floor(246 - t * 10)})`;
+        } else if (i < 0.75) {
+            // Light blue to cyan
+            const t = (i - 0.5) / 0.25;
+            return `rgb(${Math.floor(96 - t * 62)}, ${Math.floor(165 + t * 46)}, ${Math.floor(236 + t * 2)})`;
+        } else {
+            // Cyan to bright cyan/white for hotspots
+            const t = (i - 0.75) / 0.25;
+            return `rgb(${Math.floor(34 + t * 100)}, ${Math.floor(211 + t * 44)}, ${Math.floor(238 + t * 17)})`;
+        }
     }
 
     fmtAxisVal(n) {
@@ -1067,10 +1153,13 @@ function initOverview() {
             fmtBlock(s.block_range.min_block) + ' → ' + fmtBlock(s.block_range.max_block);
     }
 
-    // Timeline
+    // Timeline (uPlot interactive)
     if (DATA.timeline.length) {
-        new Chart(document.getElementById('timeline-chart'))
-            .drawLine(DATA.timeline.map(t => t.faults), '#6366f1', { durationSecs: s.duration_secs, yLabel: 'Faults' });
+        createUPlotChart('timeline-chart', DATA.timeline.map(t => t.faults), {
+            durationSecs: s.duration_secs,
+            color: '#3b82f6',
+            label: 'Faults'
+        });
     }
 
     // Heatmap
@@ -1146,15 +1235,15 @@ function initCursors() {
     document.getElementById('cursor-seeks').textContent = fmt(s.seek_count);
     document.getElementById('cursor-navs').textContent = fmt(s.nav_count);
 
-    // Operations chart - horizontal bars
+    // Operations chart - horizontal bars (blue scheme)
     const ops = c.operations.slice(0, 8);
     new Chart(document.getElementById('cursor-ops-chart'))
-        .drawHorizontalBar(ops.map(o => o.name), ops.map(o => o.count));
+        .drawHorizontalBar(ops.map(o => o.name), ops.map(o => o.count), '#3b82f6');
 
-    // Tables chart - horizontal bars
+    // Tables chart - horizontal bars (light blue)
     const tables = c.table_stats.slice(0, 8);
     new Chart(document.getElementById('cursor-tables-chart'))
-        .drawHorizontalBar(tables.map(t => t.name), tables.map(t => t.ops), '#34d399');
+        .drawHorizontalBar(tables.map(t => t.name), tables.map(t => t.ops), '#60a5fa');
 
     // Table details
     const tbody = document.querySelector('#cursor-tables-table tbody');
@@ -1207,10 +1296,13 @@ function initTxns() {
     document.getElementById('txn-max-rw').textContent = c.max_concurrent_rw;
     document.getElementById('txn-avg-ro').textContent = c.avg_concurrent_ro.toFixed(1);
 
-    // Concurrency chart
+    // Concurrency chart (uPlot interactive)
     if (c.concurrency_timeline.length) {
-        new Chart(document.getElementById('txn-concurrency-chart'))
-            .drawLine(c.concurrency_timeline.map(p => p.concurrent_ro), '#6366f1', { durationSecs: s.duration_secs, yLabel: 'Concurrent RO' });
+        createUPlotChart('txn-concurrency-chart', c.concurrency_timeline.map(p => p.concurrent_ro), {
+            durationSecs: s.duration_secs,
+            color: '#60a5fa',
+            label: 'Concurrent RO'
+        });
     }
 
     // Latency
@@ -1220,10 +1312,10 @@ function initTxns() {
     document.getElementById('txn-p99-latency').textContent = fmtLat(s.p99_commit_latency_us);
     document.getElementById('txn-max-latency').textContent = fmtLat(s.max_commit_latency_us);
 
-    // Latency histogram
+    // Latency histogram (blue scheme)
     if (t.commit_latencies_ms && t.commit_latencies_ms.length > 0) {
         new Chart(document.getElementById('txn-latency-chart'))
-            .drawHistogram(t.commit_latencies_ms, 15, '#22c55e');
+            .drawHistogram(t.commit_latencies_ms, 15, '#3b82f6');
     }
 
     // Threads
