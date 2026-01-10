@@ -794,6 +794,9 @@ body {
 "##;
 
 const JAVASCRIPT: &str = r##"
+// Track all uPlot instances for resize handling
+const uplotInstances = [];
+
 // uPlot interactive chart helper
 function createUPlotChart(container, data, opts = {}) {
     const el = typeof container === 'string' ? document.getElementById(container) : container;
@@ -883,6 +886,9 @@ function createUPlotChart(container, data, opts = {}) {
     el.addEventListener('dblclick', () => {
         uplot.setScale('x', { min: timestamps[0], max: timestamps[timestamps.length - 1] });
     });
+
+    // Track for resize
+    uplotInstances.push({ uplot, el, height });
 
     return uplot;
 }
@@ -996,8 +1002,25 @@ function createCommitTimelineChart(container, commitData, opts = {}) {
         uplot.setScale('x', { min: timestamps[0], max: timestamps[timestamps.length - 1] });
     });
 
+    // Track for resize
+    uplotInstances.push({ uplot, el, height });
+
     return uplot;
 }
+
+// Resize handler for all uPlot charts
+let resizeTimeout;
+window.addEventListener('resize', () => {
+    clearTimeout(resizeTimeout);
+    resizeTimeout = setTimeout(() => {
+        uplotInstances.forEach(({ uplot, el, height }) => {
+            const rect = el.getBoundingClientRect();
+            if (rect.width > 0) {
+                uplot.setSize({ width: rect.width, height: height });
+            }
+        });
+    }, 100);
+});
 
 // Canvas-based Chart class for bar charts, histograms, and heatmaps
 class Chart {
@@ -1142,6 +1165,15 @@ document.querySelectorAll('.tab').forEach(tab => {
         tab.classList.add('active');
         document.getElementById(tab.dataset.tab).classList.add('active');
         initTab(tab.dataset.tab);
+        // Resize charts after tab switch (container may have been hidden)
+        setTimeout(() => {
+            uplotInstances.forEach(({ uplot, el, height }) => {
+                const rect = el.getBoundingClientRect();
+                if (rect.width > 0) {
+                    uplot.setSize({ width: rect.width, height: height });
+                }
+            });
+        }, 50);
     });
 });
 
@@ -1422,4 +1454,14 @@ function initTxns() {
 
 // Init overview on load
 initTab('overview');
+
+// Resize charts after initial render (ensure proper sizing)
+setTimeout(() => {
+    uplotInstances.forEach(({ uplot, el, height }) => {
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 0) {
+            uplot.setSize({ width: rect.width, height: height });
+        }
+    });
+}, 100);
 "##;
