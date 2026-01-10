@@ -80,6 +80,8 @@ pub enum EventType {
     TxnBegin = 7,
     TxnCommit = 8,
     TxnAbort = 9,
+    DirectPut = 10,
+    DirectDel = 11,
 }
 
 /// Write flags for cursor put operations (from libmdbx)
@@ -155,11 +157,7 @@ impl TxnFlags {
     }
 
     pub fn name(&self) -> &'static str {
-        if self.is_read_only() {
-            "RO"
-        } else {
-            "RW"
-        }
+        if self.is_read_only() { "RO" } else { "RW" }
     }
 }
 
@@ -532,6 +530,29 @@ impl CursorEvent {
     /// Returns true if this is a direct get (mdbx_get) rather than a cursor operation
     pub fn is_direct_get(&self) -> bool {
         self.event_type == 5
+    }
+
+    /// Returns true if this is a direct put (mdbx_put) rather than a cursor operation
+    pub fn is_direct_put(&self) -> bool {
+        self.event_type == 10
+    }
+
+    /// Returns true if this is a direct del (mdbx_del) rather than a cursor operation
+    pub fn is_direct_del(&self) -> bool {
+        self.event_type == 11
+    }
+
+    /// Returns true if this is any direct operation (not cursor-based)
+    pub fn is_direct_op(&self) -> bool {
+        self.event_type == 5 || self.event_type == 10 || self.event_type == 11
+    }
+
+    /// Returns true if this is a write operation (put or del)
+    pub fn is_write_op(&self) -> bool {
+        self.event_type == 4
+            || self.event_type == 6
+            || self.event_type == 10
+            || self.event_type == 11
     }
 
     /// Get the latency in microseconds

@@ -29,6 +29,8 @@
 #define EVENT_TXN_BEGIN      7
 #define EVENT_TXN_COMMIT     8
 #define EVENT_TXN_ABORT      9
+#define EVENT_DIRECT_PUT    10
+#define EVENT_DIRECT_DEL    11
 
 // MDBX cursor operations (from libmdbx mdbx.h MDBX_cursor_op enum)
 // These are the numeric values for the cursor operations
@@ -312,6 +314,44 @@ struct {
     __type(value, __u32);  // txn_flags
 } active_txn_flags SEC(".maps");
 
+// Context for direct put operations (mdbx_put without cursor)
+struct direct_put_context {
+    __u64 timestamp_ns;
+    __u32 pid;
+    __u32 tid;
+    __u32 dbi;
+    __u32 key_size;
+    __u32 value_size;
+    __u32 write_flags;
+    __u8  key_data[MAX_KEY_SIZE];
+};
+
+// Per-task context for mdbx_put
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 10240);
+    __type(key, __u64);
+    __type(value, struct direct_put_context);
+} pending_direct_puts SEC(".maps");
+
+// Context for direct delete operations (mdbx_del without cursor)
+struct direct_del_context {
+    __u64 timestamp_ns;
+    __u32 pid;
+    __u32 tid;
+    __u32 dbi;
+    __u32 key_size;
+    __u8  key_data[MAX_KEY_SIZE];
+};
+
+// Per-task context for mdbx_del
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 10240);
+    __type(key, __u64);
+    __type(value, struct direct_del_context);
+} pending_direct_dels SEC(".maps");
+
 #define STAT_TOTAL_FAULTS     0
 #define STAT_MDBX_FAULTS      1
 #define STAT_MAJOR_FAULTS     2
@@ -326,6 +366,8 @@ struct {
 #define STAT_TXN_BEGINS      11
 #define STAT_TXN_COMMITS     12
 #define STAT_TXN_ABORTS      13
+#define STAT_DIRECT_PUTS     14
+#define STAT_DIRECT_DELS     15
 
 static __always_inline void inc_stat(__u32 idx) {
     __u64 *val = bpf_map_lookup_elem(&stats, &idx);
@@ -1314,6 +1356,192 @@ int BPF_UPROBE(trace_txn_abort, void *txn)
         bpf_map_delete_elem(&active_txn_flags, &txn_ptr);
     }
 
+    return 0;
+}
+
+// ============================================================================
+// MDBX Direct Put Tracing (uprobes)
+// ============================================================================
+//
+// Signature: int mdbx_put(MDBX_txn *txn, MDBX_dbi dbi,
+//                         const MDBX_val *key, MDBX_val *data,
+//                         MDBX_put_flags_t flags)
+
+SEC("uprobe/mdbx_put")
+int BPF_UPROBE(trace_direct_put, void *txn, __u32 dbi,
+               struct mdbx_val *key, struct mdbx_val *data, __u32 flags)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 pid = pid_tgid >> 32;
+
+    if (!should_trace_pid(pid)) {
+        return 0;
+    }
+
+    inc_stat(STAT_DIRECT_PUTS);
+
+    struct direct_put_context pctx = {
+        .timestamp_ns = bpf_ktime_get_ns(),
+        .pid = pid,
+        .tid = (__u32)pid_tgid,
+        .dbi = dbi,
+        .key_size = 0,
+        .value_size = 0,
+        .write_flags = flags,
+    };
+
+    if (key) {
+        struct mdbx_val key_val = {};
+        if (bpf_probe_read_user(&key_val, sizeof(key_val), key) == 0) {
+            pctx.key_size = key_val.iov_len;
+            if (pctx.key_size > MAX_KEY_SIZE) pctx.key_size = MAX_KEY_SIZE;
+            if (key_val.iov_base && pctx.key_size > 0) {
+                bpf_probe_read_user(pctx.key_data, pctx.key_size, key_val.iov_base);
+            }
+        }
+    }
+
+    if (data) {
+        struct mdbx_val data_val = {};
+        if (bpf_probe_read_user(&data_val, sizeof(data_val), data) == 0) {
+            pctx.value_size = data_val.iov_len;
+        }
+    }
+
+    bpf_map_update_elem(&pending_direct_puts, &pid_tgid, &pctx, BPF_ANY);
+    return 0;
+}
+
+SEC("uretprobe/mdbx_put")
+int BPF_URETPROBE(trace_direct_put_ret, int ret)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+
+    struct direct_put_context *pctx = bpf_map_lookup_elem(&pending_direct_puts, &pid_tgid);
+    if (!pctx) return 0;
+
+    if (ret != 0) {
+        inc_stat(STAT_CURSOR_ERRORS);
+    }
+
+    __u64 now = bpf_ktime_get_ns();
+    __u64 latency = now - pctx->timestamp_ns;
+
+    struct cursor_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (!e) {
+        inc_stat(STAT_EVENTS_DROPPED);
+        bpf_map_delete_elem(&pending_direct_puts, &pid_tgid);
+        return 0;
+    }
+
+    e->timestamp_ns = pctx->timestamp_ns;
+    e->pid = pctx->pid;
+    e->tid = pctx->tid;
+    e->event_type = EVENT_DIRECT_PUT;
+    e->cursor_op = 0;
+    e->dbi = pctx->dbi;
+    e->key_size = pctx->key_size;
+    e->return_code = ret;
+    e->value_size = pctx->value_size;
+    e->latency_ns = latency;
+    e->write_flags = pctx->write_flags;
+    e->_pad2 = 0;
+
+    #pragma unroll
+    for (int i = 0; i < MAX_KEY_SIZE; i++) {
+        e->key_data[i] = pctx->key_data[i];
+    }
+
+    bpf_ringbuf_submit(e, 0);
+    bpf_map_delete_elem(&pending_direct_puts, &pid_tgid);
+    return 0;
+}
+
+// ============================================================================
+// MDBX Direct Delete Tracing (uprobes)
+// ============================================================================
+//
+// Signature: int mdbx_del(MDBX_txn *txn, MDBX_dbi dbi,
+//                         const MDBX_val *key, const MDBX_val *data)
+
+SEC("uprobe/mdbx_del")
+int BPF_UPROBE(trace_direct_del, void *txn, __u32 dbi,
+               struct mdbx_val *key, struct mdbx_val *data)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 pid = pid_tgid >> 32;
+
+    if (!should_trace_pid(pid)) {
+        return 0;
+    }
+
+    inc_stat(STAT_DIRECT_DELS);
+
+    struct direct_del_context dctx = {
+        .timestamp_ns = bpf_ktime_get_ns(),
+        .pid = pid,
+        .tid = (__u32)pid_tgid,
+        .dbi = dbi,
+        .key_size = 0,
+    };
+
+    if (key) {
+        struct mdbx_val key_val = {};
+        if (bpf_probe_read_user(&key_val, sizeof(key_val), key) == 0) {
+            dctx.key_size = key_val.iov_len;
+            if (dctx.key_size > MAX_KEY_SIZE) dctx.key_size = MAX_KEY_SIZE;
+            if (key_val.iov_base && dctx.key_size > 0) {
+                bpf_probe_read_user(dctx.key_data, dctx.key_size, key_val.iov_base);
+            }
+        }
+    }
+
+    bpf_map_update_elem(&pending_direct_dels, &pid_tgid, &dctx, BPF_ANY);
+    return 0;
+}
+
+SEC("uretprobe/mdbx_del")
+int BPF_URETPROBE(trace_direct_del_ret, int ret)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+
+    struct direct_del_context *dctx = bpf_map_lookup_elem(&pending_direct_dels, &pid_tgid);
+    if (!dctx) return 0;
+
+    if (ret != 0) {
+        inc_stat(STAT_CURSOR_ERRORS);
+    }
+
+    __u64 now = bpf_ktime_get_ns();
+    __u64 latency = now - dctx->timestamp_ns;
+
+    struct cursor_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (!e) {
+        inc_stat(STAT_EVENTS_DROPPED);
+        bpf_map_delete_elem(&pending_direct_dels, &pid_tgid);
+        return 0;
+    }
+
+    e->timestamp_ns = dctx->timestamp_ns;
+    e->pid = dctx->pid;
+    e->tid = dctx->tid;
+    e->event_type = EVENT_DIRECT_DEL;
+    e->cursor_op = 0;
+    e->dbi = dctx->dbi;
+    e->key_size = dctx->key_size;
+    e->return_code = ret;
+    e->value_size = 0;
+    e->latency_ns = latency;
+    e->write_flags = 0;
+    e->_pad2 = 0;
+
+    #pragma unroll
+    for (int i = 0; i < MAX_KEY_SIZE; i++) {
+        e->key_data[i] = dctx->key_data[i];
+    }
+
+    bpf_ringbuf_submit(e, 0);
+    bpf_map_delete_elem(&pending_direct_dels, &pid_tgid);
     return 0;
 }
 

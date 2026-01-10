@@ -11,6 +11,24 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
 
+/// Compute p50, p95, p99 percentiles from a sorted slice of latencies in nanoseconds.
+/// Returns values converted to microseconds.
+fn compute_percentiles_us(sorted_latencies: &[u64]) -> (f64, f64, f64) {
+    if sorted_latencies.is_empty() {
+        return (0.0, 0.0, 0.0);
+    }
+    let len = sorted_latencies.len();
+    let p50_idx = (len as f64 * 0.5) as usize;
+    let p95_idx = ((len as f64 * 0.95) as usize).min(len - 1);
+    let p99_idx = ((len as f64 * 0.99) as usize).min(len - 1);
+
+    let p50 = sorted_latencies.get(p50_idx).copied().unwrap_or(0) as f64 / 1000.0;
+    let p95 = sorted_latencies.get(p95_idx).copied().unwrap_or(0) as f64 / 1000.0;
+    let p99 = sorted_latencies.get(p99_idx).copied().unwrap_or(0) as f64 / 1000.0;
+
+    (p50, p95, p99)
+}
+
 /// Result of correlating page faults with cursor operations
 #[derive(Debug, Default)]
 pub struct FaultCorrelation {
@@ -218,6 +236,7 @@ pub struct CursorSummary {
     pub op_rate_per_sec: f64,
     pub avg_latency_us: f64,
     pub p50_latency_us: f64,
+    pub p95_latency_us: f64,
     pub p99_latency_us: f64,
     pub seek_count: u64,
     pub seek_ratio: f64,
@@ -248,6 +267,9 @@ pub struct CursorTableStats {
     pub seeks: u64,
     pub navs: u64,
     pub avg_latency_us: f64,
+    pub p50_latency_us: f64,
+    pub p95_latency_us: f64,
+    pub p99_latency_us: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -296,6 +318,7 @@ pub struct TxnSummary {
     pub txn_rate_per_sec: f64,
     pub avg_commit_latency_us: f64,
     pub p50_commit_latency_us: f64,
+    pub p95_commit_latency_us: f64,
     pub p99_commit_latency_us: f64,
     pub max_commit_latency_us: f64,
 }
@@ -612,17 +635,9 @@ fn generate_cursor_data(events: &[CursorEvent]) -> CursorData {
     let mut latencies: Vec<u64> = events.iter().map(|e| e.latency_ns).collect();
     latencies.sort();
 
-    let p50_idx = (latencies.len() as f64 * 0.5) as usize;
-    let p99_idx = (latencies.len() as f64 * 0.99) as usize;
-
     let total_latency: u64 = latencies.iter().sum();
     let avg_latency_us = (total_latency as f64 / total as f64) / 1000.0;
-    let p50_latency_us = latencies.get(p50_idx).copied().unwrap_or(0) as f64 / 1000.0;
-    let p99_latency_us = latencies
-        .get(p99_idx.min(latencies.len() - 1))
-        .copied()
-        .unwrap_or(0) as f64
-        / 1000.0;
+    let (p50_latency_us, p95_latency_us, p99_latency_us) = compute_percentiles_us(&latencies);
 
     // Count by operation type
     let mut op_counts: HashMap<String, (u64, u64)> = HashMap::new(); // (count, total_latency)
@@ -632,23 +647,30 @@ fn generate_cursor_data(events: &[CursorEvent]) -> CursorData {
     let mut pre_trace_cursor_ops = 0u64;
     let mut direct_get_count = 0u64;
 
-    // Count by DBI/table - now includes direct_gets count
-    let mut dbi_stats: HashMap<u32, (u64, u64, u64, u64, u64)> = HashMap::new(); // (ops, seeks, navs, total_latency, direct_gets)
+    // Count by DBI/table - collect latencies for per-table percentiles
+    // Key: dbi, Value: (ops, seeks, navs, latencies_vec, direct_gets)
+    let mut dbi_stats: HashMap<u32, (u64, u64, u64, Vec<u64>, u64)> = HashMap::new();
 
     for event in events {
-        // Track pre-trace cursor operations (only for cursor ops, not direct gets)
-        if !event.is_direct_get() && is_pre_trace_cursor(event.dbi) {
+        // Track pre-trace cursor operations (only for cursor ops, not direct ops)
+        if !event.is_direct_op() && is_pre_trace_cursor(event.dbi) {
             pre_trace_cursor_ops += 1;
         }
 
-        // Handle direct gets specially
-        if event.is_direct_get() {
-            direct_get_count += 1;
-            let entry = op_counts.entry("DIRECT_GET".to_string()).or_insert((0, 0));
+        // Handle direct operations specially
+        if event.is_direct_op() {
+            let op_name = if event.is_direct_get() {
+                direct_get_count += 1;
+                seek_count += 1; // Direct gets count as seeks
+                "DIRECT_GET"
+            } else if event.is_direct_put() {
+                "DIRECT_PUT"
+            } else {
+                "DIRECT_DEL"
+            };
+            let entry = op_counts.entry(op_name.to_string()).or_insert((0, 0));
             entry.0 += 1;
             entry.1 += event.latency_ns;
-            // Direct gets count as seeks (point lookups)
-            seek_count += 1;
         } else {
             let op = event.cursor_op();
             let op_name = op.to_string();
@@ -669,12 +691,18 @@ fn generate_cursor_data(events: &[CursorEvent]) -> CursorData {
             error_count += 1;
         }
 
-        // DBI stats
-        let dbi_entry = dbi_stats.entry(event.dbi).or_insert((0, 0, 0, 0, 0));
+        // DBI stats - collect latencies for per-table percentiles
+        let dbi_entry = dbi_stats
+            .entry(event.dbi)
+            .or_insert((0, 0, 0, Vec::new(), 0));
         dbi_entry.0 += 1;
-        if event.is_direct_get() {
-            dbi_entry.4 += 1; // direct_gets
-            dbi_entry.1 += 1; // count as seek too
+        dbi_entry.3.push(event.latency_ns);
+        if event.is_direct_op() {
+            if event.is_direct_get() {
+                dbi_entry.4 += 1; // direct_gets
+                dbi_entry.1 += 1; // count as seek too
+            }
+            // Direct puts/dels don't affect seek/nav counts
         } else {
             let op = event.cursor_op();
             if op.is_seek() {
@@ -684,7 +712,6 @@ fn generate_cursor_data(events: &[CursorEvent]) -> CursorData {
                 dbi_entry.2 += 1;
             }
         }
-        dbi_entry.3 += event.latency_ns;
     }
 
     // Build operation stats
@@ -714,17 +741,18 @@ fn generate_cursor_data(events: &[CursorEvent]) -> CursorData {
     operations.sort_by(|a, b| b.count.cmp(&a.count));
 
     // Build table stats - group pre-trace cursors together
-    // Tuple: (ops, seeks, navs, total_latency, direct_gets)
-    let mut pre_trace_total: (u64, u64, u64, u64, u64) = (0, 0, 0, 0, 0);
-    let mut known_dbi_stats: HashMap<u32, (u64, u64, u64, u64, u64)> = HashMap::new();
+    // Tuple: (ops, seeks, navs, latencies, direct_gets)
+    let mut pre_trace_latencies: Vec<u64> = Vec::new();
+    let mut pre_trace_total: (u64, u64, u64, u64) = (0, 0, 0, 0); // (ops, seeks, navs, direct_gets)
+    let mut known_dbi_stats: HashMap<u32, (u64, u64, u64, Vec<u64>, u64)> = HashMap::new();
 
     for (dbi, stats) in dbi_stats {
         if is_pre_trace_cursor(dbi) {
             pre_trace_total.0 += stats.0;
             pre_trace_total.1 += stats.1;
             pre_trace_total.2 += stats.2;
-            pre_trace_total.3 += stats.3;
-            pre_trace_total.4 += stats.4;
+            pre_trace_latencies.extend(stats.3);
+            pre_trace_total.3 += stats.4;
         } else {
             known_dbi_stats.insert(dbi, stats);
         }
@@ -732,8 +760,11 @@ fn generate_cursor_data(events: &[CursorEvent]) -> CursorData {
 
     let mut table_stats: Vec<CursorTableStats> = known_dbi_stats
         .into_iter()
-        .map(
-            |(dbi, (ops, seeks, navs, total_lat, _direct_gets))| CursorTableStats {
+        .map(|(dbi, (ops, seeks, navs, mut latencies, _direct_gets))| {
+            latencies.sort();
+            let total_lat: u64 = latencies.iter().sum();
+            let (p50, p95, p99) = compute_percentiles_us(&latencies);
+            CursorTableStats {
                 dbi,
                 name: dbi_to_table_name(dbi).to_string(),
                 ops,
@@ -741,12 +772,18 @@ fn generate_cursor_data(events: &[CursorEvent]) -> CursorData {
                 seeks,
                 navs,
                 avg_latency_us: (total_lat as f64 / ops as f64) / 1000.0,
-            },
-        )
+                p50_latency_us: p50,
+                p95_latency_us: p95,
+                p99_latency_us: p99,
+            }
+        })
         .collect();
 
     // Add pre-trace cursors as a single group if any exist
     if pre_trace_total.0 > 0 {
+        pre_trace_latencies.sort();
+        let pre_trace_total_lat: u64 = pre_trace_latencies.iter().sum();
+        let (p50, p95, p99) = compute_percentiles_us(&pre_trace_latencies);
         table_stats.push(CursorTableStats {
             dbi: 0xFFFFFFFF,
             name: "Unknown (pre-trace cursors)".to_string(),
@@ -754,7 +791,10 @@ fn generate_cursor_data(events: &[CursorEvent]) -> CursorData {
             percentage: pre_trace_total.0 as f64 / total as f64 * 100.0,
             seeks: pre_trace_total.1,
             navs: pre_trace_total.2,
-            avg_latency_us: (pre_trace_total.3 as f64 / pre_trace_total.0 as f64) / 1000.0,
+            avg_latency_us: (pre_trace_total_lat as f64 / pre_trace_total.0 as f64) / 1000.0,
+            p50_latency_us: p50,
+            p95_latency_us: p95,
+            p99_latency_us: p99,
         });
     }
 
@@ -804,6 +844,10 @@ fn generate_cursor_data(events: &[CursorEvent]) -> CursorData {
             };
             let operation = if e.is_direct_get() {
                 "DIRECT_GET".to_string()
+            } else if e.is_direct_put() {
+                "DIRECT_PUT".to_string()
+            } else if e.is_direct_del() {
+                "DIRECT_DEL".to_string()
             } else {
                 e.cursor_op().to_string()
             };
@@ -836,6 +880,10 @@ fn generate_cursor_data(events: &[CursorEvent]) -> CursorData {
         let latency = event.latency_ns;
         let op_name = if event.is_direct_get() {
             "DIRECT_GET".to_string()
+        } else if event.is_direct_put() {
+            "DIRECT_PUT".to_string()
+        } else if event.is_direct_del() {
+            "DIRECT_DEL".to_string()
         } else {
             event.cursor_op().to_string()
         };
@@ -918,6 +966,10 @@ fn generate_cursor_data(events: &[CursorEvent]) -> CursorData {
         let latency = event.latency_ns;
         let op_name = if event.is_direct_get() {
             "DIRECT_GET".to_string()
+        } else if event.is_direct_put() {
+            "DIRECT_PUT".to_string()
+        } else if event.is_direct_del() {
+            "DIRECT_DEL".to_string()
         } else {
             event.cursor_op().to_string()
         };
@@ -1000,6 +1052,7 @@ fn generate_cursor_data(events: &[CursorEvent]) -> CursorData {
             },
             avg_latency_us,
             p50_latency_us,
+            p95_latency_us,
             p99_latency_us,
             seek_count,
             seek_ratio: seek_count as f64 / total as f64 * 100.0,
@@ -1197,16 +1250,8 @@ fn generate_txn_data(events: &[TxnEvent]) -> TxnData {
     } else {
         0.0
     };
-    let p50_commit_latency_us = if !commit_latencies.is_empty() {
-        commit_latencies[commit_latencies.len() / 2] as f64 / 1000.0
-    } else {
-        0.0
-    };
-    let p99_commit_latency_us = if !commit_latencies.is_empty() {
-        commit_latencies[(commit_latencies.len() * 99) / 100] as f64 / 1000.0
-    } else {
-        0.0
-    };
+    let (p50_commit_latency_us, p95_commit_latency_us, p99_commit_latency_us) =
+        compute_percentiles_us(&commit_latencies);
     let max_commit_latency_us = commit_latencies.last().copied().unwrap_or(0) as f64 / 1000.0;
 
     // Build thread stats
@@ -1320,6 +1365,7 @@ fn generate_txn_data(events: &[TxnEvent]) -> TxnData {
             },
             avg_commit_latency_us,
             p50_commit_latency_us,
+            p95_commit_latency_us,
             p99_commit_latency_us,
             max_commit_latency_us,
         },
@@ -1889,6 +1935,7 @@ pub struct CursorAnalysis {
     pub error_count: u64,
     pub latency_avg_us: f64,
     pub latency_p50_us: f64,
+    pub latency_p95_us: f64,
     pub latency_p99_us: f64,
     /// Ops by type (sorted by count)
     pub by_operation: Vec<OpBreakdown>,
@@ -1925,6 +1972,7 @@ pub struct TxnAnalysis {
     pub abort_count: u64,
     pub commit_latency_avg_us: f64,
     pub commit_latency_p50_us: f64,
+    pub commit_latency_p95_us: f64,
     pub commit_latency_p99_us: f64,
     pub commit_latency_max_us: f64,
     /// Thread breakdown (top threads by activity)
@@ -2097,6 +2145,7 @@ pub fn generate_compact_export(data: &ViewerData) -> CompactExport {
             error_count: data.cursor_data.summary.error_count,
             latency_avg_us: data.cursor_data.summary.avg_latency_us,
             latency_p50_us: data.cursor_data.summary.p50_latency_us,
+            latency_p95_us: data.cursor_data.summary.p95_latency_us,
             latency_p99_us: data.cursor_data.summary.p99_latency_us,
             by_operation,
             top_tables,
@@ -2134,6 +2183,7 @@ pub fn generate_compact_export(data: &ViewerData) -> CompactExport {
             abort_count: data.txn_data.summary.abort_count,
             commit_latency_avg_us: data.txn_data.summary.avg_commit_latency_us,
             commit_latency_p50_us: data.txn_data.summary.p50_commit_latency_us,
+            commit_latency_p95_us: data.txn_data.summary.p95_commit_latency_us,
             commit_latency_p99_us: data.txn_data.summary.p99_commit_latency_us,
             commit_latency_max_us: data.txn_data.summary.max_commit_latency_us,
             top_threads,

@@ -9,8 +9,8 @@ use libbpf_rs::{MapCore, MapFlags, ObjectBuilder, ProgramMut, RingBufferBuilder}
 use std::{
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -396,6 +396,10 @@ fn run_trace(
                     "mdbx_cursor_close"
                 } else if name.contains("direct_get") {
                     "mdbx_get"
+                } else if name.contains("direct_put") {
+                    "mdbx_put"
+                } else if name.contains("direct_del") {
+                    "mdbx_del"
                 } else if name.contains("txn_begin") {
                     "mdbx_txn_begin_ex"
                 } else if name.contains("txn_commit") {
@@ -522,9 +526,10 @@ fn run_trace(
                 .unwrap_or([0; 4]),
         );
 
-        // Check if this is a cursor event (event_type 3, 4, 5, or 6 at offset 16)
-        // 3 = CursorGet, 4 = CursorPut, 5 = DirectGet (mdbx_get), 6 = CursorDel
-        if (event_type == 3 || event_type == 4 || event_type == 5 || event_type == 6)
+        // Check if this is a cursor event (event_type 3-6, 10-11 at offset 16)
+        // 3 = CursorGet, 4 = CursorPut, 5 = DirectGet, 6 = CursorDel
+        // 10 = DirectPut, 11 = DirectDel
+        if ((event_type >= 3 && event_type <= 6) || event_type == 10 || event_type == 11)
             && data.len() >= CURSOR_EVENT_SIZE
         {
             let event: CursorEvent =
@@ -697,11 +702,14 @@ fn print_stats(stats_map: &libbpf_rs::Map) -> anyhow::Result<()> {
         "Cursor seeks",
         "Cursor nexts",
         "Cursor errors",
+        "Direct gets",
         "Cursor puts",
         "Cursor dels",
         "Txn begins",
         "Txn commits",
         "Txn aborts",
+        "Direct puts",
+        "Direct dels",
     ];
 
     info!("=== Statistics ===");
@@ -730,59 +738,6 @@ fn print_stats(stats_map: &libbpf_rs::Map) -> anyhow::Result<()> {
         }
     }
     Ok(())
-}
-
-fn print_cursor_stats(stats_map: &libbpf_rs::Map) -> anyhow::Result<()> {
-    let stat_names = [
-        ("Cursor ops", 4),
-        ("Cursor seeks", 5),
-        ("Cursor nexts", 6),
-        ("Cursor errors", 7),
-        ("Events dropped", 3),
-    ];
-
-    info!("=== Cursor Statistics ===");
-    for (name, idx) in stat_names.iter() {
-        let key = (*idx as u32).to_ne_bytes();
-        match stats_map.lookup_percpu(&key, MapFlags::ANY) {
-            Ok(Some(percpu_vals)) => {
-                let total: u64 = percpu_vals
-                    .iter()
-                    .map(|v| {
-                        if v.len() >= 8 {
-                            u64::from_ne_bytes(v[..8].try_into().unwrap_or([0; 8]))
-                        } else {
-                            0
-                        }
-                    })
-                    .sum();
-                info!("{}: {}", name, total);
-            }
-            Ok(None) => {
-                info!("{}: 0", name);
-            }
-            Err(e) => {
-                warn!("Failed to read stat {}: {}", name, e);
-            }
-        }
-    }
-    Ok(())
-}
-
-fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-
-    if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{} B", bytes)
-    }
 }
 
 fn analyze_trace(input: PathBuf, format: String) -> anyhow::Result<()> {
@@ -1140,15 +1095,14 @@ fn print_txn_summary(events: &[TxnEvent]) {
 
     // Calculate percentiles for commit latency
     commit_latencies.sort();
-    let p50_latency = if !commit_latencies.is_empty() {
-        commit_latencies[commit_latencies.len() / 2] as f64 / 1000.0
+    let (p50_latency, p95_latency, p99_latency) = if !commit_latencies.is_empty() {
+        let len = commit_latencies.len();
+        let p50 = commit_latencies[len / 2] as f64 / 1000.0;
+        let p95 = commit_latencies[(len * 95) / 100] as f64 / 1000.0;
+        let p99 = commit_latencies[(len * 99) / 100] as f64 / 1000.0;
+        (p50, p95, p99)
     } else {
-        0.0
-    };
-    let p99_latency = if !commit_latencies.is_empty() {
-        commit_latencies[(commit_latencies.len() * 99) / 100] as f64 / 1000.0
-    } else {
-        0.0
+        (0.0, 0.0, 0.0)
     };
 
     println!("\n=== Transaction Summary ===\n");
@@ -1191,6 +1145,7 @@ fn print_txn_summary(events: &[TxnEvent]) {
     println!("Commit latency:");
     println!("  Average:       {:.2} us", avg_commit_latency_us);
     println!("  p50:           {:.2} us", p50_latency);
+    println!("  p95:           {:.2} us", p95_latency);
     println!("  p99:           {:.2} us", p99_latency);
 
     // Thread distribution
