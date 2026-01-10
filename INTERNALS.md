@@ -455,6 +455,47 @@ pub fn correlate_faults_with_cursors(
 }
 ```
 
+#### block range extraction
+
+the viewer displays which ethereum blocks were processed during the trace. this is determined by looking at **write operations** to block-keyed tables:
+
+```rust
+/// tables where writes indicate block processing
+const BLOCK_WRITE_DBIS: &[u32] = &[
+    2,  // CanonicalHeaders - Key: BlockNumber (u64)
+    6,  // BlockBodyIndices - Key: BlockNumber (u64)
+    18, // AccountChangeSets - Key: BlockNumber (u64)
+    19, // StorageChangeSets - Key: BlockNumberAddress (block_number || address)
+];
+```
+
+**why writes only?** during block processing, reth reads historical data spanning thousands of blocks (for state lookups, history queries, etc.) but only writes to the current block being processed. using read operations would show the entire accessed range, not the blocks actually synced.
+
+block numbers are extracted from keys using reth's encoding:
+
+```rust
+fn extract_block_from_key(dbi: u32, key_data: &[u8], key_size: u32) -> Option<u64> {
+    if !BLOCK_WRITE_DBIS.contains(&dbi) {
+        return None;
+    }
+    // block number is big-endian u64 in first 8 bytes
+    let block = u64::from_be_bytes(key_data[0..8]);
+    
+    // sanity check: reject unreasonable values
+    if block > 50_000_000 {
+        return None;
+    }
+    Some(block)
+}
+```
+
+the viewer then shows:
+- **min block**: lowest block number written during trace
+- **max block**: highest block number written during trace  
+- **block count**: `max - min + 1` (approximate blocks processed)
+
+**dbi to table mapping**: the dbi numbers must match reth's table order (defined in `tables!` macro in `db-api/src/tables/mod.rs`). if reth reorders tables, the mapping needs updating.
+
 ## data flow
 
 ```

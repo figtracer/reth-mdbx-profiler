@@ -5,29 +5,27 @@
 
 mod template;
 
-use crate::event::{dbi_to_table_name, is_pre_trace_cursor, CursorEvent, PageFaultEvent, TxnEvent};
+use crate::event::{CursorEvent, PageFaultEvent, TxnEvent, dbi_to_table_name, is_pre_trace_cursor};
 use crate::mdbx_metadata::{PageAttribution, RethTable};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
 
-/// DBI numbers for tables that encode block numbers as the first 8 bytes of their keys.
-/// Based on reth's table definitions:
-/// - AccountChangeSets: Key = BlockNumber (u64 big-endian)
-/// - StorageChangeSets: Key = BlockNumberAddress (first 8 bytes = BlockNumber big-endian)
-///
-/// NOTE: History tables (AccountsHistory, StoragesHistory) use ShardedKey which does NOT
-/// have block number as the first bytes - they store address first.
-const BLOCK_PREFIXED_DBIS: &[u32] = &[
+/// DBI numbers for tables where WRITES indicate block processing.
+/// We use writes to these tables to determine which blocks were actually traced/synced.
+/// Based on reth's table definitions (verified against reth main branch 2025-01).
+const BLOCK_WRITE_DBIS: &[u32] = &[
+    2,  // CanonicalHeaders - Key: BlockNumber (u64) - definitive for canonicalized blocks
+    6,  // BlockBodyIndices - Key: BlockNumber (u64)
     18, // AccountChangeSets - Key: BlockNumber (u64)
     19, // StorageChangeSets - Key: BlockNumberAddress (block_number || address)
 ];
 
-/// Extract block number from a key if it's from a block-prefixed table.
+/// Extract block number from a key if it's from a block-write table.
 /// Returns None if the key is too short or the DBI doesn't match.
 fn extract_block_from_key(dbi: u32, key_data: &[u8], key_size: u32) -> Option<u64> {
-    // Check if this is a block-prefixed table
-    if !BLOCK_PREFIXED_DBIS.contains(&dbi) {
+    // Check if this is a block-write table
+    if !BLOCK_WRITE_DBIS.contains(&dbi) {
         return None;
     }
 
@@ -58,12 +56,19 @@ fn extract_block_from_key(dbi: u32, key_data: &[u8], key_size: u32) -> Option<u6
     Some(block)
 }
 
-/// Extract block range from cursor events by parsing keys from block-prefixed tables.
+/// Extract block range from cursor events by looking at WRITE operations to block-keyed tables.
+/// This gives us the range of blocks that were actually processed/synced during the trace,
+/// rather than the range of all historical blocks accessed (which would be much larger).
 fn extract_block_range(cursor_events: &[CursorEvent]) -> Option<BlockRange> {
     let mut min_block: Option<u64> = None;
     let mut max_block: Option<u64> = None;
 
     for event in cursor_events {
+        // Only consider write operations (cursor put, direct put)
+        if !event.is_write_op() {
+            continue;
+        }
+
         if let Some(block) = extract_block_from_key(event.dbi, &event.key_data, event.key_size) {
             min_block = Some(min_block.map_or(block, |m| m.min(block)));
             max_block = Some(max_block.map_or(block, |m| m.max(block)));
