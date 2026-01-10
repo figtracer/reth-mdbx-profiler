@@ -5,11 +5,83 @@
 
 mod template;
 
-use crate::event::{CursorEvent, PageFaultEvent, TxnEvent, dbi_to_table_name, is_pre_trace_cursor};
+use crate::event::{dbi_to_table_name, is_pre_trace_cursor, CursorEvent, PageFaultEvent, TxnEvent};
 use crate::mdbx_metadata::{PageAttribution, RethTable};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
+
+/// DBI numbers for tables that encode block numbers as the first 8 bytes of their keys.
+/// These are the ChangeSet and History tables in reth:
+/// - 16: AccountsHistory
+/// - 17: StoragesHistory
+/// - 18: AccountChangeSets
+/// - 19: StorageChangeSets
+/// - 24: AccountsTrieChangeSets
+/// - 25: StoragesTrieChangeSets
+const BLOCK_PREFIXED_DBIS: &[u32] = &[
+    18, // AccountChangeSets
+    19, // StorageChangeSets
+    24, // AccountsTrieChangeSets
+    25, // StoragesTrieChangeSets
+    16, // AccountsHistory
+    17, // StoragesHistory
+];
+
+/// Extract block number from a key if it's from a block-prefixed table.
+/// Returns None if the key is too short or the DBI doesn't match.
+fn extract_block_from_key(dbi: u32, key_data: &[u8], key_size: u32) -> Option<u64> {
+    // Check if this is a block-prefixed table
+    if !BLOCK_PREFIXED_DBIS.contains(&dbi) {
+        return None;
+    }
+
+    // Need at least 8 bytes for block number
+    if key_size < 8 || key_data.len() < 8 {
+        return None;
+    }
+
+    // Block number is stored as big-endian u64 in first 8 bytes
+    let block = u64::from_be_bytes([
+        key_data[0],
+        key_data[1],
+        key_data[2],
+        key_data[3],
+        key_data[4],
+        key_data[5],
+        key_data[6],
+        key_data[7],
+    ]);
+
+    // Sanity check: block numbers should be reasonable (< 100 million for now)
+    if block > 100_000_000 {
+        return None;
+    }
+
+    Some(block)
+}
+
+/// Extract block range from cursor events by parsing keys from block-prefixed tables.
+fn extract_block_range(cursor_events: &[CursorEvent]) -> Option<BlockRange> {
+    let mut min_block: Option<u64> = None;
+    let mut max_block: Option<u64> = None;
+
+    for event in cursor_events {
+        if let Some(block) = extract_block_from_key(event.dbi, &event.key_data, event.key_size) {
+            min_block = Some(min_block.map_or(block, |m| m.min(block)));
+            max_block = Some(max_block.map_or(block, |m| m.max(block)));
+        }
+    }
+
+    match (min_block, max_block) {
+        (Some(min), Some(max)) => Some(BlockRange {
+            min_block: min,
+            max_block: max,
+            block_count: max.saturating_sub(min) + 1,
+        }),
+        _ => None,
+    }
+}
 
 /// Compute p50, p95, p99 percentiles from a sorted slice of latencies in nanoseconds.
 /// Returns values converted to microseconds.
@@ -393,6 +465,16 @@ pub struct TraceSummary {
     pub file_size_gb: f64,
     pub min_offset: u64,
     pub max_offset: u64,
+    /// Block range extracted from cursor operation keys (if available)
+    pub block_range: Option<BlockRange>,
+}
+
+/// Block range information extracted from trace
+#[derive(Debug, Serialize, Clone)]
+pub struct BlockRange {
+    pub min_block: u64,
+    pub max_block: u64,
+    pub block_count: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -472,6 +554,9 @@ pub fn generate_viewer_data(
 ) -> ViewerData {
     let page_faults: Vec<_> = events.iter().filter(|e| e.event_type == 1).collect();
 
+    // Extract block range from cursor events
+    let block_range = extract_block_range(cursor_events);
+
     // Generate cursor data
     let cursor_data = generate_cursor_data(cursor_events);
 
@@ -507,6 +592,7 @@ pub fn generate_viewer_data(
                 file_size_gb: 0.0,
                 min_offset: 0,
                 max_offset: 0,
+                block_range: block_range.clone(),
             },
             timeline: vec![],
             tables: vec![],
@@ -576,6 +662,7 @@ pub fn generate_viewer_data(
         file_size_gb: max_offset as f64 / 1e9,
         min_offset,
         max_offset,
+        block_range,
     };
 
     // Generate timeline (bucket by 100ms intervals, sample if too many)
@@ -1891,6 +1978,8 @@ pub struct TraceSummaryCompact {
     pub total_events: u64,
     pub file_size_gb: f64,
     pub file_offset_range_gb: (f64, f64),
+    /// Block range extracted from cursor operation keys (if available)
+    pub block_range: Option<BlockRange>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2224,6 +2313,7 @@ pub fn generate_compact_export(data: &ViewerData) -> CompactExport {
                 data.summary.min_offset as f64 / 1e9,
                 data.summary.max_offset as f64 / 1e9,
             ),
+            block_range: data.summary.block_range.clone(),
         },
         page_faults: PageFaultAnalysis {
             total: data.summary.page_faults,

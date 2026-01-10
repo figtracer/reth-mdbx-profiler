@@ -12,7 +12,7 @@ pub fn generate_html(data: &ViewerData) -> String {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MDBX Page Fault Trace Viewer</title>
+    <title>MDBX Trace</title>
     <style>
 {css}
     </style>
@@ -20,383 +20,334 @@ pub fn generate_html(data: &ViewerData) -> String {
 <body>
     <div id="app">
         <nav class="tabs">
-            <button class="tab active" data-tab="summary">Summary</button>
-            <button class="tab" data-tab="timeline">Timeline</button>
-            <button class="tab" data-tab="heatmap">Heatmap</button>
-            <button class="tab" data-tab="tables">Tables</button>
-            <button class="tab" data-tab="threads">Threads</button>
-            <button class="tab" data-tab="patterns">Patterns</button>
+            <button class="tab active" data-tab="overview">Overview</button>
             <button class="tab" data-tab="cursors">Cursor Ops</button>
-            <button class="tab" data-tab="transactions">Transactions</button>
-            <button class="export-btn" id="export-compact-btn" title="Download compact JSON for LLM analysis">Export JSON</button>
+            <button class="tab" data-tab="transactions">MDBX Txns</button>
+            <button class="export-btn" id="export-compact-btn" title="Download JSON for analysis">Export</button>
         </nav>
 
         <main>
-            <section id="summary" class="panel active">
-                <div class="summary-grid">
-                    <div class="stat-card">
-                        <div class="stat-label">Duration</div>
-                        <div class="stat-value" id="duration"></div>
+            <!-- OVERVIEW TAB -->
+            <section id="overview" class="panel active">
+                <!-- Top metrics row -->
+                <div class="metrics-row">
+                    <div class="metric">
+                        <span class="metric-value" id="duration"></span>
+                        <span class="metric-label">Duration</span>
                     </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Total Page Faults</div>
-                        <div class="stat-value" id="total-faults"></div>
+                    <div class="metric" id="block-range-metric" style="display:none;">
+                        <span class="metric-value" id="block-range"></span>
+                        <span class="metric-label">Blocks</span>
                     </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Major Faults (Disk I/O)</div>
-                        <div class="stat-value major" id="major-faults"></div>
+                    <div class="metric">
+                        <span class="metric-value" id="total-faults"></span>
+                        <span class="metric-label">Page Faults</span>
                     </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Minor Faults (Cache)</div>
-                        <div class="stat-value minor" id="minor-faults"></div>
+                    <div class="metric">
+                        <span class="metric-value major" id="major-faults"></span>
+                        <span class="metric-label">Major (Disk)</span>
                     </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Fault Rate</div>
-                        <div class="stat-value" id="fault-rate"></div>
+                    <div class="metric">
+                        <span class="metric-value minor" id="minor-faults"></span>
+                        <span class="metric-label">Minor (Cache)</span>
                     </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Unique Pages</div>
-                        <div class="stat-value" id="unique-pages"></div>
+                    <div class="metric">
+                        <span class="metric-value" id="fault-rate"></span>
+                        <span class="metric-label">Faults/sec</span>
                     </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Major Fault Ratio</div>
-                        <div class="stat-value" id="major-ratio"></div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">File Range</div>
-                        <div class="stat-value" id="file-range"></div>
+                    <div class="metric">
+                        <span class="metric-value" id="major-ratio"></span>
+                        <span class="metric-label">Major Ratio</span>
                     </div>
                 </div>
 
-                <div class="summary-charts">
-                    <div class="chart-container">
-                        <h3>Fault Type Distribution</h3>
-                        <canvas id="fault-type-chart"></canvas>
+                <!-- Two column layout: Timeline + Heatmap -->
+                <div class="two-col">
+                    <div class="card">
+                        <div class="card-header">Fault Timeline</div>
+                        <div class="card-body">
+                            <canvas id="timeline-chart"></canvas>
+                        </div>
                     </div>
-                    <div class="chart-container">
-                        <h3>Access Pattern</h3>
-                        <canvas id="access-pattern-chart"></canvas>
+                    <div class="card">
+                        <div class="card-header">Access Heatmap</div>
+                        <div class="card-body">
+                            <canvas id="heatmap-canvas"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tables and Threads side by side -->
+                <div class="two-col">
+                    <div class="card">
+                        <div class="card-header">
+                            Page Faults by Table
+                            <span class="card-badge" id="correlation-badge"></span>
+                        </div>
+                        <div class="card-body compact-table-container">
+                            <table class="compact-table" id="tables-table">
+                                <thead>
+                                    <tr>
+                                        <th>Table</th>
+                                        <th>Faults</th>
+                                        <th>Major</th>
+                                        <th>%</th>
+                                    </tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-header">Access Patterns</div>
+                        <div class="card-body">
+                            <div class="pattern-bars">
+                                <div class="pattern-bar">
+                                    <span class="pattern-label">Sequential</span>
+                                    <div class="bar-container">
+                                        <div class="bar sequential" id="seq-bar"></div>
+                                    </div>
+                                    <span class="pattern-value" id="seq-ratio"></span>
+                                </div>
+                                <div class="pattern-bar">
+                                    <span class="pattern-label">Random</span>
+                                    <div class="bar-container">
+                                        <div class="bar random" id="rand-bar"></div>
+                                    </div>
+                                    <span class="pattern-value" id="rand-ratio"></span>
+                                </div>
+                            </div>
+                            <div class="threads-summary" id="threads-summary"></div>
+                        </div>
                     </div>
                 </div>
             </section>
 
-            <section id="timeline" class="panel">
-                <h2>Fault Timeline</h2>
-                <div class="chart-full">
-                    <canvas id="timeline-chart"></canvas>
-                </div>
-                <div class="timeline-controls">
-                    <label><input type="checkbox" id="show-major" checked> Show Major Faults</label>
-                    <label><input type="checkbox" id="show-unique" checked> Show Unique Pages</label>
-                </div>
-            </section>
-
-            <section id="heatmap" class="panel">
-                <h2>Access Heatmap (Time vs File Offset)</h2>
-                <div class="heatmap-container">
-                    <canvas id="heatmap-canvas"></canvas>
-                    <div class="heatmap-legend">
-                        <span class="legend-label">Low</span>
-                        <div class="legend-gradient"></div>
-                        <span class="legend-label">High</span>
-                    </div>
-                </div>
-                <div class="heatmap-info">
-                    <span id="heatmap-time-range"></span>
-                    <span id="heatmap-offset-range"></span>
-                </div>
-            </section>
-
-            <section id="tables" class="panel">
-                <h2>Table Breakdown</h2>
-                <div id="fault-attribution-warning" class="attribution-warning" style="display: none;"></div>
-                <div class="table-charts">
-                    <div class="chart-container">
-                        <canvas id="tables-pie-chart"></canvas>
-                    </div>
-                    <div class="chart-container">
-                        <canvas id="tables-bar-chart"></canvas>
-                    </div>
-                </div>
-                <table class="data-table" id="tables-table">
-                    <thead>
-                        <tr>
-                            <th>Table</th>
-                            <th>Category</th>
-                            <th>Faults</th>
-                            <th>Major</th>
-                            <th>%</th>
-                        </tr>
-                    </thead>
-                    <tbody></tbody>
-                </table>
-            </section>
-
-            <section id="threads" class="panel">
-                <h2>Thread Distribution</h2>
-                <div class="chart-container">
-                    <canvas id="threads-chart"></canvas>
-                </div>
-                <table class="data-table" id="threads-table">
-                    <thead>
-                        <tr>
-                            <th>Thread ID</th>
-                            <th>Faults</th>
-                            <th>%</th>
-                        </tr>
-                    </thead>
-                    <tbody></tbody>
-                </table>
-            </section>
-
-            <section id="patterns" class="panel">
-                <h2>Access Pattern Analysis</h2>
-                <div class="pattern-summary">
-                    <div class="stat-card">
-                        <div class="stat-label">Sequential Ratio</div>
-                        <div class="stat-value" id="seq-ratio"></div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Random Ratio</div>
-                        <div class="stat-value" id="rand-ratio"></div>
-                    </div>
-                </div>
-                <h3>Top Stride Patterns</h3>
-                <div class="stride-summary" id="stride-summary"></div>
-                <h3>Burst Analysis</h3>
-                <div class="burst-stats">
-                    <div class="stat-card">
-                        <div class="stat-label">Median Events/Bucket</div>
-                        <div class="stat-value" id="burst-median"></div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">P95 Events/Bucket</div>
-                        <div class="stat-value" id="burst-p95"></div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-label">Max Events/Bucket</div>
-                        <div class="stat-value" id="burst-max"></div>
-                    </div>
-                </div>
-            </section>
-
+            <!-- CURSOR OPS TAB -->
             <section id="cursors" class="panel">
-                <h2>MDBX Cursor Operations</h2>
-                <div id="cursor-no-data" style="display:none; text-align:center; padding:40px; color:#888;">
-                    No cursor operation data available. Run trace with --trace-cursors flag.
+                <div id="cursor-no-data" class="no-data">
+                    No cursor data. Run with <code>--trace-cursors</code>
                 </div>
                 <div id="cursor-content">
-                    <div class="summary-grid">
-                        <div class="stat-card">
-                            <div class="stat-label">Total Operations</div>
-                            <div class="stat-value" id="cursor-total-ops"></div>
+                    <!-- Cursor metrics -->
+                    <div class="metrics-row">
+                        <div class="metric">
+                            <span class="metric-value" id="cursor-total-ops"></span>
+                            <span class="metric-label">Total Ops</span>
                         </div>
-                        <div class="stat-card">
-                            <div class="stat-label">Op Rate</div>
-                            <div class="stat-value" id="cursor-op-rate"></div>
+                        <div class="metric">
+                            <span class="metric-value" id="cursor-op-rate"></span>
+                            <span class="metric-label">Ops/sec</span>
                         </div>
-                        <div class="stat-card">
-                            <div class="stat-label">Avg Latency</div>
-                            <div class="stat-value" id="cursor-avg-latency"></div>
+                        <div class="metric">
+                            <span class="metric-value" id="cursor-avg-latency"></span>
+                            <span class="metric-label">Avg Latency</span>
                         </div>
-                        <div class="stat-card">
-                            <div class="stat-label">P99 Latency</div>
-                            <div class="stat-value major" id="cursor-p99-latency"></div>
+                        <div class="metric">
+                            <span class="metric-value" id="cursor-p50-latency"></span>
+                            <span class="metric-label">p50</span>
                         </div>
-                        <div class="stat-card">
-                            <div class="stat-label">Seeks</div>
-                            <div class="stat-value" id="cursor-seeks"></div>
+                        <div class="metric">
+                            <span class="metric-value major" id="cursor-p95-latency"></span>
+                            <span class="metric-label">p95</span>
                         </div>
-                        <div class="stat-card">
-                            <div class="stat-label">Seek Ratio</div>
-                            <div class="stat-value" id="cursor-seek-ratio"></div>
+                        <div class="metric">
+                            <span class="metric-value major" id="cursor-p99-latency"></span>
+                            <span class="metric-label">p99</span>
                         </div>
-                        <div class="stat-card">
-                            <div class="stat-label">Navigation</div>
-                            <div class="stat-value minor" id="cursor-navs"></div>
+                        <div class="metric">
+                            <span class="metric-value" id="cursor-seeks"></span>
+                            <span class="metric-label">Seeks</span>
                         </div>
-                        <div class="stat-card">
-                            <div class="stat-label">Errors</div>
-                            <div class="stat-value" id="cursor-errors"></div>
-                        </div>
-                    </div>
-
-                    <div class="table-charts">
-                        <div class="chart-container">
-                            <h3>Operations by Type</h3>
-                            <canvas id="cursor-ops-chart"></canvas>
-                        </div>
-                        <div class="chart-container">
-                            <h3>Operations by Table</h3>
-                            <canvas id="cursor-tables-chart"></canvas>
+                        <div class="metric">
+                            <span class="metric-value minor" id="cursor-navs"></span>
+                            <span class="metric-label">Navigation</span>
                         </div>
                     </div>
 
-                    <h3>Cursor Timeline</h3>
-                    <div class="chart-full">
-                        <canvas id="cursor-timeline-chart"></canvas>
+                    <!-- Two columns: Ops by type + Ops by table -->
+                    <div class="two-col">
+                        <div class="card">
+                            <div class="card-header">Operations by Type</div>
+                            <div class="card-body">
+                                <canvas id="cursor-ops-chart"></canvas>
+                            </div>
+                        </div>
+                        <div class="card">
+                            <div class="card-header">Operations by Table</div>
+                            <div class="card-body">
+                                <canvas id="cursor-tables-chart"></canvas>
+                            </div>
+                        </div>
                     </div>
 
-                    <h3>Table Access Details</h3>
-                    <table class="data-table" id="cursor-tables-table">
-                        <thead>
-                            <tr>
-                                <th>Table</th>
-                                <th>DBI</th>
-                                <th>Operations</th>
-                                <th>Seeks</th>
-                                <th>Nav</th>
-                                <th>Avg Latency</th>
-                                <th>%</th>
-                            </tr>
-                        </thead>
-                        <tbody></tbody>
-                    </table>
-
-                    <h3>Slow Operations by Table (>100μs - Likely Page Faults)</h3>
-                    <div id="slow-ops-section">
-                        <table class="data-table" id="slow-ops-table">
-                            <thead>
-                                <tr>
-                                    <th>Table</th>
-                                    <th>Slow Ops</th>
-                                    <th>Total Ops</th>
-                                    <th>Slow %</th>
-                                    <th>Avg Slow Latency</th>
-                                    <th>Max Latency</th>
-                                    <th>Total Slow Time</th>
-                                    <th>Top Slow Operations</th>
-                                </tr>
-                            </thead>
-                            <tbody></tbody>
-                        </table>
+                    <!-- Table details -->
+                    <div class="card full-width">
+                        <div class="card-header">Table Access Details</div>
+                        <div class="card-body compact-table-container">
+                            <table class="compact-table" id="cursor-tables-table">
+                                <thead>
+                                    <tr>
+                                        <th>Table</th>
+                                        <th>Ops</th>
+                                        <th>Seeks</th>
+                                        <th>Nav</th>
+                                        <th>Avg</th>
+                                        <th>p50</th>
+                                        <th>p95</th>
+                                        <th>p99</th>
+                                    </tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
                     </div>
 
-                    <h3>Slow Keys (Frequently Slow Accesses)</h3>
-                    <div id="slow-keys-section">
-                        <table class="data-table" id="slow-keys-table">
-                            <thead>
-                                <tr>
-                                    <th>Table</th>
-                                    <th>Key</th>
-                                    <th>Slow Accesses</th>
-                                    <th>Total Accesses</th>
-                                    <th>Avg Latency</th>
-                                    <th>Max Latency</th>
-                                    <th>Operations</th>
-                                </tr>
-                            </thead>
-                            <tbody></tbody>
-                        </table>
+                    <!-- Slow operations - THE KEY INSIGHT -->
+                    <div class="card full-width highlight">
+                        <div class="card-header">Slow Operations (&gt;100μs) - Likely Page Faults</div>
+                        <div class="card-body compact-table-container">
+                            <table class="compact-table" id="slow-ops-table">
+                                <thead>
+                                    <tr>
+                                        <th>Table</th>
+                                        <th>Slow</th>
+                                        <th>Total</th>
+                                        <th>%</th>
+                                        <th>Avg Slow</th>
+                                        <th>Max</th>
+                                        <th>Time Lost</th>
+                                        <th>Top Operations</th>
+                                    </tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
                     </div>
 
-                    <h3>Operation Log (Sample)</h3>
-                    <div class="cursor-log-container" style="max-height:400px; overflow-y:auto; background:#0a0a0f; border-radius:8px; border:1px solid #252530;">
-                        <table class="data-table" id="cursor-log-table">
-                            <thead>
-                                <tr>
-                                    <th>Time (ms)</th>
-                                    <th>Table</th>
-                                    <th>Operation</th>
-                                    <th>Key</th>
-                                    <th>Latency</th>
-                                    <th>Status</th>
-                                </tr>
-                            </thead>
-                            <tbody></tbody>
-                        </table>
+                    <!-- Slow keys -->
+                    <div class="card full-width">
+                        <div class="card-header">Hot Keys (Frequently Slow)</div>
+                        <div class="card-body compact-table-container" style="max-height: 300px;">
+                            <table class="compact-table" id="slow-keys-table">
+                                <thead>
+                                    <tr>
+                                        <th>Table</th>
+                                        <th>Key</th>
+                                        <th>Slow</th>
+                                        <th>Total</th>
+                                        <th>Avg</th>
+                                        <th>Max</th>
+                                    </tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
                     </div>
                 </div>
             </section>
 
+            <!-- MDBX TRANSACTIONS TAB -->
             <section id="transactions" class="panel">
-                <h2>Transaction Lifecycle Analysis</h2>
-                <div id="txn-no-data" style="display:none; text-align:center; padding:40px; color:#888;">
-                    No transaction data available. Run trace with --trace-cursors flag.
+                <div id="txn-no-data" class="no-data">
+                    No transaction data. Run with <code>--trace-cursors</code>
                 </div>
                 <div id="txn-content">
-                    <div class="summary-grid">
-                        <div class="stat-card">
-                            <div class="stat-label">Total Transactions</div>
-                            <div class="stat-value" id="txn-total"></div>
+                    <div class="metrics-row">
+                        <div class="metric">
+                            <span class="metric-value" id="txn-total"></span>
+                            <span class="metric-label">Total Txns</span>
                         </div>
-                        <div class="stat-card">
-                            <div class="stat-label">Txn Rate</div>
-                            <div class="stat-value" id="txn-rate"></div>
+                        <div class="metric">
+                            <span class="metric-value" id="txn-rate"></span>
+                            <span class="metric-label">Txns/sec</span>
                         </div>
-                        <div class="stat-card">
-                            <div class="stat-label">Read-Only</div>
-                            <div class="stat-value minor" id="txn-ro"></div>
+                        <div class="metric">
+                            <span class="metric-value minor" id="txn-ro"></span>
+                            <span class="metric-label">Read-Only</span>
                         </div>
-                        <div class="stat-card">
-                            <div class="stat-label">Read-Write</div>
-                            <div class="stat-value major" id="txn-rw"></div>
+                        <div class="metric">
+                            <span class="metric-value major" id="txn-rw"></span>
+                            <span class="metric-label">Read-Write</span>
                         </div>
-                        <div class="stat-card">
-                            <div class="stat-label">Commits</div>
-                            <div class="stat-value" id="txn-commits"></div>
+                        <div class="metric">
+                            <span class="metric-value" id="txn-commits"></span>
+                            <span class="metric-label">Commits</span>
                         </div>
-                        <div class="stat-card">
-                            <div class="stat-label">Aborts</div>
-                            <div class="stat-value" id="txn-aborts"></div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-label">Avg Commit Latency</div>
-                            <div class="stat-value" id="txn-avg-latency"></div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-label">P99 Commit Latency</div>
-                            <div class="stat-value major" id="txn-p99-latency"></div>
+                        <div class="metric">
+                            <span class="metric-value" id="txn-aborts"></span>
+                            <span class="metric-label">Aborts</span>
                         </div>
                     </div>
 
-                    <h3>Concurrency Analysis</h3>
-                    <div class="summary-grid" style="grid-template-columns: repeat(4, 1fr);">
-                        <div class="stat-card">
-                            <div class="stat-label">Max Concurrent RO</div>
-                            <div class="stat-value" id="txn-max-ro"></div>
+                    <div class="two-col">
+                        <div class="card">
+                            <div class="card-header">Concurrency</div>
+                            <div class="card-body">
+                                <div class="concurrency-stats">
+                                    <div class="conc-stat">
+                                        <span class="conc-label">Max RO</span>
+                                        <span class="conc-value" id="txn-max-ro"></span>
+                                    </div>
+                                    <div class="conc-stat">
+                                        <span class="conc-label">Max RW</span>
+                                        <span class="conc-value" id="txn-max-rw"></span>
+                                    </div>
+                                    <div class="conc-stat">
+                                        <span class="conc-label">Avg RO</span>
+                                        <span class="conc-value" id="txn-avg-ro"></span>
+                                    </div>
+                                </div>
+                                <canvas id="txn-concurrency-chart"></canvas>
+                            </div>
                         </div>
-                        <div class="stat-card">
-                            <div class="stat-label">Max Concurrent RW</div>
-                            <div class="stat-value" id="txn-max-rw"></div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-label">Max Total Concurrent</div>
-                            <div class="stat-value" id="txn-max-total"></div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-label">Avg Concurrent RO</div>
-                            <div class="stat-value" id="txn-avg-ro"></div>
+                        <div class="card">
+                            <div class="card-header">Commit Latency</div>
+                            <div class="card-body">
+                                <div class="latency-stats">
+                                    <div class="lat-stat">
+                                        <span class="lat-label">Avg</span>
+                                        <span class="lat-value" id="txn-avg-latency"></span>
+                                    </div>
+                                    <div class="lat-stat">
+                                        <span class="lat-label">p50</span>
+                                        <span class="lat-value" id="txn-p50-latency"></span>
+                                    </div>
+                                    <div class="lat-stat">
+                                        <span class="lat-label">p95</span>
+                                        <span class="lat-value" id="txn-p95-latency"></span>
+                                    </div>
+                                    <div class="lat-stat">
+                                        <span class="lat-label">p99</span>
+                                        <span class="lat-value major" id="txn-p99-latency"></span>
+                                    </div>
+                                    <div class="lat-stat">
+                                        <span class="lat-label">Max</span>
+                                        <span class="lat-value major" id="txn-max-latency"></span>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
 
-                    <h3>Concurrency Timeline</h3>
-                    <div class="chart-full">
-                        <canvas id="txn-concurrency-chart"></canvas>
+                    <div class="card full-width">
+                        <div class="card-header">Thread Distribution</div>
+                        <div class="card-body compact-table-container" style="max-height: 250px;">
+                            <table class="compact-table" id="txn-threads-table">
+                                <thead>
+                                    <tr>
+                                        <th>Thread</th>
+                                        <th>Total</th>
+                                        <th>RO</th>
+                                        <th>RW</th>
+                                        <th>Commits</th>
+                                        <th>Aborts</th>
+                                    </tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
                     </div>
-
-                    <h3>Transaction Timeline (Gantt View)</h3>
-                    <div id="txn-gantt-container" class="chart-full" style="position: relative;">
-                        <canvas id="txn-gantt-chart"></canvas>
-                    </div>
-
-                    <h3>Thread Transaction Distribution</h3>
-                    <table class="data-table" id="txn-threads-table">
-                        <thead>
-                            <tr>
-                                <th>Thread ID</th>
-                                <th>Total Txns</th>
-                                <th>RO</th>
-                                <th>RW</th>
-                                <th>Commits</th>
-                                <th>Aborts</th>
-                                <th>Avg Commit Latency</th>
-                                <th>%</th>
-                            </tr>
-                        </thead>
-                        <tbody></tbody>
-                    </table>
-
                 </div>
             </section>
         </main>
@@ -416,1250 +367,525 @@ pub fn generate_html(data: &ViewerData) -> String {
 }
 
 const CSS: &str = r##"
-* {
-    margin: 0;
-    padding: 0;
-    box-sizing: border-box;
-}
+* { margin: 0; padding: 0; box-sizing: border-box; }
 
 body {
-    font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, sans-serif;
-    background: #050508;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #0a0a0f;
     color: #e4e4e7;
-    min-height: 100vh;
+    font-size: 13px;
+    line-height: 1.4;
 }
 
 #app {
-    max-width: 1600px;
+    max-width: 1400px;
     margin: 0 auto;
-    padding: 20px 30px;
+    padding: 12px 16px;
 }
 
+/* Tabs */
 .tabs {
     display: flex;
-    gap: 8px;
-    margin-bottom: 25px;
-    flex-wrap: wrap;
-    background: #0a0a0f;
-    padding: 8px;
-    border-radius: 12px;
-    border: 1px solid #252530;
+    gap: 4px;
+    margin-bottom: 12px;
+    background: #12121a;
+    padding: 4px;
+    border-radius: 8px;
 }
 
 .tab {
-    padding: 12px 24px;
+    padding: 8px 16px;
     background: transparent;
     border: none;
-    color: #a1a1aa;
+    color: #71717a;
     cursor: pointer;
-    border-radius: 8px;
-    transition: all 0.2s ease;
-    font-size: 0.9em;
+    border-radius: 6px;
+    font-size: 12px;
     font-weight: 500;
+    transition: all 0.15s;
 }
 
-.tab:hover {
-    background: #16161f;
-    color: #e4e4e7;
-}
-
-.tab.active {
-    background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
-    color: #fff;
-    font-weight: 600;
-    box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);
-}
+.tab:hover { background: #1a1a24; color: #a1a1aa; }
+.tab.active { background: #6366f1; color: #fff; }
 
 .export-btn {
     margin-left: auto;
-    padding: 10px 20px;
-    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+    padding: 8px 14px;
+    background: #059669;
     color: #fff;
     border: none;
-    border-radius: 10px;
+    border-radius: 6px;
     cursor: pointer;
-    font-size: 0.85em;
+    font-size: 11px;
     font-weight: 600;
-    transition: all 0.2s ease;
-    box-shadow: 0 2px 8px rgba(16, 185, 129, 0.3);
+}
+.export-btn:hover { background: #10b981; }
+
+/* Panels */
+.panel { display: none; }
+.panel.active { display: block; }
+
+/* Metrics row */
+.metrics-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
 }
 
-.export-btn:hover {
-    background: linear-gradient(135deg, #34d399 0%, #10b981 100%);
-    box-shadow: 0 4px 15px rgba(16, 185, 129, 0.4);
-    transform: translateY(-1px);
-}
-
-.panel {
-    display: none;
-    background: #0e0e14;
-    border-radius: 16px;
-    padding: 30px;
-    animation: fadeIn 0.3s ease;
-    border: 1px solid #252530;
-    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
-}
-
-.panel.active {
-    display: block;
-}
-
-@keyframes fadeIn {
-    from { opacity: 0; transform: translateY(10px); }
-    to { opacity: 1; transform: translateY(0); }
-}
-
-.summary-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-    gap: 16px;
-    margin-bottom: 35px;
-}
-
-.stat-card {
-    background: #0a0a0f;
-    padding: 24px 20px;
-    border-radius: 12px;
+.metric {
+    background: #12121a;
+    padding: 10px 14px;
+    border-radius: 6px;
     text-align: center;
-    border: 1px solid #252530;
-    transition: transform 0.2s ease, box-shadow 0.2s ease;
+    min-width: 90px;
+    flex: 1;
 }
 
-.stat-card:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 8px 25px rgba(0, 0, 0, 0.3);
-    border-color: #2a2a38;
+.metric-value {
+    display: block;
+    font-size: 16px;
+    font-weight: 700;
+    color: #6366f1;
+}
+.metric-value.major { color: #f87171; }
+.metric-value.minor { color: #34d399; }
+
+.metric-label {
+    display: block;
+    font-size: 10px;
+    color: #71717a;
+    text-transform: uppercase;
+    margin-top: 2px;
 }
 
-.stat-label {
-    font-size: 0.8em;
+/* Two column layout */
+.two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+@media (max-width: 900px) {
+    .two-col { grid-template-columns: 1fr; }
+}
+
+/* Cards */
+.card {
+    background: #12121a;
+    border-radius: 8px;
+    border: 1px solid #1e1e2a;
+    overflow: hidden;
+}
+
+.card.full-width { grid-column: 1 / -1; }
+
+.card.highlight {
+    border-color: #f87171;
+    box-shadow: 0 0 20px rgba(248, 113, 113, 0.1);
+}
+
+.card-header {
+    padding: 10px 14px;
+    background: #0a0a0f;
+    font-size: 11px;
+    font-weight: 600;
     color: #a1a1aa;
-    margin-bottom: 10px;
     text-transform: uppercase;
     letter-spacing: 0.5px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.card-badge {
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: #22c55e20;
+    color: #22c55e;
     font-weight: 500;
 }
 
-.stat-value {
-    font-size: 1.6em;
-    font-weight: 700;
-    color: #6366f1;
-    text-shadow: 0 0 20px rgba(99, 102, 241, 0.3);
+.card-body {
+    padding: 12px;
 }
 
-.stat-value.major {
-    color: #f87171;
-    text-shadow: 0 0 20px rgba(248, 113, 113, 0.3);
-}
-
-.stat-value.minor {
-    color: #34d399;
-    text-shadow: 0 0 20px rgba(52, 211, 153, 0.3);
-}
-
-.summary-charts {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
-    gap: 24px;
-}
-
-.chart-container {
-    background: #0a0a0f;
-    padding: 24px;
-    border-radius: 12px;
-    border: 1px solid #252530;
-    min-height: 280px;
-}
-
-.chart-container canvas {
+.card-body canvas {
     width: 100% !important;
-    height: 220px !important;
+    height: 180px !important;
 }
 
-.chart-container h3 {
-    margin-bottom: 20px;
-    font-size: 1em;
-    color: #a1a1aa;
+/* Compact tables */
+.compact-table-container {
+    overflow-x: auto;
+    overflow-y: auto;
+    max-height: 400px;
+}
+
+.compact-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 11px;
+}
+
+.compact-table th,
+.compact-table td {
+    padding: 6px 8px;
+    text-align: left;
+    border-bottom: 1px solid #1e1e2a;
+    white-space: nowrap;
+}
+
+.compact-table th {
+    background: #0a0a0f;
     font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
+    color: #6366f1;
+    position: sticky;
+    top: 0;
+    z-index: 1;
 }
 
-.chart-full {
-    background: #0a0a0f;
-    padding: 24px;
-    border-radius: 12px;
-    margin-bottom: 20px;
-    border: 1px solid #252530;
-}
+.compact-table tr:hover { background: #1a1a24; }
 
-.chart-full canvas {
-    width: 100% !important;
-    height: 400px !important;
-}
+.compact-table td { font-variant-numeric: tabular-nums; }
 
-/* Gantt chart needs dynamic height, don't override */
-#txn-gantt-chart {
-    height: auto !important;
-}
+/* Pattern bars */
+.pattern-bars { margin-bottom: 16px; }
 
-.timeline-controls {
-    display: flex;
-    gap: 30px;
-    justify-content: center;
-    padding: 15px;
-    background: #0a0a0f;
-    border-radius: 8px;
-}
-
-.timeline-controls label {
+.pattern-bar {
     display: flex;
     align-items: center;
     gap: 8px;
-    cursor: pointer;
-    color: #a1a1aa;
-    font-size: 0.9em;
-    transition: color 0.2s;
+    margin-bottom: 8px;
 }
 
-.timeline-controls label:hover {
-    color: #e4e4e7;
+.pattern-label {
+    width: 70px;
+    font-size: 11px;
+    color: #71717a;
 }
 
-.timeline-controls input[type="checkbox"] {
-    width: 18px;
-    height: 18px;
-    accent-color: #6366f1;
-}
-
-.heatmap-container {
-    position: relative;
-    background: #0a0a0f;
-    padding: 24px;
-    border-radius: 12px;
-    border: 1px solid #252530;
-}
-
-#heatmap-canvas {
-    width: 100%;
-    height: 450px;
-    cursor: crosshair;
-    border-radius: 8px;
-}
-
-.heatmap-legend {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 15px;
-    margin-top: 20px;
-    padding: 15px;
-    background: #050508;
-    border-radius: 8px;
-}
-
-.legend-gradient {
-    width: 250px;
-    height: 24px;
-    background: linear-gradient(to right, #12121a, #3b82f6, #6366f1, #8b5cf6, #a78bfa, #c4b5fd);
-    border-radius: 4px;
-    border: 1px solid #252530;
-}
-
-.legend-label {
-    font-size: 0.85em;
-    color: #a1a1aa;
-    font-weight: 500;
-}
-
-.heatmap-info {
-    display: flex;
-    justify-content: space-between;
-    margin-top: 15px;
-    font-size: 0.9em;
-    color: #a1a1aa;
-    padding: 0 10px;
-}
-
-.table-charts {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 24px;
-    margin-bottom: 24px;
-}
-
-.attribution-warning {
-    background: rgba(34, 197, 94, 0.1);
-    border: 1px solid rgba(34, 197, 94, 0.3);
-    border-radius: 8px;
-    padding: 12px 16px;
-    margin-bottom: 16px;
-    color: #22c55e;
-    font-size: 14px;
-    line-height: 1.5;
-}
-
-.attribution-warning.warning {
-    background: rgba(251, 191, 36, 0.1);
-    border-color: rgba(251, 191, 36, 0.3);
-    color: #fbbf24;
-}
-
-.data-table {
-    width: 100%;
-    border-collapse: collapse;
-    background: #0a0a0f;
-    border-radius: 12px;
-    overflow: hidden;
-    border: 1px solid #252530;
-}
-
-.data-table th,
-.data-table td {
-    padding: 14px 18px;
-    text-align: left;
-    border-bottom: 1px solid #252530;
-}
-
-.data-table th {
-    background: rgba(99, 102, 241, 0.1);
-    font-weight: 600;
-    color: #6366f1;
-    cursor: pointer;
-    text-transform: uppercase;
-    font-size: 0.8em;
-    letter-spacing: 0.5px;
-}
-
-.data-table th:hover {
-    background: rgba(99, 102, 241, 0.2);
-}
-
-.data-table tr {
-    transition: background 0.2s;
-}
-
-.data-table tr:hover {
-    background: #16161f;
-}
-
-.data-table tbody tr:last-child td {
-    border-bottom: none;
-}
-
-.data-table td {
-    font-variant-numeric: tabular-nums;
-}
-
-.filter-bar {
-    display: flex;
-    gap: 15px;
-    margin-bottom: 20px;
-}
-
-.filter-bar input,
-.filter-bar select {
-    padding: 12px 18px;
-    background: #0a0a0f;
-    border: 1px solid #252530;
-    border-radius: 8px;
-    color: #e4e4e7;
-    font-size: 0.9em;
-    transition: border-color 0.2s, box-shadow 0.2s;
-}
-
-.filter-bar input {
+.bar-container {
     flex: 1;
-}
-
-.filter-bar input:focus,
-.filter-bar select:focus {
-    outline: none;
-    border-color: #6366f1;
-    box-shadow: 0 0 15px rgba(99, 102, 241, 0.2);
-}
-
-.filter-bar select {
-    cursor: pointer;
-}
-
-.pattern-summary {
-    display: flex;
-    gap: 24px;
-    margin-bottom: 30px;
-}
-
-.pattern-summary .stat-card {
-    flex: 1;
-}
-
-.burst-stats {
-    display: flex;
-    gap: 20px;
-    margin-top: 20px;
-}
-
-.burst-stats .stat-card {
-    flex: 1;
-}
-
-.stride-summary {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 12px;
-    margin-bottom: 24px;
-}
-
-.stride-item {
-    background: #0a0a0f;
-    padding: 16px;
-    border-radius: 8px;
-    border: 1px solid #252530;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-}
-
-.stride-item .stride-label {
-    font-size: 0.9em;
-    color: #a1a1aa;
-}
-
-.stride-item .stride-value {
-    font-size: 1.1em;
-    font-weight: 600;
-    color: #6366f1;
-}
-
-.stride-item .stride-pct {
-    font-size: 0.85em;
-    color: #888;
-    margin-left: 8px;
-}
-
-h2 {
-    margin-bottom: 25px;
-    color: #6366f1;
-    font-size: 1.4em;
-    font-weight: 600;
-}
-
-h3 {
-    margin: 25px 0 20px;
-    color: #a1a1aa;
-    font-size: 1.1em;
-    font-weight: 600;
-}
-
-/* Scrollbar styling */
-::-webkit-scrollbar {
-    width: 8px;
     height: 8px;
-}
-
-::-webkit-scrollbar-track {
-    background: #0a0a0f;
+    background: #1e1e2a;
     border-radius: 4px;
+    overflow: hidden;
 }
 
-::-webkit-scrollbar-thumb {
-    background: rgba(99, 102, 241, 0.3);
+.bar {
+    height: 100%;
     border-radius: 4px;
+    transition: width 0.3s;
 }
 
-::-webkit-scrollbar-thumb:hover {
-    background: rgba(99, 102, 241, 0.5);
+.bar.sequential { background: #6366f1; }
+.bar.random { background: #fbbf24; }
+
+.pattern-value {
+    width: 45px;
+    text-align: right;
+    font-size: 11px;
+    font-weight: 600;
+    color: #a1a1aa;
 }
 
-@media (max-width: 768px) {
-    .tabs {
-        justify-content: center;
-    }
-
-    .tab {
-        flex: 1;
-        text-align: center;
-        min-width: 80px;
-        padding: 10px 12px;
-        font-size: 0.8em;
-    }
-
-    .table-charts {
-        grid-template-columns: 1fr;
-    }
-
-    .prefetch-gauge {
-        flex-direction: column;
-        align-items: center;
-        gap: 40px;
-    }
-
-    .summary-grid {
-        grid-template-columns: repeat(2, 1fr);
-    }
-
-    .pattern-summary,
-    .burst-stats {
-        flex-direction: column;
-    }
+/* Threads summary */
+.threads-summary {
+    font-size: 11px;
+    color: #71717a;
 }
+
+.threads-summary .thread-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0;
+    border-bottom: 1px solid #1e1e2a;
+}
+
+/* Concurrency stats */
+.concurrency-stats, .latency-stats {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+}
+
+.conc-stat, .lat-stat {
+    text-align: center;
+}
+
+.conc-label, .lat-label {
+    display: block;
+    font-size: 10px;
+    color: #71717a;
+    text-transform: uppercase;
+}
+
+.conc-value, .lat-value {
+    display: block;
+    font-size: 18px;
+    font-weight: 700;
+    color: #6366f1;
+}
+
+.lat-value.major { color: #f87171; }
+
+/* No data state */
+.no-data {
+    text-align: center;
+    padding: 40px;
+    color: #71717a;
+}
+
+.no-data code {
+    background: #1e1e2a;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: monospace;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #0a0a0f; }
+::-webkit-scrollbar-thumb { background: #2a2a3a; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #3a3a4a; }
 "##;
 
 const JAVASCRIPT: &str = r##"
-// Simple chart library (no external dependencies)
-class SimpleChart {
+// Minimal chart library
+class Chart {
     constructor(canvas) {
         this.canvas = canvas;
         this.ctx = canvas.getContext('2d');
-        this.width = 0;
-        this.height = 0;
-        this.lastDrawFn = null;
-        this.lastDrawArgs = null;
-        window.addEventListener('resize', () => this.redraw());
     }
 
     resize() {
         const rect = this.canvas.getBoundingClientRect();
-        if (rect.width === 0 || rect.height === 0) return false;
-
-        this.canvas.width = rect.width * window.devicePixelRatio;
-        this.canvas.height = rect.height * window.devicePixelRatio;
-        this.ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
-        this.width = rect.width;
-        this.height = rect.height;
+        if (rect.width === 0) return false;
+        this.canvas.width = rect.width * 2;
+        this.canvas.height = rect.height * 2;
+        this.ctx.scale(2, 2);
+        this.w = rect.width;
+        this.h = rect.height;
         return true;
     }
 
-    redraw() {
-        if (this.lastDrawFn && this.lastDrawArgs) {
-            this.lastDrawFn.apply(this, this.lastDrawArgs);
-        }
-    }
+    clear() { this.ctx.clearRect(0, 0, this.w, this.h); }
 
-    clear() {
-        this.ctx.clearRect(0, 0, this.width, this.height);
-    }
-
-    drawPie(data, colors, labels = []) {
-        this.lastDrawFn = this.drawPie;
-        this.lastDrawArgs = [data, colors, labels];
-
-        if (!this.resize()) return;
+    drawLine(data, color = '#6366f1') {
+        if (!this.resize() || !data.length) return;
         this.clear();
 
-        const cx = this.width * 0.35;
-        const cy = this.height / 2;
-        const radius = Math.max(10, Math.min(this.width * 0.3, this.height / 2) - 20);
+        const pad = { t: 10, r: 10, b: 20, l: 40 };
+        const w = this.w - pad.l - pad.r;
+        const h = this.h - pad.t - pad.b;
+        const max = Math.max(...data) * 1.1 || 1;
 
-        const total = data.reduce((a, b) => a + b, 0);
-        if (total === 0 || radius <= 0) return;
-        let startAngle = -Math.PI / 2;
-
-        // Draw slices with gap
-        data.forEach((value, i) => {
-            if (value === 0) return;
-            const sliceAngle = (value / total) * Math.PI * 2;
-            const midAngle = startAngle + sliceAngle / 2;
-
-            // Slight offset for 3D effect
-            const offsetX = Math.cos(midAngle) * 3;
-            const offsetY = Math.sin(midAngle) * 3;
-
-            this.ctx.beginPath();
-            this.ctx.moveTo(cx + offsetX, cy + offsetY);
-            this.ctx.arc(cx + offsetX, cy + offsetY, radius, startAngle, startAngle + sliceAngle);
-            this.ctx.closePath();
-
-            // Gradient fill
-            const gradient = this.ctx.createRadialGradient(cx + offsetX, cy + offsetY, 0, cx + offsetX, cy + offsetY, radius);
-            gradient.addColorStop(0, this.lightenColor(colors[i % colors.length], 20));
-            gradient.addColorStop(1, colors[i % colors.length]);
-            this.ctx.fillStyle = gradient;
-            this.ctx.fill();
-
-            // Border
-            this.ctx.strokeStyle = 'rgba(0,0,0,0.3)';
-            this.ctx.lineWidth = 1;
-            this.ctx.stroke();
-
-            startAngle += sliceAngle;
-        });
-
-        // Draw legend on the right
-        if (labels.length > 0) {
-            const legendX = this.width * 0.65;
-            let legendY = (this.height - labels.length * 25) / 2;
-
-            this.ctx.font = '12px -apple-system, BlinkMacSystemFont, sans-serif';
-            labels.forEach((label, i) => {
-                if (data[i] === 0) return;
-
-                // Color box
-                this.ctx.fillStyle = colors[i % colors.length];
-                this.ctx.fillRect(legendX, legendY, 14, 14);
-                this.ctx.strokeStyle = 'rgba(255,255,255,0.2)';
-                this.ctx.strokeRect(legendX, legendY, 14, 14);
-
-                // Label text
-                this.ctx.fillStyle = '#ccc';
-                this.ctx.textAlign = 'left';
-                const pct = ((data[i] / total) * 100).toFixed(1);
-                this.ctx.fillText(`${label} (${pct}%)`, legendX + 22, legendY + 11);
-
-                legendY += 25;
-            });
-        }
-    }
-
-    lightenColor(color, percent) {
-        const num = parseInt(color.replace('#', ''), 16);
-        const amt = Math.round(2.55 * percent);
-        const R = Math.min(255, (num >> 16) + amt);
-        const G = Math.min(255, ((num >> 8) & 0x00FF) + amt);
-        const B = Math.min(255, (num & 0x0000FF) + amt);
-        return `rgb(${R},${G},${B})`;
-    }
-
-    drawBar(labels, data, color, options = {}) {
-        this.lastDrawFn = this.drawBar;
-        this.lastDrawArgs = [labels, data, color, options];
-
-        if (!this.resize()) return;
-        this.clear();
-        if (!data.length) return;
-
-        const padding = { top: 30, right: 30, bottom: 70, left: 70 };
-        const chartWidth = Math.max(1, this.width - padding.left - padding.right);
-        const chartHeight = Math.max(1, this.height - padding.top - padding.bottom);
-        const barWidth = (chartWidth / data.length) * 0.7;
-        const barGap = (chartWidth / data.length) * 0.3;
-        const maxValue = Math.max(...data) * 1.1;
-
-        // Title
-        if (options.title) {
-            this.ctx.fillStyle = '#aaa';
-            this.ctx.font = 'bold 14px -apple-system, BlinkMacSystemFont, sans-serif';
-            this.ctx.textAlign = 'center';
-            this.ctx.fillText(options.title, this.width / 2, 20);
-        }
-
-        // Draw grid lines
-        this.ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+        // Grid
+        this.ctx.strokeStyle = '#1e1e2a';
         this.ctx.lineWidth = 1;
-        for (let i = 0; i <= 5; i++) {
-            const y = padding.top + (chartHeight / 5) * i;
+        for (let i = 0; i <= 4; i++) {
+            const y = pad.t + (h / 4) * i;
             this.ctx.beginPath();
-            this.ctx.moveTo(padding.left, y);
-            this.ctx.lineTo(this.width - padding.right, y);
+            this.ctx.moveTo(pad.l, y);
+            this.ctx.lineTo(this.w - pad.r, y);
             this.ctx.stroke();
-
-            // Y-axis labels
-            const value = maxValue - (maxValue / 5) * i;
-            this.ctx.fillStyle = '#888';
-            this.ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
-            this.ctx.textAlign = 'right';
-            this.ctx.fillText(formatNumber(value), padding.left - 10, y + 4);
         }
 
-        // Draw bars with gradient
-        data.forEach((value, i) => {
-            const barHeight = (value / maxValue) * chartHeight;
-            const x = padding.left + i * (barWidth + barGap) + barGap / 2;
-            const y = this.height - padding.bottom - barHeight;
+        // Area
+        this.ctx.beginPath();
+        this.ctx.moveTo(pad.l, this.h - pad.b);
+        data.forEach((v, i) => {
+            const x = pad.l + (i / (data.length - 1)) * w;
+            const y = pad.t + ((max - v) / max) * h;
+            this.ctx.lineTo(x, y);
+        });
+        this.ctx.lineTo(pad.l + w, this.h - pad.b);
+        this.ctx.closePath();
+        this.ctx.fillStyle = color + '20';
+        this.ctx.fill();
 
-            // Bar gradient
-            const gradient = this.ctx.createLinearGradient(x, y, x, this.height - padding.bottom);
-            gradient.addColorStop(0, this.lightenColor(color, 30));
-            gradient.addColorStop(1, color);
+        // Line
+        this.ctx.beginPath();
+        data.forEach((v, i) => {
+            const x = pad.l + (i / (data.length - 1)) * w;
+            const y = pad.t + ((max - v) / max) * h;
+            i === 0 ? this.ctx.moveTo(x, y) : this.ctx.lineTo(x, y);
+        });
+        this.ctx.strokeStyle = color;
+        this.ctx.lineWidth = 1.5;
+        this.ctx.stroke();
+    }
 
-            // Bar shadow
-            this.ctx.fillStyle = 'rgba(0,0,0,0.3)';
-            this.ctx.fillRect(x + 3, y + 3, barWidth, barHeight);
+    drawBar(labels, values, color = '#6366f1') {
+        if (!this.resize() || !values.length) return;
+        this.clear();
 
-            // Bar
-            this.ctx.fillStyle = gradient;
-            this.ctx.fillRect(x, y, barWidth, barHeight);
+        const pad = { t: 10, r: 10, b: 50, l: 10 };
+        const w = this.w - pad.l - pad.r;
+        const h = this.h - pad.t - pad.b;
+        const max = Math.max(...values) * 1.1 || 1;
+        const barW = (w / values.length) * 0.7;
+        const gap = (w / values.length) * 0.3;
 
-            // Bar border
-            this.ctx.strokeStyle = 'rgba(255,255,255,0.1)';
-            this.ctx.strokeRect(x, y, barWidth, barHeight);
+        values.forEach((v, i) => {
+            const barH = (v / max) * h;
+            const x = pad.l + i * (barW + gap) + gap / 2;
+            const y = pad.t + h - barH;
 
-            // Value on top
-            if (barHeight > 20) {
-                this.ctx.fillStyle = '#fff';
-                this.ctx.font = 'bold 10px -apple-system, BlinkMacSystemFont, sans-serif';
-                this.ctx.textAlign = 'center';
-                this.ctx.fillText(formatNumber(value), x + barWidth / 2, y - 5);
-            }
+            this.ctx.fillStyle = color;
+            this.ctx.fillRect(x, y, barW, barH);
 
-            // Labels
-            this.ctx.fillStyle = '#888';
-            this.ctx.font = '10px -apple-system, BlinkMacSystemFont, sans-serif';
-            this.ctx.textAlign = 'right';
+            // Label
+            this.ctx.fillStyle = '#71717a';
+            this.ctx.font = '9px sans-serif';
+            this.ctx.textAlign = 'center';
             this.ctx.save();
-            this.ctx.translate(x + barWidth / 2, this.height - padding.bottom + 8);
+            this.ctx.translate(x + barW / 2, this.h - pad.b + 8);
             this.ctx.rotate(Math.PI / 4);
-            this.ctx.fillText(labels[i].substring(0, 20), 0, 0);
+            this.ctx.fillText(labels[i].substring(0, 12), 0, 0);
             this.ctx.restore();
         });
     }
 
-    drawLine(data, options = {}) {
-        this.lastDrawFn = this.drawLine;
-        this.lastDrawArgs = [data, options];
-
+    drawHeatmap(data) {
         if (!this.resize()) return;
-        this.clear();
+        const { time_buckets, offset_buckets, data: cells, max_count } = data;
 
-        const padding = { top: 40, right: 30, bottom: 50, left: 70 };
-        const chartWidth = Math.max(1, this.width - padding.left - padding.right);
-        const chartHeight = Math.max(1, this.height - padding.top - padding.bottom);
+        const pad = { t: 10, r: 10, b: 30, l: 40 };
+        const w = this.w - pad.l - pad.r;
+        const h = this.h - pad.t - pad.b;
+        const cellW = w / time_buckets;
+        const cellH = h / offset_buckets;
 
-        const datasets = Array.isArray(data[0]) ? data : [data];
-        const colors = options.colors || ['#6366f1', '#f87171', '#34d399'];
-        const labels = options.labels || [];
-
-        let allValues = datasets.flat();
-        if (allValues.length === 0) return;
-
-        const maxValue = Math.max(...allValues) * 1.1;
-        const minValue = Math.min(0, Math.min(...allValues));
-        const range = maxValue - minValue || 1;
-
-        // Title
-        if (options.title) {
-            this.ctx.fillStyle = '#aaa';
-            this.ctx.font = 'bold 14px -apple-system, BlinkMacSystemFont, sans-serif';
-            this.ctx.textAlign = 'center';
-            this.ctx.fillText(options.title, this.width / 2, 20);
-        }
-
-        // Draw grid
-        this.ctx.strokeStyle = 'rgba(255,255,255,0.1)';
-        this.ctx.lineWidth = 1;
-        for (let i = 0; i <= 5; i++) {
-            const y = padding.top + (chartHeight / 5) * i;
-            this.ctx.beginPath();
-            this.ctx.moveTo(padding.left, y);
-            this.ctx.lineTo(this.width - padding.right, y);
-            this.ctx.stroke();
-
-            const value = maxValue - (range / 5) * i;
-            this.ctx.fillStyle = '#888';
-            this.ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
-            this.ctx.textAlign = 'right';
-            this.ctx.fillText(formatNumber(value), padding.left - 10, y + 4);
-        }
-
-        // Draw area fill and lines
-        datasets.forEach((dataset, di) => {
-            if (dataset.length === 0) return;
-
-            const color = colors[di % colors.length];
-
-            // Area fill
-            this.ctx.beginPath();
-            this.ctx.moveTo(padding.left, this.height - padding.bottom);
-
-            dataset.forEach((value, i) => {
-                const x = padding.left + (i / Math.max(1, dataset.length - 1)) * chartWidth;
-                const y = padding.top + ((maxValue - value) / range) * chartHeight;
-                this.ctx.lineTo(x, y);
-            });
-
-            this.ctx.lineTo(padding.left + chartWidth, this.height - padding.bottom);
-            this.ctx.closePath();
-
-            const gradient = this.ctx.createLinearGradient(0, padding.top, 0, this.height - padding.bottom);
-            gradient.addColorStop(0, color + '40');
-            gradient.addColorStop(1, color + '05');
-            this.ctx.fillStyle = gradient;
-            this.ctx.fill();
-
-            // Line
-            this.ctx.strokeStyle = color;
-            this.ctx.lineWidth = 2.5;
-            this.ctx.lineCap = 'round';
-            this.ctx.lineJoin = 'round';
-            this.ctx.beginPath();
-
-            dataset.forEach((value, i) => {
-                const x = padding.left + (i / Math.max(1, dataset.length - 1)) * chartWidth;
-                const y = padding.top + ((maxValue - value) / range) * chartHeight;
-
-                if (i === 0) {
-                    this.ctx.moveTo(x, y);
-                } else {
-                    this.ctx.lineTo(x, y);
-                }
-            });
-
-            this.ctx.stroke();
-        });
-
-        // Legend
-        if (labels.length > 0) {
-            const legendX = padding.left;
-            const legendY = this.height - 20;
-
-            this.ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
-            let offsetX = 0;
-
-            labels.forEach((label, i) => {
-                const color = colors[i % colors.length];
-
-                // Line sample
-                this.ctx.strokeStyle = color;
-                this.ctx.lineWidth = 3;
-                this.ctx.beginPath();
-                this.ctx.moveTo(legendX + offsetX, legendY);
-                this.ctx.lineTo(legendX + offsetX + 20, legendY);
-                this.ctx.stroke();
-
-                // Label
-                this.ctx.fillStyle = '#aaa';
-                this.ctx.textAlign = 'left';
-                this.ctx.fillText(label, legendX + offsetX + 25, legendY + 4);
-
-                offsetX += this.ctx.measureText(label).width + 50;
-            });
-        }
-    }
-
-    drawGauge(value, maxValue, color) {
-        this.lastDrawFn = this.drawGauge;
-        this.lastDrawArgs = [value, maxValue, color];
-
-        if (!this.resize()) return;
-        this.clear();
-
-        const cx = this.width / 2;
-        const cy = this.height / 2 + 20;
-        const radius = Math.max(10, Math.min(cx, cy) - 40);
-        if (radius <= 0 || maxValue === 0) return;
-
-        // Background arc with gradient
-        this.ctx.beginPath();
-        this.ctx.arc(cx, cy, radius, Math.PI, 0);
-        this.ctx.strokeStyle = '#2a2a4a';
-        this.ctx.lineWidth = 25;
-        this.ctx.lineCap = 'round';
-        this.ctx.stroke();
-
-        // Value arc with gradient
-        const angle = Math.PI + (Math.min(value, maxValue) / maxValue) * Math.PI;
-
-        // Create arc gradient
-        const gradient = this.ctx.createLinearGradient(cx - radius, cy, cx + radius, cy);
-        gradient.addColorStop(0, this.lightenColor(color, -20));
-        gradient.addColorStop(0.5, color);
-        gradient.addColorStop(1, this.lightenColor(color, 20));
-
-        this.ctx.beginPath();
-        this.ctx.arc(cx, cy, radius, Math.PI, angle);
-        this.ctx.strokeStyle = gradient;
-        this.ctx.lineWidth = 25;
-        this.ctx.lineCap = 'round';
-        this.ctx.stroke();
-
-        // Glow effect
-        this.ctx.shadowColor = color;
-        this.ctx.shadowBlur = 15;
-        this.ctx.beginPath();
-        this.ctx.arc(cx, cy, radius, Math.PI, angle);
-        this.ctx.strokeStyle = color;
-        this.ctx.lineWidth = 3;
-        this.ctx.stroke();
-        this.ctx.shadowBlur = 0;
-
-        // Value text
-        this.ctx.fillStyle = '#fff';
-        this.ctx.font = 'bold 32px -apple-system, BlinkMacSystemFont, sans-serif';
-        this.ctx.textAlign = 'center';
-        this.ctx.fillText(value.toFixed(1) + '%', cx, cy + 10);
-
-        // Min/Max labels
-        this.ctx.fillStyle = '#666';
-        this.ctx.font = '12px -apple-system, BlinkMacSystemFont, sans-serif';
-        this.ctx.fillText('0', cx - radius - 5, cy + 25);
-        this.ctx.fillText('100', cx + radius + 5, cy + 25);
-    }
-}
-
-// Heatmap renderer
-class HeatmapRenderer {
-    constructor(canvas) {
-        this.canvas = canvas;
-        this.ctx = canvas.getContext('2d');
-        this.data = null;
-        window.addEventListener('resize', () => this.redraw());
-    }
-
-    redraw() {
-        if (this.data) this.render(this.data);
-    }
-
-    render(heatmapData) {
-        this.data = heatmapData;
-        const { time_buckets, offset_buckets, data, max_count } = heatmapData;
-
-        const rect = this.canvas.getBoundingClientRect();
-        if (rect.width === 0 || rect.height === 0) return;
-
-        this.canvas.width = rect.width * window.devicePixelRatio;
-        this.canvas.height = rect.height * window.devicePixelRatio;
-        this.ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
-
-        const width = rect.width;
-        const height = rect.height;
-        const padding = { top: 40, right: 30, bottom: 60, left: 80 };
-
-        const cellWidth = (width - padding.left - padding.right) / time_buckets;
-        const cellHeight = (height - padding.top - padding.bottom) / offset_buckets;
-
-        // Background
-        this.ctx.fillStyle = '#0a0a0f';
-        this.ctx.fillRect(0, 0, width, height);
-
-        // Draw cells with smooth interpolation
         for (let t = 0; t < time_buckets; t++) {
             for (let o = 0; o < offset_buckets; o++) {
                 const idx = t * offset_buckets + o;
-                const count = data[idx];
-                const intensity = max_count > 0 ? count / max_count : 0;
+                const intensity = max_count > 0 ? cells[idx] / max_count : 0;
+                const x = pad.l + t * cellW;
+                const y = pad.t + (offset_buckets - 1 - o) * cellH;
 
-                const x = padding.left + t * cellWidth;
-                const y = padding.top + (offset_buckets - 1 - o) * cellHeight;
-
-                this.ctx.fillStyle = this.getHeatColor(intensity);
-                this.ctx.fillRect(x, y, cellWidth + 1, cellHeight + 1);
+                this.ctx.fillStyle = this.heatColor(intensity);
+                this.ctx.fillRect(x, y, cellW + 1, cellH + 1);
             }
         }
-
-        // Draw border around heatmap
-        this.ctx.strokeStyle = 'rgba(255,255,255,0.2)';
-        this.ctx.lineWidth = 1;
-        this.ctx.strokeRect(padding.left, padding.top, width - padding.left - padding.right, height - padding.top - padding.bottom);
-
-        // Draw axes labels
-        this.ctx.fillStyle = '#aaa';
-        this.ctx.font = '12px -apple-system, BlinkMacSystemFont, sans-serif';
-        this.ctx.textAlign = 'center';
-        this.ctx.fillText('Time (seconds)', width / 2, height - 15);
-
-        this.ctx.save();
-        this.ctx.translate(20, height / 2);
-        this.ctx.rotate(-Math.PI / 2);
-        this.ctx.fillText('File Offset (GB)', 0, 0);
-        this.ctx.restore();
-
-        // Time axis ticks
-        this.ctx.fillStyle = '#888';
-        this.ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
-        for (let i = 0; i <= 5; i++) {
-            const x = padding.left + (i / 5) * (width - padding.left - padding.right);
-            const time = (heatmapData.min_time_ms + (heatmapData.max_time_ms - heatmapData.min_time_ms) * i / 5) / 1000;
-
-            // Tick mark
-            this.ctx.strokeStyle = 'rgba(255,255,255,0.3)';
-            this.ctx.beginPath();
-            this.ctx.moveTo(x, height - padding.bottom);
-            this.ctx.lineTo(x, height - padding.bottom + 5);
-            this.ctx.stroke();
-
-            this.ctx.fillText(time.toFixed(1) + 's', x, height - padding.bottom + 20);
-        }
-
-        // Offset axis ticks
-        this.ctx.textAlign = 'right';
-        for (let i = 0; i <= 5; i++) {
-            const y = padding.top + (i / 5) * (height - padding.top - padding.bottom);
-            const offset = heatmapData.max_offset_gb - (heatmapData.max_offset_gb - heatmapData.min_offset_gb) * i / 5;
-
-            // Tick mark
-            this.ctx.strokeStyle = 'rgba(255,255,255,0.3)';
-            this.ctx.beginPath();
-            this.ctx.moveTo(padding.left - 5, y);
-            this.ctx.lineTo(padding.left, y);
-            this.ctx.stroke();
-
-            this.ctx.fillText(offset.toFixed(1), padding.left - 10, y + 4);
-        }
     }
 
-    getHeatColor(intensity) {
-        if (intensity === 0) return '#0a0a0f';
-        const colors = [
-            [18, 18, 26],     // Dark (#12121a)
-            [59, 130, 246],   // Blue (#3b82f6)
-            [99, 102, 241],   // Indigo (#6366f1)
-            [139, 92, 246],   // Violet (#8b5cf6)
-            [167, 139, 250],  // Light purple (#a78bfa)
-            [196, 181, 253],  // Lavender (#c4b5fd)
-            [248, 113, 113],  // Red for hot spots (#f87171)
-            [251, 191, 36]    // Yellow for hottest (#fbbf24)
-        ];
-
-        const idx = Math.pow(intensity, 0.7) * (colors.length - 1); // Gamma correction for better visibility
-        const i = Math.floor(idx);
-        const t = idx - i;
-
-        if (i >= colors.length - 1) {
-            const c = colors[colors.length - 1];
-            return `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
-        }
-
-        const c1 = colors[i];
-        const c2 = colors[i + 1];
-
-        const r = Math.round(c1[0] + (c2[0] - c1[0]) * t);
-        const g = Math.round(c1[1] + (c2[1] - c1[1]) * t);
-        const b = Math.round(c1[2] + (c2[2] - c1[2]) * t);
-
-        return `rgb(${r}, ${g}, ${b})`;
+    heatColor(i) {
+        if (i === 0) return '#0a0a0f';
+        const r = Math.min(255, Math.floor(i * 400));
+        const g = Math.min(255, Math.floor(i * 150));
+        const b = Math.min(255, 100 + Math.floor(i * 155));
+        return `rgb(${r},${g},${b})`;
     }
 }
 
-// Utility functions
-function formatNumber(num) {
-    if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M';
-    if (num >= 1000) return (num / 1000).toFixed(1) + 'K';
-    return num.toFixed(0);
+// Utilities
+const fmt = n => n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'K' : n.toFixed(0);
+const fmtDur = s => s < 60 ? s.toFixed(1)+'s' : s < 3600 ? (s/60).toFixed(1)+'m' : (s/3600).toFixed(1)+'h';
+const fmtLat = us => us >= 1000 ? (us/1000).toFixed(1)+'ms' : us.toFixed(0)+'μs';
+
+// Tab switching
+document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+        tab.classList.add('active');
+        document.getElementById(tab.dataset.tab).classList.add('active');
+        initTab(tab.dataset.tab);
+    });
+});
+
+// Export
+document.getElementById('export-compact-btn').addEventListener('click', () => {
+    const json = JSON.stringify(DATA, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'mdbx-trace.json';
+    a.click();
+});
+
+// Tab initialization
+const initialized = {};
+
+function initTab(name) {
+    if (initialized[name]) return;
+    initialized[name] = true;
+
+    if (name === 'overview') initOverview();
+    else if (name === 'cursors') initCursors();
+    else if (name === 'transactions') initTxns();
 }
 
-function formatDuration(secs) {
-    if (secs < 60) return secs.toFixed(1) + 's';
-    if (secs < 3600) return (secs / 60).toFixed(1) + 'm';
-    return (secs / 3600).toFixed(1) + 'h';
-}
+function initOverview() {
+    const s = DATA.summary;
 
-// Chart instances (created lazily when tabs become visible)
-const charts = {};
-const tabInitialized = {};
+    // Metrics
+    document.getElementById('duration').textContent = fmtDur(s.duration_secs);
+    document.getElementById('total-faults').textContent = fmt(s.page_faults);
+    document.getElementById('major-faults').textContent = fmt(s.major_faults);
+    document.getElementById('minor-faults').textContent = fmt(s.minor_faults);
+    document.getElementById('fault-rate').textContent = fmt(s.fault_rate_per_sec);
+    document.getElementById('major-ratio').textContent = (s.major_fault_ratio * 100).toFixed(1) + '%';
 
-// Initialize a specific tab's charts
-function initTab(tabName) {
-    if (tabInitialized[tabName]) {
-        // Just redraw existing charts
-        Object.values(charts).forEach(chart => {
-            if (chart && chart.redraw) chart.redraw();
-        });
-        return;
+    // Block range
+    if (s.block_range) {
+        document.getElementById('block-range-metric').style.display = 'block';
+        document.getElementById('block-range').textContent =
+            fmt(s.block_range.min_block) + ' - ' + fmt(s.block_range.max_block);
     }
 
-    tabInitialized[tabName] = true;
-
-    switch(tabName) {
-        case 'summary':
-            initSummary();
-            break;
-        case 'timeline':
-            initTimeline();
-            break;
-        case 'heatmap':
-            initHeatmap();
-            break;
-        case 'tables':
-            initTables();
-            break;
-        case 'threads':
-            initThreads();
-            break;
-
-        case 'patterns':
-            initPatterns();
-            break;
-        case 'cursors':
-            initCursors();
-            break;
-        case 'transactions':
-            initTransactions();
-            break;
+    // Timeline
+    if (DATA.timeline.length) {
+        new Chart(document.getElementById('timeline-chart'))
+            .drawLine(DATA.timeline.map(t => t.faults));
     }
-}
 
-function initSummary() {
-    // Summary stats
-    document.getElementById('duration').textContent = formatDuration(DATA.summary.duration_secs);
-    document.getElementById('total-faults').textContent = formatNumber(DATA.summary.page_faults);
-    document.getElementById('major-faults').textContent = formatNumber(DATA.summary.major_faults);
-    document.getElementById('minor-faults').textContent = formatNumber(DATA.summary.minor_faults);
-    document.getElementById('fault-rate').textContent = formatNumber(DATA.summary.fault_rate_per_sec) + '/s';
-    document.getElementById('unique-pages').textContent = formatNumber(DATA.summary.unique_pages);
-    document.getElementById('major-ratio').textContent = (DATA.summary.major_fault_ratio * 100).toFixed(1) + '%';
-    document.getElementById('file-range').textContent = DATA.summary.file_size_gb.toFixed(2) + ' GB';
-
-    // Fault type pie chart
-    charts.faultType = new SimpleChart(document.getElementById('fault-type-chart'));
-    charts.faultType.drawPie(
-        [DATA.summary.major_faults, DATA.summary.minor_faults],
-        ['#f87171', '#34d399'],
-        ['Major (Disk I/O)', 'Minor (Cache)']
-    );
-
-    // Access pattern pie chart
-    charts.accessPattern = new SimpleChart(document.getElementById('access-pattern-chart'));
-    charts.accessPattern.drawPie(
-        [DATA.patterns.sequential_ratio, DATA.patterns.random_ratio],
-        ['#6366f1', '#fbbf24'],
-        ['Sequential', 'Random']
-    );
-}
-
-function initTimeline() {
-    if (DATA.timeline.length > 0) {
-        charts.timeline = new SimpleChart(document.getElementById('timeline-chart'));
-        const faults = DATA.timeline.map(t => t.faults);
-        const major = DATA.timeline.map(t => t.major_faults);
-        charts.timeline.drawLine([faults, major], {
-            colors: ['#6366f1', '#f87171'],
-            labels: ['Total Faults', 'Major Faults'],
-            title: 'Page Faults Over Time'
-        });
-
-        // Timeline controls
-        const showMajor = document.getElementById('show-major');
-        const showUnique = document.getElementById('show-unique');
-
-        function updateTimeline() {
-            const datasets = [];
-            const colors = [];
-            const labels = [];
-
-            datasets.push(DATA.timeline.map(t => t.faults));
-            colors.push('#6366f1');
-            labels.push('Total Faults');
-
-            if (showMajor.checked) {
-                datasets.push(DATA.timeline.map(t => t.major_faults));
-                colors.push('#f87171');
-                labels.push('Major Faults');
-            }
-
-            if (showUnique.checked) {
-                datasets.push(DATA.timeline.map(t => t.unique_pages));
-                colors.push('#34d399');
-                labels.push('Unique Pages');
-            }
-
-            charts.timeline.drawLine(datasets, { colors, labels, title: 'Page Faults Over Time' });
-        }
-
-        showMajor.addEventListener('change', updateTimeline);
-        showUnique.addEventListener('change', updateTimeline);
+    // Heatmap
+    if (DATA.heatmap.data.length) {
+        new Chart(document.getElementById('heatmap-canvas')).drawHeatmap(DATA.heatmap);
     }
-}
 
-function initHeatmap() {
-    if (DATA.heatmap.data.length > 0) {
-        charts.heatmap = new HeatmapRenderer(document.getElementById('heatmap-canvas'));
-        charts.heatmap.render(DATA.heatmap);
+    // Tables
+    const tbody = document.querySelector('#tables-table tbody');
+    DATA.tables.slice(0, 15).forEach(t => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${t.name}</td><td>${fmt(t.faults)}</td><td>${fmt(t.major_faults)}</td><td>${t.percentage.toFixed(1)}%</td>`;
+        tbody.appendChild(tr);
+    });
 
-        document.getElementById('heatmap-time-range').textContent =
-            `Time: ${(DATA.heatmap.min_time_ms / 1000).toFixed(1)}s - ${(DATA.heatmap.max_time_ms / 1000).toFixed(1)}s`;
-        document.getElementById('heatmap-offset-range').textContent =
-            `Offset: ${DATA.heatmap.min_offset_gb.toFixed(2)} GB - ${DATA.heatmap.max_offset_gb.toFixed(2)} GB`;
-    }
-}
-
-function initTables() {
-    // Show attribution warning if present
+    // Correlation badge
     if (DATA.page_fault_attribution_warning) {
-        const warningDiv = document.getElementById('fault-attribution-warning');
-        warningDiv.textContent = DATA.page_fault_attribution_warning;
-        warningDiv.style.display = 'block';
-        // Use warning style if correlation rate is low
-        if (DATA.page_fault_attribution_warning.includes('Could not correlate')) {
-            warningDiv.classList.add('warning');
-        }
+        document.getElementById('correlation-badge').textContent = 'Correlated';
     }
 
-    if (DATA.tables.length > 0) {
-        const topTables = DATA.tables.slice(0, 10);
-        const colors = ['#8b5cf6', '#6366f1', '#3b82f6', '#0ea5e9', '#06b6d4', '#14b8a6', '#10b981', '#84cc16', '#eab308', '#f59e0b'];
+    // Access patterns
+    const seqPct = (DATA.patterns.sequential_ratio * 100);
+    const randPct = (DATA.patterns.random_ratio * 100);
+    document.getElementById('seq-bar').style.width = seqPct + '%';
+    document.getElementById('rand-bar').style.width = randPct + '%';
+    document.getElementById('seq-ratio').textContent = seqPct.toFixed(1) + '%';
+    document.getElementById('rand-ratio').textContent = randPct.toFixed(1) + '%';
 
-        charts.tablesPie = new SimpleChart(document.getElementById('tables-pie-chart'));
-        charts.tablesPie.drawPie(
-            topTables.map(t => t.faults),
-            colors,
-            topTables.map(t => t.name)
-        );
-
-        charts.tablesBar = new SimpleChart(document.getElementById('tables-bar-chart'));
-        charts.tablesBar.drawBar(
-            topTables.map(t => t.name),
-            topTables.map(t => t.faults),
-            '#6366f1',
-            { title: 'Faults by Table' }
-        );
-
-        const tbody = document.querySelector('#tables-table tbody');
-        DATA.tables.forEach((t, i) => {
-            const row = document.createElement('tr');
-            row.innerHTML = `
-                <td><span style="display:inline-block;width:10px;height:10px;background:${colors[i % colors.length]};margin-right:8px;border-radius:2px;"></span>${t.name}</td>
-                <td>${t.category}</td>
-                <td>${formatNumber(t.faults)}</td>
-                <td>${formatNumber(t.major_faults)}</td>
-                <td>${t.percentage.toFixed(1)}%</td>
-            `;
-            tbody.appendChild(row);
-        });
-    }
-}
-
-function initThreads() {
-    if (DATA.threads.length > 0) {
-        charts.threads = new SimpleChart(document.getElementById('threads-chart'));
-        charts.threads.drawBar(
-            DATA.threads.map(t => 'TID ' + t.tid),
-            DATA.threads.map(t => t.faults),
-            '#34d399',
-            { title: 'Faults by Thread' }
-        );
-
-        const tbody = document.querySelector('#threads-table tbody');
-        DATA.threads.forEach(t => {
-            const row = document.createElement('tr');
-            row.innerHTML = `
-                <td>${t.tid}</td>
-                <td>${formatNumber(t.faults)}</td>
-                <td>${t.percentage.toFixed(1)}%</td>
-            `;
-            tbody.appendChild(row);
-        });
-    }
-}
-
-function initPatterns() {
-    document.getElementById('seq-ratio').textContent = (DATA.patterns.sequential_ratio * 100).toFixed(1) + '%';
-    document.getElementById('rand-ratio').textContent = (DATA.patterns.random_ratio * 100).toFixed(1) + '%';
-
-    // Display top stride patterns as summary cards
-    const strideSummary = document.getElementById('stride-summary');
-    if (DATA.patterns.top_strides && DATA.patterns.top_strides.length > 0) {
-        DATA.patterns.top_strides.forEach(s => {
-            const item = document.createElement('div');
-            item.className = 'stride-item';
-            item.innerHTML = `
-                <span class="stride-label">${s.pattern_type} (${s.stride_pages} pg)</span>
-                <span><span class="stride-value">${formatNumber(s.count)}</span><span class="stride-pct">${s.percentage.toFixed(1)}%</span></span>
-            `;
-            strideSummary.appendChild(item);
-        });
-    } else {
-        strideSummary.innerHTML = '<div style="color:#888;padding:20px;text-align:center;">No stride data available</div>';
-    }
-
-    document.getElementById('burst-median').textContent = formatNumber(DATA.patterns.burst_stats.median_events);
-    document.getElementById('burst-p95').textContent = formatNumber(DATA.patterns.burst_stats.p95_events);
-    document.getElementById('burst-max').textContent = formatNumber(DATA.patterns.burst_stats.max_events);
+    // Threads summary
+    const threadsDiv = document.getElementById('threads-summary');
+    threadsDiv.innerHTML = '<div style="margin-bottom:8px;color:#a1a1aa;font-weight:600;">Top Threads</div>';
+    DATA.threads.slice(0, 5).forEach(t => {
+        const div = document.createElement('div');
+        div.className = 'thread-item';
+        div.innerHTML = `<span>TID ${t.tid}</span><span>${fmt(t.faults)} (${t.percentage.toFixed(1)}%)</span>`;
+        threadsDiv.appendChild(div);
+    });
 }
 
 function initCursors() {
-    const cursorData = DATA.cursor_data;
-
-    if (!cursorData || !cursorData.has_data) {
+    const c = DATA.cursor_data;
+    if (!c.has_data) {
         document.getElementById('cursor-no-data').style.display = 'block';
         document.getElementById('cursor-content').style.display = 'none';
         return;
@@ -1668,150 +894,55 @@ function initCursors() {
     document.getElementById('cursor-no-data').style.display = 'none';
     document.getElementById('cursor-content').style.display = 'block';
 
-    // Summary stats
-    document.getElementById('cursor-total-ops').textContent = formatNumber(cursorData.summary.total_ops);
-    document.getElementById('cursor-op-rate').textContent = formatNumber(cursorData.summary.op_rate_per_sec) + '/s';
-    document.getElementById('cursor-avg-latency').textContent = cursorData.summary.avg_latency_us.toFixed(1) + ' μs';
-    document.getElementById('cursor-p99-latency').textContent = cursorData.summary.p99_latency_us.toFixed(1) + ' μs';
-    document.getElementById('cursor-seeks').textContent = formatNumber(cursorData.summary.seek_count);
-    document.getElementById('cursor-seek-ratio').textContent = cursorData.summary.seek_ratio.toFixed(1) + '%';
-    document.getElementById('cursor-navs').textContent = formatNumber(cursorData.summary.nav_count);
-    document.getElementById('cursor-errors').textContent = formatNumber(cursorData.summary.error_count);
+    const s = c.summary;
+    document.getElementById('cursor-total-ops').textContent = fmt(s.total_ops);
+    document.getElementById('cursor-op-rate').textContent = fmt(s.op_rate_per_sec);
+    document.getElementById('cursor-avg-latency').textContent = fmtLat(s.avg_latency_us);
+    document.getElementById('cursor-p50-latency').textContent = fmtLat(s.p50_latency_us);
+    document.getElementById('cursor-p95-latency').textContent = fmtLat(s.p95_latency_us);
+    document.getElementById('cursor-p99-latency').textContent = fmtLat(s.p99_latency_us);
+    document.getElementById('cursor-seeks').textContent = fmt(s.seek_count);
+    document.getElementById('cursor-navs').textContent = fmt(s.nav_count);
 
     // Operations chart
-    if (cursorData.operations.length > 0) {
-        const topOps = cursorData.operations.slice(0, 10);
-        const colors = topOps.map(op => op.is_seek ? '#f59e0b' : '#34d399');
-
-        charts.cursorOps = new SimpleChart(document.getElementById('cursor-ops-chart'));
-        charts.cursorOps.drawBar(
-            topOps.map(o => o.name),
-            topOps.map(o => o.count),
-            '#6366f1',
-            { title: '' }
-        );
-    }
+    const ops = c.operations.slice(0, 10);
+    new Chart(document.getElementById('cursor-ops-chart'))
+        .drawBar(ops.map(o => o.name), ops.map(o => o.count));
 
     // Tables chart
-    if (cursorData.table_stats.length > 0) {
-        const topTables = cursorData.table_stats.slice(0, 10);
-        const colors = ['#8b5cf6', '#6366f1', '#3b82f6', '#0ea5e9', '#06b6d4', '#14b8a6', '#10b981', '#84cc16', '#eab308', '#f59e0b'];
+    const tables = c.table_stats.slice(0, 10);
+    new Chart(document.getElementById('cursor-tables-chart'))
+        .drawBar(tables.map(t => t.name), tables.map(t => t.ops), '#34d399');
 
-        charts.cursorTables = new SimpleChart(document.getElementById('cursor-tables-chart'));
-        charts.cursorTables.drawPie(
-            topTables.map(t => t.ops),
-            colors,
-            topTables.map(t => t.name)
-        );
-    }
-
-    // Timeline chart
-    if (cursorData.timeline.length > 0) {
-        charts.cursorTimeline = new SimpleChart(document.getElementById('cursor-timeline-chart'));
-        charts.cursorTimeline.drawLine(
-            [cursorData.timeline.map(t => t.ops), cursorData.timeline.map(t => t.seeks)],
-            {
-                colors: ['#6366f1', '#f59e0b'],
-                labels: ['Total Ops', 'Seeks'],
-                title: 'Cursor Operations Over Time'
-            }
-        );
-    }
-
-    // Tables table
-    const tablesBody = document.querySelector('#cursor-tables-table tbody');
-    cursorData.table_stats.forEach(t => {
-        const row = document.createElement('tr');
-        row.innerHTML = `
-            <td>${t.name}</td>
-            <td>${t.dbi}</td>
-            <td>${formatNumber(t.ops)}</td>
-            <td>${formatNumber(t.seeks)}</td>
-            <td>${formatNumber(t.navs)}</td>
-            <td>${t.avg_latency_us.toFixed(1)} μs</td>
-            <td>${t.percentage.toFixed(1)}%</td>
-        `;
-        tablesBody.appendChild(row);
+    // Table details
+    const tbody = document.querySelector('#cursor-tables-table tbody');
+    c.table_stats.forEach(t => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${t.name}</td><td>${fmt(t.ops)}</td><td>${fmt(t.seeks)}</td><td>${fmt(t.navs)}</td><td>${fmtLat(t.avg_latency_us)}</td><td>${fmtLat(t.p50_latency_us)}</td><td>${fmtLat(t.p95_latency_us)}</td><td>${fmtLat(t.p99_latency_us)}</td>`;
+        tbody.appendChild(tr);
     });
 
-    // Slow operations by table
-    const slowOpsBody = document.querySelector('#slow-ops-table tbody');
-    if (cursorData.slow_ops_by_table && cursorData.slow_ops_by_table.length > 0) {
-        cursorData.slow_ops_by_table.forEach(t => {
-            const row = document.createElement('tr');
-            // Format top operations breakdown
-            const topOps = t.by_operation.slice(0, 3).map(op =>
-                `${op.operation}: ${op.count} (avg ${op.avg_latency_us.toFixed(0)}μs)`
-            ).join(', ');
+    // Slow ops
+    const slowTbody = document.querySelector('#slow-ops-table tbody');
+    c.slow_ops_by_table.forEach(t => {
+        const topOps = t.by_operation.slice(0, 2).map(o => `${o.operation}: ${fmt(o.count)}`).join(', ');
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${t.table}</td><td>${fmt(t.slow_op_count)}</td><td>${fmt(t.total_op_count)}</td><td style="color:${t.slow_op_percentage > 20 ? '#f87171' : '#a1a1aa'}">${t.slow_op_percentage.toFixed(1)}%</td><td>${fmtLat(t.avg_slow_latency_us)}</td><td>${fmtLat(t.max_latency_us)}</td><td>${(t.total_slow_time_ms/1000).toFixed(1)}s</td><td style="font-size:10px;color:#71717a">${topOps}</td>`;
+        slowTbody.appendChild(tr);
+    });
 
-            // Color code by severity (percentage of slow ops)
-            const sevColor = t.slow_op_percentage > 5 ? '#f87171' :
-                            t.slow_op_percentage > 1 ? '#fbbf24' : '#34d399';
-
-            row.innerHTML = `
-                <td><strong>${t.table}</strong></td>
-                <td style="color: ${sevColor}">${formatNumber(t.slow_op_count)}</td>
-                <td>${formatNumber(t.total_op_count)}</td>
-                <td style="color: ${sevColor}">${t.slow_op_percentage.toFixed(2)}%</td>
-                <td>${t.avg_slow_latency_us.toFixed(1)} μs</td>
-                <td style="color: #f87171">${t.max_latency_us.toFixed(1)} μs</td>
-                <td>${t.total_slow_time_ms.toFixed(1)} ms</td>
-                <td style="font-size: 0.85em">${topOps}</td>
-            `;
-            slowOpsBody.appendChild(row);
-        });
-    } else {
-        const row = document.createElement('tr');
-        row.innerHTML = '<td colspan="8" style="text-align:center;color:#888;">No slow operations detected</td>';
-        slowOpsBody.appendChild(row);
-    }
-
-    // Slow keys table
-    const slowKeysBody = document.querySelector('#slow-keys-table tbody');
-    if (cursorData.slow_keys && cursorData.slow_keys.length > 0) {
-        cursorData.slow_keys.forEach(k => {
-            const row = document.createElement('tr');
-            const opsDisplay = k.operations.join(', ');
-
-            row.innerHTML = `
-                <td>${k.table}</td>
-                <td style="font-family: monospace; font-size: 0.85em;" title="${k.key_hex}">${k.key_prefix}</td>
-                <td style="color: #f87171">${k.slow_access_count}</td>
-                <td>${k.total_access_count}</td>
-                <td>${k.avg_latency_us.toFixed(1)} μs</td>
-                <td style="color: #f87171">${k.max_latency_us.toFixed(1)} μs</td>
-                <td style="font-size: 0.85em">${opsDisplay}</td>
-            `;
-            slowKeysBody.appendChild(row);
-        });
-    } else {
-        const row = document.createElement('tr');
-        row.innerHTML = '<td colspan="7" style="text-align:center;color:#888;">No frequently slow keys detected</td>';
-        slowKeysBody.appendChild(row);
-    }
-
-    // Log table
-    const logBody = document.querySelector('#cursor-log-table tbody');
-    cursorData.recent_ops.forEach(op => {
-        const row = document.createElement('tr');
-        const statusColor = op.success ? '#34d399' : '#f87171';
-        const keyDisplay = op.key_hex.length > 40 ? op.key_hex.substring(0, 40) + '...' : op.key_hex;
-        row.innerHTML = `
-            <td>${op.timestamp_ms}</td>
-            <td>${op.table}</td>
-            <td style="color: ${op.operation.includes('SET') || op.operation.includes('GET_BOTH') ? '#f59e0b' : '#34d399'}">${op.operation}</td>
-            <td style="font-family: monospace; font-size: 0.85em;">${keyDisplay}</td>
-            <td>${op.latency_us.toFixed(1)} μs</td>
-            <td style="color: ${statusColor}">${op.success ? 'OK' : 'ERR'}</td>
-        `;
-        logBody.appendChild(row);
+    // Slow keys
+    const keysTbody = document.querySelector('#slow-keys-table tbody');
+    c.slow_keys.slice(0, 20).forEach(k => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${k.table}</td><td style="font-family:monospace;font-size:10px">${k.key_prefix}</td><td>${fmt(k.slow_access_count)}</td><td>${fmt(k.total_access_count)}</td><td>${fmtLat(k.avg_latency_us)}</td><td>${fmtLat(k.max_latency_us)}</td>`;
+        keysTbody.appendChild(tr);
     });
 }
 
-function initTransactions() {
-    const txnData = DATA.txn_data;
-
-    if (!txnData || !txnData.has_data) {
+function initTxns() {
+    const t = DATA.txn_data;
+    if (!t.has_data) {
         document.getElementById('txn-no-data').style.display = 'block';
         document.getElementById('txn-content').style.display = 'none';
         return;
@@ -1820,687 +951,42 @@ function initTransactions() {
     document.getElementById('txn-no-data').style.display = 'none';
     document.getElementById('txn-content').style.display = 'block';
 
-    // Summary stats
-    document.getElementById('txn-total').textContent = formatNumber(txnData.summary.begin_count);
-    document.getElementById('txn-rate').textContent = formatNumber(txnData.summary.txn_rate_per_sec) + '/s';
-    document.getElementById('txn-ro').textContent = formatNumber(txnData.summary.ro_count);
-    document.getElementById('txn-rw').textContent = formatNumber(txnData.summary.rw_count);
-    document.getElementById('txn-commits').textContent = formatNumber(txnData.summary.commit_count);
-    document.getElementById('txn-aborts').textContent = formatNumber(txnData.summary.abort_count);
-    document.getElementById('txn-avg-latency').textContent = txnData.summary.avg_commit_latency_us.toFixed(1) + ' μs';
-    document.getElementById('txn-p99-latency').textContent = txnData.summary.p99_commit_latency_us.toFixed(1) + ' μs';
+    const s = t.summary;
+    document.getElementById('txn-total').textContent = fmt(s.begin_count);
+    document.getElementById('txn-rate').textContent = fmt(s.txn_rate_per_sec);
+    document.getElementById('txn-ro').textContent = fmt(s.ro_count);
+    document.getElementById('txn-rw').textContent = fmt(s.rw_count);
+    document.getElementById('txn-commits').textContent = fmt(s.commit_count);
+    document.getElementById('txn-aborts').textContent = fmt(s.abort_count);
 
-    // Concurrency stats
-    document.getElementById('txn-max-ro').textContent = txnData.concurrency.max_concurrent_ro;
-    document.getElementById('txn-max-rw').textContent = txnData.concurrency.max_concurrent_rw;
-    document.getElementById('txn-max-total').textContent = txnData.concurrency.max_concurrent_total;
-    document.getElementById('txn-avg-ro').textContent = txnData.concurrency.avg_concurrent_ro.toFixed(2);
+    // Concurrency
+    const c = t.concurrency;
+    document.getElementById('txn-max-ro').textContent = c.max_concurrent_ro;
+    document.getElementById('txn-max-rw').textContent = c.max_concurrent_rw;
+    document.getElementById('txn-avg-ro').textContent = c.avg_concurrent_ro.toFixed(1);
 
-    // Concurrency timeline chart
-    if (txnData.concurrency.concurrency_timeline && txnData.concurrency.concurrency_timeline.length > 0) {
-        charts.txnConcurrency = new SimpleChart(document.getElementById('txn-concurrency-chart'));
-        charts.txnConcurrency.drawLine(
-            [
-                txnData.concurrency.concurrency_timeline.map(t => t.concurrent_ro),
-                txnData.concurrency.concurrency_timeline.map(t => t.concurrent_rw)
-            ],
-            {
-                colors: ['#34d399', '#f87171'],
-                labels: ['Concurrent RO', 'Concurrent RW'],
-                title: 'Transaction Concurrency Over Time'
-            }
-        );
+    // Concurrency chart
+    if (c.concurrency_timeline.length) {
+        new Chart(document.getElementById('txn-concurrency-chart'))
+            .drawLine(c.concurrency_timeline.map(p => p.concurrent_ro));
     }
 
-    // Interactive Gantt chart for transaction timeline
-    if (txnData.timeline && txnData.timeline.length > 0) {
-        const ganttContainer = document.getElementById('txn-gantt-chart').parentElement;
-        const ganttCanvas = document.getElementById('txn-gantt-chart');
-
-        // Count transactions per thread and track which have RW transactions
-        const threadCounts = new Map();
-        const rwThreads = new Set();
-        txnData.timeline.forEach(t => {
-            threadCounts.set(t.tid, (threadCounts.get(t.tid) || 0) + 1);
-            if (t.txn_type === 'RW') {
-                rwThreads.add(t.tid);
-            }
-        });
-
-        // Sort threads by transaction count, take top 10 RO threads
-        const maxThreads = 10;
-        const topThreads = [...threadCounts.entries()]
-            .filter(([tid]) => !rwThreads.has(tid))  // Exclude RW threads from count-based selection
-            .sort((a, b) => b[1] - a[1])
-            .slice(0, maxThreads)
-            .map(([tid]) => tid);
-
-        // Always include RW threads at the top (most important for analysis)
-        const rwThreadList = [...rwThreads].sort((a, b) => {
-            // Sort RW threads by transaction count
-            return (threadCounts.get(b) || 0) - (threadCounts.get(a) || 0);
-        });
-
-        // Combine: RW threads first, then top RO threads
-        const sortedThreads = [...rwThreadList, ...topThreads];
-
-        const threadSet = new Set(sortedThreads);
-        const threadMap = new Map(sortedThreads.map((tid, i) => [tid, i]));
-
-        // Filter timeline to only include selected threads
-        const filteredTimeline = txnData.timeline.filter(t => threadSet.has(t.tid));
-
-        // Large row height for visibility
-        const rowHeight = 60;
-        const padding = { top: 70, right: 50, bottom: 50, left: 120 };
-        const chartHeight = Math.max(300, sortedThreads.length * rowHeight + padding.top + padding.bottom);
-
-        // Set container to not constrain the canvas
-        ganttContainer.style.overflow = 'visible';
-        ganttContainer.style.position = 'relative';
-        ganttContainer.style.minHeight = chartHeight + 'px';
-
-        // Find time range from filtered data
-        const dataMinTime = Math.min(...filteredTimeline.map(t => t.start_ms));
-        const dataMaxTime = Math.max(...filteredTimeline.map(t => t.end_ms || t.start_ms + 100));
-        const dataTimeRange = dataMaxTime - dataMinTime || 1;
-
-        // Interactive state
-        let viewMinTime = dataMinTime;
-        let viewMaxTime = dataMaxTime;
-        let isDragging = false;
-        let dragStartX = 0;
-        let dragStartMinTime = 0;
-        let hoveredTxn = null;
-
-        // Create tooltip element
-        const tooltip = document.createElement('div');
-        tooltip.style.cssText = `
-            position: fixed;
-            background: rgba(15, 15, 25, 0.98);
-            border: 1px solid rgba(100,100,255,0.3);
-            border-radius: 10px;
-            padding: 14px 18px;
-            font-size: 13px;
-            color: #fff;
-            pointer-events: none;
-            z-index: 10000;
-            display: none;
-            max-width: 380px;
-            box-shadow: 0 8px 32px rgba(0,0,0,0.6);
-            backdrop-filter: blur(10px);
-        `;
-        document.body.appendChild(tooltip);
-
-        // Get display width (CSS pixels, not canvas pixels)
-        function getDisplayWidth() {
-            const containerStyle = getComputedStyle(ganttContainer);
-            const containerPadding = parseFloat(containerStyle.paddingLeft) + parseFloat(containerStyle.paddingRight);
-            return ganttContainer.clientWidth - containerPadding;
-        }
-
-        // Calculate transaction rectangles for hit testing
-        function calcTxnRects() {
-            const width = getDisplayWidth();
-            const chartWidth = width - padding.left - padding.right;
-            const viewRange = viewMaxTime - viewMinTime || 1;
-
-            return filteredTimeline.map(txn => {
-                const threadIdx = threadMap.get(txn.tid);
-                if (threadIdx === undefined) return null;
-
-                const y = padding.top + threadIdx * rowHeight + 10;
-                const x = padding.left + ((txn.start_ms - viewMinTime) / viewRange) * chartWidth;
-                const endMs = txn.end_ms || (txn.start_ms + Math.max(50, dataTimeRange * 0.005));
-                const barWidth = Math.max(6, ((endMs - txn.start_ms) / viewRange) * chartWidth);
-                const barHeight = rowHeight - 20;
-
-                return { txn, x, y, width: barWidth, height: barHeight };
-            }).filter(r => r !== null);
-        }
-
-        function render() {
-            const width = getDisplayWidth();
-
-            // Set canvas display size
-            ganttCanvas.style.width = width + 'px';
-            ganttCanvas.style.height = chartHeight + 'px';
-
-            // Set canvas internal resolution for crisp rendering
-            const dpr = window.devicePixelRatio || 1;
-            ganttCanvas.width = width * dpr;
-            ganttCanvas.height = chartHeight * dpr;
-
-            const ctx = ganttCanvas.getContext('2d');
-            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-
-            const chartWidth = width - padding.left - padding.right;
-            const viewRange = viewMaxTime - viewMinTime || 1;
-
-            // Background gradient
-            const bgGrad = ctx.createLinearGradient(0, 0, 0, chartHeight);
-            bgGrad.addColorStop(0, '#0a0a12');
-            bgGrad.addColorStop(1, '#0f0f18');
-            ctx.fillStyle = bgGrad;
-            ctx.fillRect(0, 0, width, chartHeight);
-
-            // Draw alternating row backgrounds
-            sortedThreads.forEach((tid, i) => {
-                const y = padding.top + i * rowHeight;
-                ctx.fillStyle = i % 2 === 0 ? 'rgba(255,255,255,0.015)' : 'rgba(0,0,0,0.15)';
-                ctx.fillRect(0, y, width, rowHeight);
-            });
-
-            // Draw grid
-            ctx.strokeStyle = 'rgba(255,255,255,0.06)';
-            ctx.lineWidth = 1;
-
-            // Horizontal grid lines
-            sortedThreads.forEach((tid, i) => {
-                const y = padding.top + i * rowHeight + rowHeight;
-                ctx.beginPath();
-                ctx.moveTo(padding.left, y);
-                ctx.lineTo(width - padding.right, y);
-                ctx.stroke();
-
-                // Thread label with count
-                const count = threadCounts.get(tid);
-                ctx.fillStyle = '#ccc';
-                ctx.font = 'bold 13px -apple-system, BlinkMacSystemFont, sans-serif';
-                ctx.textAlign = 'right';
-                ctx.fillText('TID ' + tid, padding.left - 15, padding.top + i * rowHeight + rowHeight / 2 + 5);
-
-                ctx.fillStyle = '#666';
-                ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
-                ctx.fillText('(' + count + ' txns)', padding.left - 15, padding.top + i * rowHeight + rowHeight / 2 + 20);
-            });
-
-            // Vertical time grid
-            const numGridLines = 8;
-            for (let i = 0; i <= numGridLines; i++) {
-                const x = padding.left + (i / numGridLines) * chartWidth;
-                ctx.strokeStyle = 'rgba(255,255,255,0.06)';
-                ctx.beginPath();
-                ctx.moveTo(x, padding.top);
-                ctx.lineTo(x, chartHeight - padding.bottom);
-                ctx.stroke();
-
-                // Time label
-                const time = viewMinTime + (viewRange * i / numGridLines);
-                ctx.fillStyle = '#888';
-                ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
-                ctx.textAlign = 'center';
-                ctx.fillText((time / 1000).toFixed(2) + 's', x, chartHeight - padding.bottom + 20);
-            }
-
-            // Draw transactions as bars
-            const txnRects = calcTxnRects();
-            txnRects.forEach(({ txn, x, y, width: barWidth, height: barHeight }) => {
-                // Skip if outside visible area
-                if (x + barWidth < padding.left || x > width - padding.right) return;
-
-                // Color based on type and status - brighter colors
-                let color, borderColor;
-                if (txn.txn_type === 'RW') {
-                    color = txn.end_type === 'commit' ? '#ff6b6b' :
-                            txn.end_type === 'abort' ? '#c0392b' : '#e74c3c';
-                    borderColor = '#ff8787';
-                } else {
-                    color = txn.end_type === 'commit' ? '#2ecc71' :
-                            txn.end_type === 'abort' ? '#27ae60' : '#1abc9c';
-                    borderColor = '#58d68d';
-                }
-
-                // Highlight hovered transaction
-                const isHovered = hoveredTxn && hoveredTxn.txn_ptr === txn.txn_ptr && hoveredTxn.start_ms === txn.start_ms;
-                if (isHovered) {
-                    ctx.shadowColor = color;
-                    ctx.shadowBlur = 20;
-                    ctx.shadowOffsetY = 2;
-                }
-
-                // Draw bar with rounded corners
-                ctx.fillStyle = isHovered ? borderColor : color;
-                ctx.beginPath();
-                const radius = 5;
-                ctx.roundRect(x, y, barWidth, barHeight, radius);
-                ctx.fill();
-
-                ctx.shadowBlur = 0;
-                ctx.shadowOffsetY = 0;
-
-                // Border
-                ctx.strokeStyle = isHovered ? '#fff' : 'rgba(255,255,255,0.4)';
-                ctx.lineWidth = isHovered ? 2 : 1;
-                ctx.stroke();
-
-                // Draw status indicator if bar is wide enough
-                if (barWidth > 30) {
-                    ctx.fillStyle = '#fff';
-                    ctx.font = 'bold 10px -apple-system, BlinkMacSystemFont, sans-serif';
-                    ctx.textAlign = 'center';
-                    // C = commit, X = closed (RO abort), A = abort (RW), ? = open
-                    const label = txn.end_type === 'commit' ? 'C' :
-                                  (txn.end_type === 'abort' && txn.txn_type === 'RO') ? 'X' :
-                                  txn.end_type === 'abort' ? 'A' : '?';
-                    ctx.fillText(label, x + barWidth / 2, y + barHeight / 2 + 4);
-                }
-            });
-
-            // Legend at top with better styling
-            ctx.font = '12px -apple-system, BlinkMacSystemFont, sans-serif';
-            ctx.textAlign = 'left';
-            const legendY = 35;
-            let legendX = padding.left;
-
-            const legendItems = [
-                { color: '#2ecc71', label: 'RO Commit' },
-                { color: '#ff6b6b', label: 'RW Commit' },
-                { color: '#27ae60', label: 'RO Closed' },
-                { color: '#c0392b', label: 'RW Abort' },
-            ];
-
-            legendItems.forEach(item => {
-                ctx.fillStyle = item.color;
-                ctx.beginPath();
-                ctx.roundRect(legendX, legendY - 8, 14, 14, 3);
-                ctx.fill();
-
-                ctx.fillStyle = '#bbb';
-                ctx.fillText(item.label, legendX + 20, legendY + 3);
-                legendX += ctx.measureText(item.label).width + 40;
-            });
-
-            // Info text
-            ctx.fillStyle = '#555';
-            ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
-            ctx.textAlign = 'left';
-            const rwInfo = rwThreadList.length > 0 ? ` (${rwThreadList.length} RW + ${topThreads.length} top RO)` : '';
-            ctx.fillText(`Showing ${sortedThreads.length} threads${rwInfo} - ${filteredTimeline.length} transactions`, padding.left, 55);
-
-            // Zoom controls hint
-            ctx.fillStyle = '#666';
-            ctx.textAlign = 'right';
-            ctx.fillText('Scroll: zoom | Drag: pan | Double-click: reset | Hover: details', width - padding.right, 35);
-
-            // Zoom level indicator
-            const zoomPercent = Math.round((dataTimeRange / viewRange) * 100);
-            ctx.fillStyle = '#888';
-            ctx.fillText(`Zoom: ${zoomPercent}%`, width - padding.right, 55);
-        }
-
-        // Mouse event handlers
-        ganttCanvas.addEventListener('wheel', (e) => {
-            e.preventDefault();
-            const rect = ganttCanvas.getBoundingClientRect();
-            const mouseX = e.clientX - rect.left;
-            const width = getDisplayWidth();
-            const chartWidth = width - padding.left - padding.right;
-            const mouseRatio = Math.max(0, Math.min(1, (mouseX - padding.left) / chartWidth));
-
-            const viewRange = viewMaxTime - viewMinTime;
-            const zoomFactor = e.deltaY > 0 ? 1.2 : 0.83;
-            const newRange = Math.min(dataTimeRange * 1.5, Math.max(viewRange * zoomFactor, dataTimeRange * 0.01));
-
-            const mouseTime = viewMinTime + viewRange * mouseRatio;
-            viewMinTime = mouseTime - newRange * mouseRatio;
-            viewMaxTime = mouseTime + newRange * (1 - mouseRatio);
-
-            // Clamp to data bounds with padding
-            const dataPadding = dataTimeRange * 0.05;
-            viewMinTime = Math.max(dataMinTime - dataPadding, viewMinTime);
-            viewMaxTime = Math.min(dataMaxTime + dataPadding, viewMaxTime);
-
-            render();
-        }, { passive: false });
-
-        ganttCanvas.addEventListener('mousedown', (e) => {
-            isDragging = true;
-            dragStartX = e.clientX;
-            dragStartMinTime = viewMinTime;
-            ganttCanvas.style.cursor = 'grabbing';
-        });
-
-        const handleMouseMove = (e) => {
-            const rect = ganttCanvas.getBoundingClientRect();
-            const width = getDisplayWidth();
-            const chartWidth = width - padding.left - padding.right;
-
-            if (isDragging) {
-                const dx = e.clientX - dragStartX;
-                const viewRange = viewMaxTime - viewMinTime;
-                const timeDelta = -(dx / chartWidth) * viewRange;
-
-                viewMinTime = dragStartMinTime + timeDelta;
-                viewMaxTime = viewMinTime + viewRange;
-
-                // Clamp
-                const dataPadding = dataTimeRange * 0.05;
-                if (viewMinTime < dataMinTime - dataPadding) {
-                    viewMinTime = dataMinTime - dataPadding;
-                    viewMaxTime = viewMinTime + viewRange;
-                }
-                if (viewMaxTime > dataMaxTime + dataPadding) {
-                    viewMaxTime = dataMaxTime + dataPadding;
-                    viewMinTime = viewMaxTime - viewRange;
-                }
-
-                render();
-            } else {
-                // Hit test for hover
-                const mouseX = e.clientX - rect.left;
-                const mouseY = e.clientY - rect.top;
-
-                const txnRects = calcTxnRects();
-                let found = null;
-                for (const r of txnRects) {
-                    if (mouseX >= r.x && mouseX <= r.x + r.width &&
-                        mouseY >= r.y && mouseY <= r.y + r.height) {
-                        found = r.txn;
-                        break;
-                    }
-                }
-
-                if (found !== hoveredTxn) {
-                    hoveredTxn = found;
-                    render();
-                }
-
-                if (hoveredTxn) {
-                    ganttCanvas.style.cursor = 'pointer';
-                    const txn = hoveredTxn;
-                    const duration = txn.end_ms ? (txn.end_ms - txn.start_ms).toFixed(2) : 'ongoing';
-                    // For RO transactions, "abort" really means "closed/released" - not an error
-                    const isRoAbort = txn.txn_type === 'RO' && txn.end_type === 'abort';
-                    const statusLabel = isRoAbort ? 'closed' : (txn.end_type || 'open');
-                    const statusColor = txn.end_type === 'commit' ? '#2ecc71' :
-                                       (isRoAbort ? '#27ae60' : (txn.end_type === 'abort' ? '#e74c3c' : '#f39c12'));
-                    tooltip.innerHTML = `
-                        <div style="font-weight:bold;margin-bottom:10px;font-size:14px;color:${txn.txn_type === 'RW' ? '#ff6b6b' : '#2ecc71'}">
-                            ${txn.txn_type} Transaction
-                        </div>
-                        <div style="display:grid;grid-template-columns:auto 1fr;gap:6px 12px;">
-                            <span style="color:#888">Thread:</span><span>TID ${txn.tid}</span>
-                            <span style="color:#888">Pointer:</span><code style="background:#1a1a2e;padding:2px 8px;border-radius:4px;font-size:11px">${txn.txn_ptr}</code>
-                            <span style="color:#888">Start:</span><span>${(txn.start_ms / 1000).toFixed(4)}s</span>
-                            <span style="color:#888">Duration:</span><span>${duration} ms</span>
-                            <span style="color:#888">Status:</span><span style="color:${statusColor};font-weight:bold">${statusLabel}</span>
-                            ${txn.commit_latency_us ? `<span style="color:#888">Latency:</span><span>${txn.commit_latency_us.toFixed(1)} μs</span>` : ''}
-                        </div>
-                    `;
-                    tooltip.style.display = 'block';
-                    tooltip.style.left = Math.min(e.clientX + 15, window.innerWidth - 400) + 'px';
-                    tooltip.style.top = Math.min(e.clientY + 15, window.innerHeight - 200) + 'px';
-                } else {
-                    ganttCanvas.style.cursor = 'grab';
-                    tooltip.style.display = 'none';
-                }
-            }
-        };
-
-        ganttCanvas.addEventListener('mousemove', handleMouseMove);
-
-        window.addEventListener('mouseup', () => {
-            if (isDragging) {
-                isDragging = false;
-                ganttCanvas.style.cursor = hoveredTxn ? 'pointer' : 'grab';
-            }
-        });
-
-        ganttCanvas.addEventListener('mouseleave', () => {
-            tooltip.style.display = 'none';
-            if (hoveredTxn) {
-                hoveredTxn = null;
-                render();
-            }
-        });
-
-        // Double click to reset zoom
-        ganttCanvas.addEventListener('dblclick', () => {
-            viewMinTime = dataMinTime;
-            viewMaxTime = dataMaxTime;
-            render();
-        });
-
-        // Initial render
-        ganttCanvas.style.cursor = 'grab';
-        render();
-
-        // Re-render on window resize
-        window.addEventListener('resize', () => render());
-    }
-
-    // Thread stats table
-    const threadBody = document.querySelector('#txn-threads-table tbody');
-    if (txnData.thread_stats) {
-        txnData.thread_stats.forEach(t => {
-            const row = document.createElement('tr');
-            row.innerHTML = `
-                <td>${t.tid}</td>
-                <td>${formatNumber(t.total_txns)}</td>
-                <td style="color: #34d399">${formatNumber(t.ro_txns)}</td>
-                <td style="color: #f87171">${formatNumber(t.rw_txns)}</td>
-                <td>${formatNumber(t.commits)}</td>
-                <td>${formatNumber(t.aborts)}</td>
-                <td>${t.avg_commit_latency_us.toFixed(1)} μs</td>
-                <td>${t.percentage.toFixed(1)}%</td>
-            `;
-            threadBody.appendChild(row);
-        });
-    }
-
-}
-
-// Initialize the viewer
-// Generate compact export for LLM analysis
-function generateCompactExport() {
-    const data = DATA;
-    const insights = [];
-
-    // Generate insights
-    if (data.summary.major_fault_ratio > 0.1) {
-        insights.push(`High major fault ratio (${(data.summary.major_fault_ratio * 100).toFixed(1)}%) indicates significant disk I/O. Consider increasing system RAM or optimizing access patterns.`);
-    }
-    if (data.patterns.random_ratio > 0.7) {
-        insights.push(`High random access ratio (${(data.patterns.random_ratio * 100).toFixed(1)}%) suggests poor locality. Tables may benefit from different indexing or access order.`);
-    }
-    if (data.cursor_data && data.cursor_data.has_data) {
-        if (data.cursor_data.summary.seek_ratio > 0.8) {
-            insights.push(`Seek-heavy workload (${(data.cursor_data.summary.seek_ratio * 100).toFixed(1)}% seeks). Each seek traverses B+ tree. Consider batching or caching.`);
-        }
-        if (data.cursor_data.summary.error_count > 0) {
-            const errorRate = data.cursor_data.summary.error_count / data.cursor_data.summary.total_ops;
-            if (errorRate > 0.01) {
-                insights.push(`Notable error rate (${(errorRate * 100).toFixed(2)}%). Most are MDBX_NOTFOUND which may be normal for existence checks.`);
-            }
-        }
-    }
-    if (data.txn_data && data.txn_data.has_data) {
-        const rwRatio = data.txn_data.summary.rw_count / Math.max(1, data.txn_data.summary.begin_count);
-        if (rwRatio > 0.1) {
-            insights.push(`Higher than typical RW transaction ratio (${(rwRatio * 100).toFixed(1)}%). Reth usually has <1% RW transactions.`);
-        }
-        if (data.txn_data.summary.avg_commit_latency_us > 200000) {
-            insights.push(`High average commit latency (${(data.txn_data.summary.avg_commit_latency_us / 1000).toFixed(1)}ms). May indicate I/O bottleneck or large write batches.`);
-        }
-    }
-
-    // Find tables with high faults-per-op
-    const highFaultTables = data.tables
-        .filter(t => t.has_cursor_ops && t.cursor_ops > 100)
-        .map(t => ({ name: t.name, ratio: t.faults / t.cursor_ops }))
-        .filter(t => t.ratio > 0.5)
-        .sort((a, b) => b.ratio - a.ratio)
-        .slice(0, 3);
-
-    highFaultTables.forEach(t => {
-        insights.push(`Table '${t.name}' has high fault-per-op ratio (${t.ratio.toFixed(2)}). Consider prefetching or access pattern optimization.`);
+    // Latency
+    document.getElementById('txn-avg-latency').textContent = fmtLat(s.avg_commit_latency_us);
+    document.getElementById('txn-p50-latency').textContent = fmtLat(s.p50_commit_latency_us);
+    document.getElementById('txn-p95-latency').textContent = fmtLat(s.p95_commit_latency_us);
+    document.getElementById('txn-p99-latency').textContent = fmtLat(s.p99_commit_latency_us);
+    document.getElementById('txn-max-latency').textContent = fmtLat(s.max_commit_latency_us);
+
+    // Threads
+    const tbody = document.querySelector('#txn-threads-table tbody');
+    t.thread_stats.slice(0, 15).forEach(th => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${th.tid}</td><td>${fmt(th.total_txns)}</td><td>${fmt(th.ro_txns)}</td><td>${fmt(th.rw_txns)}</td><td>${fmt(th.commits)}</td><td>${fmt(th.aborts)}</td>`;
+        tbody.appendChild(tr);
     });
-
-    // Build compact export
-    const compact = {
-        trace: {
-            duration_secs: data.summary.duration_secs,
-            total_events: data.summary.total_events,
-            file_size_gb: data.summary.file_size_gb,
-            file_offset_range_gb: [data.summary.min_offset / 1e9, data.summary.max_offset / 1e9]
-        },
-        page_faults: {
-            total: data.summary.page_faults,
-            major: data.summary.major_faults,
-            minor: data.summary.minor_faults,
-            major_ratio: data.summary.major_fault_ratio,
-            rate_per_sec: data.summary.fault_rate_per_sec,
-            unique_pages: data.summary.unique_pages,
-            sequential_ratio: data.patterns.sequential_ratio,
-            random_ratio: data.patterns.random_ratio,
-            burst_median: data.patterns.burst_stats.median_events,
-            burst_p95: data.patterns.burst_stats.p95_events,
-            burst_max: data.patterns.burst_stats.max_events
-        },
-        tables: data.tables
-            .filter(t => t.faults > 0 || t.cursor_ops > 0)
-            .map(t => ({
-                name: t.name,
-                category: t.category,
-                faults: t.faults,
-                major_faults: t.major_faults,
-                fault_percentage: t.percentage,
-                cursor_ops: t.cursor_ops,
-                faults_per_op: t.cursor_ops > 0 ? (t.faults / t.cursor_ops) : null,
-                correlation_method: t.faults_correlated ? 'direct' : 'estimated'
-            })),
-        cursor_ops: data.cursor_data && data.cursor_data.has_data ? {
-            total_ops: data.cursor_data.summary.total_ops,
-            rate_per_sec: data.cursor_data.summary.op_rate_per_sec,
-            seek_count: data.cursor_data.summary.seek_count,
-            seek_ratio: data.cursor_data.summary.seek_ratio,
-            nav_count: data.cursor_data.summary.nav_count,
-            direct_get_count: data.cursor_data.summary.direct_get_count,
-            error_count: data.cursor_data.summary.error_count,
-            latency_avg_us: data.cursor_data.summary.avg_latency_us,
-            latency_p50_us: data.cursor_data.summary.p50_latency_us,
-            latency_p99_us: data.cursor_data.summary.p99_latency_us,
-            by_operation: data.cursor_data.operations
-                .filter(o => o.count > 0)
-                .map(o => ({
-                    name: o.name,
-                    count: o.count,
-                    percentage: o.percentage,
-                    avg_latency_us: o.avg_latency_us
-                })),
-            top_tables: data.cursor_data.table_stats
-                .filter(t => t.ops > 0)
-                .slice(0, 15)
-                .map(t => ({
-                    name: t.name,
-                    ops: t.ops,
-                    percentage: t.percentage,
-                    avg_latency_us: t.avg_latency_us,
-                    seeks: t.seeks,
-                    navs: t.navs
-                }))
-        } : null,
-        transactions: data.txn_data && data.txn_data.has_data ? {
-            total_txns: data.txn_data.summary.begin_count,
-            rate_per_sec: data.txn_data.summary.txn_rate_per_sec,
-            ro_count: data.txn_data.summary.ro_count,
-            rw_count: data.txn_data.summary.rw_count,
-            ro_ratio: data.txn_data.summary.ro_count / Math.max(1, data.txn_data.summary.begin_count),
-            commit_count: data.txn_data.summary.commit_count,
-            abort_count: data.txn_data.summary.abort_count,
-            commit_latency_avg_us: data.txn_data.summary.avg_commit_latency_us,
-            commit_latency_p50_us: data.txn_data.summary.p50_commit_latency_us,
-            commit_latency_p99_us: data.txn_data.summary.p99_commit_latency_us,
-            commit_latency_max_us: data.txn_data.summary.max_commit_latency_us,
-            concurrency: {
-                max_concurrent_ro: data.txn_data.concurrency.max_concurrent_ro,
-                max_concurrent_rw: data.txn_data.concurrency.max_concurrent_rw,
-                max_concurrent_total: data.txn_data.concurrency.max_concurrent_total,
-                avg_concurrent_ro: data.txn_data.concurrency.avg_concurrent_ro
-            },
-            top_threads: data.txn_data.thread_stats
-                .slice(0, 15)
-                .map(t => ({
-                    tid: t.tid,
-                    total: t.total_txns,
-                    ro: t.ro_txns,
-                    rw: t.rw_txns,
-                    commits: t.commits,
-                    aborts: t.aborts,
-                    avg_commit_latency_us: t.avg_commit_latency_us
-                }))
-        } : null,
-        slow_operations: data.cursor_data && data.cursor_data.slow_ops_by_table ?
-            data.cursor_data.slow_ops_by_table.slice(0, 15).map(s => ({
-                table: s.table,
-                dbi: s.dbi,
-                slow_count: s.slow_op_count,
-                total_count: s.total_op_count,
-                slow_percentage: s.slow_op_percentage,
-                avg_slow_latency_us: s.avg_slow_latency_us,
-                max_latency_us: s.max_latency_us,
-                total_slow_time_ms: s.total_slow_time_ms,
-                by_operation: s.by_operation
-            })) : [],
-        slow_keys: data.cursor_data && data.cursor_data.slow_keys ?
-            data.cursor_data.slow_keys.slice(0, 20).map(k => ({
-                key_hex: k.key_hex,
-                table: k.table_name,
-                total_accesses: k.total_accesses,
-                slow_accesses: k.slow_accesses,
-                slow_ratio: k.slow_accesses / k.total_accesses,
-                operations: k.operations
-            })) : [],
-        thread_distribution: data.threads.slice(0, 20).map(t => ({
-            tid: t.tid,
-            faults: t.faults,
-            percentage: t.percentage
-        })),
-        insights: insights
-    };
-
-    return compact;
 }
 
-function downloadCompactExport() {
-    const compact = generateCompactExport();
-    const json = JSON.stringify(compact, null, 2);
-    const blob = new Blob([json], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'mdbx-trace-analysis.json';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-}
-
-function init() {
-    // Tab switching with lazy initialization
-    document.querySelectorAll('.tab').forEach(tab => {
-        tab.addEventListener('click', () => {
-            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-            document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-            tab.classList.add('active');
-            const panel = document.getElementById(tab.dataset.tab);
-            panel.classList.add('active');
-
-            // Initialize tab charts after panel is visible
-            requestAnimationFrame(() => {
-                initTab(tab.dataset.tab);
-            });
-        });
-    });
-
-    // Export button
-    document.getElementById('export-compact-btn').addEventListener('click', downloadCompactExport);
-
-    // Initialize summary tab (it's visible by default)
-    initTab('summary');
-}
-
-// Run on load
-document.addEventListener('DOMContentLoaded', init);
+// Init overview on load
+initTab('overview');
 "##;
