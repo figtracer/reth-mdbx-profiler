@@ -1299,11 +1299,11 @@ function drawIOTimeChart(canvas, labels, timeMs, slowOps) {
         const barW = (time / max) * chartW;
         const y = pad.t + i * (barHeight + barGap);
 
-        // Gradient from orange to red based on severity
-        const intensity = time / max;
-        const r = Math.floor(251 - intensity * 50);
-        const g = Math.floor(146 - intensity * 80);
-        const b = Math.floor(60 - intensity * 40);
+        // Blue to purple gradient based on position (matches app theme)
+        const t = i / (labels.length - 1 || 1);
+        const r = Math.floor(96 + t * (129 - 96));    // 60 -> 81 (hex)
+        const g = Math.floor(165 + t * (140 - 165));  // a5 -> 8c
+        const b = Math.floor(250 + t * (248 - 250));  // fa -> f8
         ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
         ctx.fillRect(pad.l, y, barW, barHeight);
 
