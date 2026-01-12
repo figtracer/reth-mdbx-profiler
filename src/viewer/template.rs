@@ -233,7 +233,7 @@ pub fn generate_html(data: &ViewerData) -> String {
                             </div>
                         </div>
                         <div class="card">
-                            <div class="card-header">RW Commit Latency Timeline <span class="axis-hint">(drag to zoom, dbl-click to reset)</span></div>
+                            <div class="card-header">RW Commit Latency (ms) <span class="axis-hint">(drag to zoom, dbl-click to reset)</span></div>
                             <div class="card-body">
                                 <div class="latency-stats" style="margin-bottom: 16px;">
                                     <div class="lat-stat">
@@ -257,7 +257,7 @@ pub fn generate_html(data: &ViewerData) -> String {
                                         <span class="lat-value major" id="txn-max-latency"></span>
                                     </div>
                                 </div>
-                                <div class="uplot-container" id="txn-latency-chart" style="height: 140px;">
+                                <div class="uplot-container" id="txn-latency-chart" style="height: 180px;">
                                 </div>
                             </div>
                         </div>
@@ -1000,10 +1000,11 @@ function createCommitTimelineChart(container, commitData, opts = {}) {
                 grid: { stroke: '#1e1e2a', width: 1 },
                 ticks: { stroke: '#1e1e2a', width: 1 },
                 font: '11px sans-serif',
-                size: 55,
+                size: 50,
                 values: (u, vals) => vals.map(v => {
-                    if (v < 1) return v.toFixed(2) + 'ms';
-                    if (v < 1000) return v.toFixed(0) + 'ms';
+                    if (v === 0) return '0';
+                    if (v < 1) return v.toFixed(1);
+                    if (v < 1000) return v.toFixed(0);
                     return (v / 1000).toFixed(1) + 's';
                 })
             }
