@@ -73,12 +73,20 @@ fi
 
 # auto-detect pid
 if [ -z "$PID" ]; then
+    # try reth first
     PID=$(pgrep -x reth 2>/dev/null | head -1 || echo "")
+
+    # if not found and reth-binary specified, try that binary name
+    if [ -z "$PID" ] && [ -n "$RETH_BINARY" ]; then
+        BINARY_NAME=$(basename "$RETH_BINARY")
+        PID=$(pgrep -x "$BINARY_NAME" 2>/dev/null | head -1 || echo "")
+    fi
+
     if [ -z "$PID" ]; then
         echo "error: could not find reth process. use --pid"
         exit 1
     fi
-    echo "detected reth pid: $PID"
+    echo "detected pid: $PID"
 fi
 
 # check profiler exists
