@@ -275,8 +275,10 @@ pub struct ViewerData {
     pub summary: TraceSummary,
     /// Timeline data (sampled for performance)
     pub timeline: Vec<TimelinePoint>,
-    /// Table breakdown
+    /// Table breakdown (legacy - kept for compatibility)
     pub tables: Vec<TableStats>,
+    /// Unified table view with drill-down (new)
+    pub unified_tables: Vec<UnifiedTableStats>,
     /// Thread distribution
     pub threads: Vec<ThreadStats>,
 
@@ -599,6 +601,59 @@ pub struct TableStats {
     pub faults_correlated: bool,
 }
 
+/// Unified table view combining faults, operations, and slow ops data
+#[derive(Debug, Serialize)]
+pub struct UnifiedTableStats {
+    pub name: String,
+    pub dbi: u32,
+    // Fault data (physical layer)
+    pub faults: u64,
+    pub major_faults: u64,
+    pub fault_percentage: f64,
+    // Operation data (logical layer)
+    pub total_ops: u64,
+    pub slow_ops: u64,
+    pub slow_ops_percentage: f64,
+    pub time_lost_ms: f64,
+    pub avg_latency_us: f64,
+    pub max_latency_us: f64,
+    // Top operation causing faults/slowness
+    pub top_operation: String,
+    // Drill-down details
+    pub details: TableDrillDown,
+}
+
+/// Drill-down details for a table
+#[derive(Debug, Serialize)]
+pub struct TableDrillDown {
+    /// Faults by operation type (CURSOR_GET, CURSOR_PUT, etc.)
+    pub faults_by_op: Vec<OpFaultCount>,
+    /// Faults by cursor operation (SET_RANGE, NEXT, etc.)
+    pub faults_by_cursor_op: Vec<OpFaultCount>,
+    /// Slow operations breakdown
+    pub slow_ops_breakdown: Vec<SlowOpBreakdown>,
+    /// Hot keys for this table
+    pub hot_keys: Vec<TableHotKey>,
+}
+
+/// Fault count for an operation type
+#[derive(Debug, Serialize)]
+pub struct OpFaultCount {
+    pub operation: String,
+    pub faults: u64,
+    pub major_faults: u64,
+}
+
+/// Hot key entry for a specific table
+#[derive(Debug, Serialize)]
+pub struct TableHotKey {
+    pub key_hex: String,
+    pub slow_count: u64,
+    pub total_count: u64,
+    pub avg_latency_us: f64,
+    pub max_latency_us: f64,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ThreadStats {
     pub tid: u32,
@@ -687,6 +742,7 @@ pub fn generate_viewer_data(
             },
             timeline: vec![],
             tables: vec![],
+            unified_tables: vec![],
             threads: vec![],
 
             patterns: PatternAnalysis {
@@ -785,10 +841,14 @@ pub fn generate_viewer_data(
     // Generate direct fault attribution data from page faults with active_op info
     let direct_fault_attribution = generate_direct_fault_attribution(&page_faults, &correlation);
 
+    // Generate unified table stats combining faults + slow ops
+    let unified_tables = generate_unified_table_stats(&page_faults, &correlation, &cursor_data);
+
     ViewerData {
         summary,
         timeline,
         tables,
+        unified_tables,
         threads,
 
         patterns,
@@ -898,6 +958,236 @@ fn generate_direct_fault_attribution(
         uncorrelated_count: correlation.uncorrelated_faults,
         faults_by_op_type: faults_by_op_type_vec,
         faults_by_cursor_op: faults_by_cursor_op_vec,
+    }
+}
+
+/// Generate unified table stats combining fault data with slow ops data.
+/// This creates a single view per table with all relevant metrics for the Tables tab.
+fn generate_unified_table_stats(
+    page_faults: &[&PageFaultEvent],
+    correlation: &FaultCorrelation,
+    cursor_data: &CursorData,
+) -> Vec<UnifiedTableStats> {
+    use crate::event::CursorOp;
+
+    // Build a map of table name -> slow ops data
+    let slow_ops_by_name: HashMap<String, &SlowOpsTableStats> = cursor_data
+        .slow_ops_by_table
+        .iter()
+        .map(|s| (s.table.clone(), s))
+        .collect();
+
+    // Build a map of table name -> cursor table stats (for total ops)
+    let cursor_stats_by_name: HashMap<String, &CursorTableStats> = cursor_data
+        .table_stats
+        .iter()
+        .map(|s| (s.name.clone(), s))
+        .collect();
+
+    // Build a map of table name -> hot keys
+    let mut hot_keys_by_table: HashMap<String, Vec<&SlowKeyStats>> = HashMap::new();
+    for key in &cursor_data.slow_keys {
+        hot_keys_by_table
+            .entry(key.table.clone())
+            .or_default()
+            .push(key);
+    }
+
+    // Build per-table fault breakdown by operation type and cursor op
+    // Key: (table_name, op_type) -> (faults, major_faults)
+    let mut faults_by_table_op: HashMap<(String, u32), (u64, u64)> = HashMap::new();
+    // Key: (table_name, cursor_op) -> (faults, major_faults)
+    let mut faults_by_table_cursor_op: HashMap<(String, u32), (u64, u64)> = HashMap::new();
+
+    for fault in page_faults {
+        if fault.has_active_op() {
+            let table_name = if fault.active_dbi < 100 {
+                dbi_to_table_name(fault.active_dbi).to_string()
+            } else {
+                continue; // Skip unknown tables for unified view
+            };
+            let is_major = fault.is_major_fault();
+
+            // Count by (table, op_type)
+            let entry = faults_by_table_op
+                .entry((table_name.clone(), fault.active_op_type))
+                .or_insert((0, 0));
+            entry.0 += 1;
+            if is_major {
+                entry.1 += 1;
+            }
+
+            // For CURSOR_GET, also count by cursor op
+            if fault.active_op_type == 3 {
+                let cursor_entry = faults_by_table_cursor_op
+                    .entry((table_name, fault.active_cursor_op))
+                    .or_insert((0, 0));
+                cursor_entry.0 += 1;
+                if is_major {
+                    cursor_entry.1 += 1;
+                }
+            }
+        }
+    }
+
+    let total_faults = page_faults.len() as u64;
+
+    // Build unified stats from correlated_faults
+    let mut unified: Vec<UnifiedTableStats> = correlation
+        .correlated_faults
+        .iter()
+        .filter_map(|(table_name, (faults, major_faults))| {
+            // Skip unknown/pre-trace tables
+            if table_name.starts_with("Unknown") {
+                return None;
+            }
+
+            // Get DBI for this table
+            let dbi = table_name_to_dbi(table_name);
+
+            // Get slow ops data
+            let slow_data = slow_ops_by_name.get(table_name);
+            let cursor_stats = cursor_stats_by_name.get(table_name);
+
+            // Build faults by operation type for this table
+            let op_type_names = [
+                (3, "CURSOR_GET"),
+                (4, "CURSOR_PUT"),
+                (5, "DIRECT_GET"),
+                (6, "CURSOR_DEL"),
+                (10, "DIRECT_PUT"),
+                (11, "DIRECT_DEL"),
+            ];
+            let mut faults_by_op: Vec<OpFaultCount> = op_type_names
+                .iter()
+                .filter_map(|(op_type, name)| {
+                    faults_by_table_op
+                        .get(&(table_name.clone(), *op_type))
+                        .map(|(f, m)| OpFaultCount {
+                            operation: name.to_string(),
+                            faults: *f,
+                            major_faults: *m,
+                        })
+                })
+                .filter(|o| o.faults > 0)
+                .collect();
+            faults_by_op.sort_by(|a, b| b.faults.cmp(&a.faults));
+
+            // Build faults by cursor operation for this table
+            let mut faults_by_cursor_op: Vec<OpFaultCount> = faults_by_table_cursor_op
+                .iter()
+                .filter(|((t, _), _)| t == table_name)
+                .map(|((_, cursor_op), (f, m))| {
+                    let op = CursorOp::from_raw(*cursor_op);
+                    OpFaultCount {
+                        operation: op.name().to_string(),
+                        faults: *f,
+                        major_faults: *m,
+                    }
+                })
+                .filter(|o| o.faults > 0)
+                .collect();
+            faults_by_cursor_op.sort_by(|a, b| b.faults.cmp(&a.faults));
+
+            // Get slow ops breakdown
+            let slow_ops_breakdown: Vec<SlowOpBreakdown> = slow_data
+                .map(|s| s.by_operation.clone())
+                .unwrap_or_default();
+
+            // Get hot keys for this table
+            let hot_keys: Vec<TableHotKey> = hot_keys_by_table
+                .get(table_name)
+                .map(|keys| {
+                    keys.iter()
+                        .take(5)
+                        .map(|k| TableHotKey {
+                            key_hex: k.key_hex.clone(),
+                            slow_count: k.slow_access_count,
+                            total_count: k.total_access_count,
+                            avg_latency_us: k.avg_latency_us,
+                            max_latency_us: k.max_latency_us,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            // Determine top operation (most faults or most slow)
+            let top_operation = faults_by_op
+                .first()
+                .map(|o| o.operation.clone())
+                .or_else(|| slow_ops_breakdown.first().map(|o| o.operation.clone()))
+                .unwrap_or_default();
+
+            Some(UnifiedTableStats {
+                name: table_name.clone(),
+                dbi,
+                faults: *faults,
+                major_faults: *major_faults,
+                fault_percentage: if total_faults > 0 {
+                    *faults as f64 / total_faults as f64 * 100.0
+                } else {
+                    0.0
+                },
+                total_ops: cursor_stats.map(|s| s.ops).unwrap_or(0),
+                slow_ops: slow_data.map(|s| s.slow_op_count).unwrap_or(0),
+                slow_ops_percentage: slow_data.map(|s| s.slow_op_percentage).unwrap_or(0.0),
+                time_lost_ms: slow_data.map(|s| s.total_slow_time_ms).unwrap_or(0.0),
+                avg_latency_us: slow_data.map(|s| s.avg_slow_latency_us).unwrap_or(0.0),
+                max_latency_us: slow_data.map(|s| s.max_latency_us).unwrap_or(0.0),
+                top_operation,
+                details: TableDrillDown {
+                    faults_by_op,
+                    faults_by_cursor_op,
+                    slow_ops_breakdown,
+                    hot_keys,
+                },
+            })
+        })
+        .collect();
+
+    // Sort by time lost (most impactful first), then by faults
+    unified.sort_by(|a, b| {
+        b.time_lost_ms
+            .partial_cmp(&a.time_lost_ms)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| b.faults.cmp(&a.faults))
+    });
+
+    unified
+}
+
+/// Convert table name back to DBI
+fn table_name_to_dbi(name: &str) -> u32 {
+    match name {
+        "CanonicalHeaders" => 2,
+        "HeaderTerminalDifficulties" => 3,
+        "HeaderNumbers" => 4,
+        "Headers" => 5,
+        "BlockBodyIndices" => 6,
+        "BlockOmmers" => 7,
+        "BlockWithdrawals" => 8,
+        "Transactions" => 9,
+        "TransactionHashNumbers" => 10,
+        "TransactionBlocks" => 11,
+        "Receipts" => 12,
+        "Bytecodes" => 13,
+        "PlainAccountState" => 14,
+        "PlainStorageState" => 15,
+        "AccountChangeSets" => 16,
+        "StorageChangeSets" => 17,
+        "AccountsHistory" => 18,
+        "StoragesHistory" => 19,
+        "HashedAccounts" => 20,
+        "HashedStorages" => 21,
+        "AccountsTrie" => 22,
+        "StoragesTrie" => 23,
+        "TransactionSenders" => 24,
+        "StageCheckpoints" => 25,
+        "StageCheckpointProgresses" => 26,
+        "PruneCheckpoints" => 27,
+        "AccountsTrieChangeSets" => 28,
+        "StoragesTrieChangeSets" => 29,
+        _ => 0,
     }
 }
 

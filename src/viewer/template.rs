@@ -23,15 +23,15 @@ pub fn generate_html(data: &ViewerData) -> String {
 <body>
     <div id="app">
         <nav class="tabs">
-            <button class="tab active" data-tab="overview">Overview</button>
-            <button class="tab" data-tab="cursors">Cursor Ops</button>
-            <button class="tab" data-tab="transactions">MDBX Txns</button>
+            <button class="tab active" data-tab="physical">Physical</button>
+            <button class="tab" data-tab="tables">Tables</button>
+            <button class="tab" data-tab="transactions">Transactions</button>
             <button class="export-btn" id="export-compact-btn" title="Download JSON for analysis">Export</button>
         </nav>
 
         <main>
-            <!-- OVERVIEW TAB -->
-            <section id="overview" class="panel active">
+            <!-- PHYSICAL TAB -->
+            <section id="physical" class="panel active">
                 <!-- Top metrics row -->
                 <div class="metrics-row">
                     <div class="metric">
@@ -80,30 +80,11 @@ pub fn generate_html(data: &ViewerData) -> String {
                     </div>
                 </div>
 
-                <!-- Tables and Patterns side by side -->
-                <div class="two-col">
-                    <div class="card">
-                        <div class="card-header">
-                            Page Faults by Table
-                            <span class="card-badge" id="correlation-badge"></span>
-                        </div>
-                        <div class="card-body compact-table-container">
-                            <table class="compact-table" id="tables-table">
-                                <thead>
-                                    <tr>
-                                        <th>Table</th>
-                                        <th>Faults</th>
-                                        <th>Major</th>
-                                        <th>%</th>
-                                    </tr>
-                                </thead>
-                                <tbody></tbody>
-                            </table>
-                        </div>
-                    </div>
-                    <div class="card">
-                        <div class="card-header">Access Patterns</div>
-                        <div class="card-body">
+                <!-- Access Patterns -->
+                <div class="card full-width">
+                    <div class="card-header">Access Patterns</div>
+                    <div class="card-body">
+                        <div class="three-col">
                             <div class="pattern-section">
                                 <div class="pattern-bar">
                                     <span class="pattern-label">Sequential</span>
@@ -131,163 +112,41 @@ pub fn generate_html(data: &ViewerData) -> String {
                         </div>
                     </div>
                 </div>
-
-                <!-- Direct Fault Attribution (when available) -->
-                <div id="direct-attribution-section" class="card full-width" style="display:none;">
-                    <div class="card-header">
-                        Page Faults by Operation Type
-                        <span class="card-badge direct-badge">Direct BPF Attribution</span>
-                    </div>
-                    <div class="card-body">
-                        <div class="attribution-summary" id="attribution-summary"></div>
-                        <div class="two-col">
-                            <div>
-                                <div class="section-title">By Operation Type</div>
-                                <div class="compact-table-container" style="max-height:200px;">
-                                    <table class="compact-table" id="faults-by-op-type-table">
-                                        <thead>
-                                            <tr><th>Operation</th><th>Faults</th><th>Major</th><th>%</th></tr>
-                                        </thead>
-                                        <tbody></tbody>
-                                    </table>
-                                </div>
-                            </div>
-                            <div>
-                                <div class="section-title">By Cursor Operation (GET only)</div>
-                                <div class="compact-table-container" style="max-height:200px;">
-                                    <table class="compact-table" id="faults-by-cursor-op-table">
-                                        <thead>
-                                            <tr><th>Cursor Op</th><th>Faults</th><th>Major</th><th>%</th></tr>
-                                        </thead>
-                                        <tbody></tbody>
-                                    </table>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
             </section>
 
-            <!-- CURSOR OPS TAB -->
-            <section id="cursors" class="panel">
-                <div id="cursor-no-data" class="no-data">
-                    No cursor data. Run with <code>--trace-cursors</code>
+            <!-- TABLES TAB -->
+            <section id="tables" class="panel">
+                <div id="tables-no-data" class="no-data" style="display:none;">
+                    No table data. Run with <code>--trace-cursors</code> for full attribution.
                 </div>
-                <div id="cursor-content">
-                    <!-- Cursor metrics -->
-                    <div class="metrics-row">
-                        <div class="metric">
-                            <span class="metric-value" id="cursor-total-ops"></span>
-                            <span class="metric-label">Total Ops</span>
-                        </div>
-                        <div class="metric">
-                            <span class="metric-value" id="cursor-op-rate"></span>
-                            <span class="metric-label">Ops/sec</span>
-                        </div>
-                        <div class="metric">
-                            <span class="metric-value" id="cursor-avg-latency"></span>
-                            <span class="metric-label">Avg Latency</span>
-                        </div>
-                        <div class="metric">
-                            <span class="metric-value" id="cursor-p50-latency"></span>
-                            <span class="metric-label">p50</span>
-                        </div>
-                        <div class="metric">
-                            <span class="metric-value major" id="cursor-p95-latency"></span>
-                            <span class="metric-label">p95</span>
-                        </div>
-                        <div class="metric">
-                            <span class="metric-value major" id="cursor-p99-latency"></span>
-                            <span class="metric-label">p99</span>
-                        </div>
-                        <div class="metric">
-                            <span class="metric-value" id="cursor-seeks"></span>
-                            <span class="metric-label">Seeks</span>
-                        </div>
-                        <div class="metric">
-                            <span class="metric-value minor" id="cursor-navs"></span>
-                            <span class="metric-label">Navigation</span>
-                        </div>
-                    </div>
 
-                    <!-- Two columns: Ops by type + Ops by table -->
-                    <div class="two-col">
-                        <div class="card">
-                            <div class="card-header">Operations by Type</div>
-                            <div class="card-body chart-container">
-                                <canvas id="cursor-ops-chart"></canvas>
-                            </div>
-                        </div>
-                        <div class="card">
-                            <div class="card-header">Operations by Table</div>
-                            <div class="card-body chart-container">
-                                <canvas id="cursor-tables-chart"></canvas>
-                            </div>
-                        </div>
-                    </div>
+                <!-- Attribution summary -->
+                <div class="attribution-header" id="tables-attribution-header">
+                    <span class="card-badge direct-badge">Direct BPF Attribution</span>
+                    <span class="attribution-summary" id="tables-attribution-summary"></span>
+                </div>
 
-                    <!-- Table details -->
-                    <div class="card full-width">
-                        <div class="card-header">Table Access Details</div>
-                        <div class="card-body compact-table-container">
-                            <table class="compact-table" id="cursor-tables-table">
-                                <thead>
-                                    <tr>
-                                        <th>Table</th>
-                                        <th>Ops</th>
-                                        <th>Seeks</th>
-                                        <th>Nav</th>
-                                        <th>Avg</th>
-                                        <th>p50</th>
-                                        <th>p95</th>
-                                        <th>p99</th>
-                                    </tr>
-                                </thead>
-                                <tbody></tbody>
-                            </table>
-                        </div>
+                <!-- Unified table with expandable rows -->
+                <div class="card full-width">
+                    <div class="card-header">
+                        I/O Impact by Table
+                        <span class="card-hint">Click row to expand details</span>
                     </div>
-
-                    <!-- Slow operations - THE KEY INSIGHT -->
-                    <div class="card full-width highlight">
-                        <div class="card-header">Slow Operations (&gt;100μs) - Likely Page Faults</div>
-                        <div class="card-body compact-table-container">
-                            <table class="compact-table" id="slow-ops-table">
-                                <thead>
-                                    <tr>
-                                        <th>Table</th>
-                                        <th>Slow</th>
-                                        <th>Total</th>
-                                        <th>%</th>
-                                        <th>Avg Slow</th>
-                                        <th>Max</th>
-                                        <th>Time Lost</th>
-                                        <th>Top Operations</th>
-                                    </tr>
-                                </thead>
-                                <tbody></tbody>
-                            </table>
-                        </div>
-                    </div>
-
-                    <!-- Slow keys -->
-                    <div class="card full-width">
-                        <div class="card-header">Hot Keys (Frequently Slow)</div>
-                        <div class="card-body compact-table-container" style="max-height: 350px;">
-                            <table class="compact-table" id="slow-keys-table">
-                                <thead>
-                                    <tr>
-                                        <th>Table</th>
-                                        <th>Key</th>
-                                        <th>Slow</th>
-                                        <th>Total</th>
-                                        <th>Avg</th>
-                                        <th>Max</th>
-                                    </tr>
-                                </thead>
-                                <tbody></tbody>
-                            </table>
-                        </div>
+                    <div class="card-body compact-table-container" style="max-height: none;">
+                        <table class="compact-table expandable-table" id="unified-tables">
+                            <thead>
+                                <tr>
+                                    <th style="width:30px;"></th>
+                                    <th>Table</th>
+                                    <th>Faults</th>
+                                    <th>Major</th>
+                                    <th>Slow Ops</th>
+                                    <th>Time Lost</th>
+                                    <th>Top Operation</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
                     </div>
                 </div>
             </section>
@@ -530,11 +389,6 @@ body {
 
 .card.full-width { grid-column: 1 / -1; }
 
-.card.highlight {
-    border-color: #f87171;
-    box-shadow: 0 0 24px rgba(248, 113, 113, 0.15);
-}
-
 .card-header {
     padding: 12px 16px;
     background: #000000;
@@ -566,6 +420,121 @@ body {
 .attribution-summary {
     font-size: 13px;
     color: #d4d4d8;
+}
+
+.attribution-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+    padding: 12px 16px;
+    background: #12121a;
+    border-radius: 8px;
+}
+
+.card-hint {
+    font-size: 11px;
+    color: #52525b;
+    font-weight: 400;
+    text-transform: none;
+    margin-left: auto;
+}
+
+.three-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 24px;
+}
+
+/* Expandable table rows */
+.expandable-table tbody tr.table-row {
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.expandable-table tbody tr.table-row:hover {
+    background: #1a1a24;
+}
+
+.expandable-table .expand-icon {
+    display: inline-block;
+    width: 16px;
+    text-align: center;
+    color: #52525b;
+    transition: transform 0.2s;
+}
+
+.expandable-table tr.table-row.expanded .expand-icon {
+    transform: rotate(90deg);
+    color: #3b82f6;
+}
+
+.expandable-table tr.details-row {
+    background: #0a0a10;
+}
+
+.expandable-table tr.details-row td {
+    padding: 0;
+    border-bottom: 2px solid #2a2a3a;
+}
+
+.expandable-table tr.details-row.hidden {
+    display: none;
+}
+
+.details-content {
+    padding: 16px 24px;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 20px;
+}
+
+.details-section {
+    background: #12121a;
+    border-radius: 6px;
+    padding: 12px;
+}
+
+.details-section-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: #3b82f6;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 8px;
+}
+
+.details-list {
+    font-size: 12px;
+}
+
+.details-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0;
+    border-bottom: 1px solid #1e1e2a;
+}
+
+.details-item:last-child {
+    border-bottom: none;
+}
+
+.details-item-name {
+    color: #a1a1aa;
+}
+
+.details-item-value {
+    color: #e4e4e7;
+    font-variant-numeric: tabular-nums;
+}
+
+.details-item-value.major {
+    color: #f87171;
+}
+
+.time-lost {
+    color: #fbbf24;
+    font-weight: 500;
 }
 
 .axis-hint {
@@ -662,17 +631,15 @@ body {
     white-space: nowrap;
 }
 
-.compact-table thead {
+.compact-table thead th {
     position: sticky;
     top: 0;
     z-index: 10;
-}
-
-.compact-table th {
     background: #0f0f17;
     font-weight: 600;
     color: #3b82f6;
     border-bottom: 2px solid #2a2a3a;
+    box-shadow: 0 1px 0 #2a2a3a;
 }
 
 .compact-table tbody tr:hover { background: #1a1a24; }
@@ -801,19 +768,6 @@ body {
 }
 
 .lat-value.major { color: #f87171; }
-
-/* Centered latency card */
-.latency-card-body {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    min-height: 200px;
-}
-
-.latency-stats.centered {
-    justify-content: center;
-    gap: 32px;
-}
 
 /* No data state */
 .no-data {
@@ -1240,12 +1194,12 @@ function initTab(name) {
     if (initialized[name]) return;
     initialized[name] = true;
 
-    if (name === 'overview') initOverview();
-    else if (name === 'cursors') initCursors();
+    if (name === 'physical') initPhysical();
+    else if (name === 'tables') initTables();
     else if (name === 'transactions') initTxns();
 }
 
-function initOverview() {
+function initPhysical() {
     const s = DATA.summary;
 
     // Metrics
@@ -1336,61 +1290,6 @@ function initOverview() {
         });
     }
 
-    // Tables
-    const tbody = document.querySelector('#tables-table tbody');
-    DATA.tables.forEach(t => {
-        const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${t.name}</td><td>${fmt(t.faults)}</td><td>${fmt(t.major_faults)}</td><td>${t.percentage.toFixed(1)}%</td>`;
-        tbody.appendChild(tr);
-    });
-
-    // Correlation badge - update based on attribution method
-    const dfa = DATA.direct_fault_attribution;
-    if (dfa && dfa.has_data) {
-        const badge = document.getElementById('correlation-badge');
-        badge.textContent = 'Direct BPF';
-        badge.classList.add('direct-badge');
-        badge.title = `${fmt(dfa.directly_attributed_count)} faults attributed with 100% accuracy`;
-    } else if (DATA.page_fault_attribution_warning) {
-        document.getElementById('correlation-badge').textContent = 'Timestamp Correlated';
-    }
-
-    // Direct fault attribution section
-    if (dfa && dfa.has_data) {
-        document.getElementById('direct-attribution-section').style.display = 'block';
-
-        // Attribution summary
-        const total = dfa.directly_attributed_count + dfa.timestamp_fallback_count + dfa.uncorrelated_count;
-        const directPct = (dfa.directly_attributed_count / total * 100).toFixed(1);
-        document.getElementById('attribution-summary').innerHTML = `
-            <div style="display:flex;gap:20px;margin-bottom:12px;">
-                <span><strong>${fmt(dfa.directly_attributed_count)}</strong> directly attributed (${directPct}%)</span>
-                <span style="color:#71717a;">${fmt(dfa.timestamp_fallback_count)} timestamp fallback</span>
-                <span style="color:#71717a;">${fmt(dfa.uncorrelated_count)} uncorrelated</span>
-            </div>
-        `;
-
-        // Faults by operation type
-        const opTypeTbody = document.querySelector('#faults-by-op-type-table tbody');
-        dfa.faults_by_op_type.forEach(t => {
-            const tr = document.createElement('tr');
-            tr.innerHTML = `<td>${t.op_type}</td><td>${fmt(t.total_faults)}</td><td>${fmt(t.major_faults)}</td><td>${t.percentage.toFixed(1)}%</td>`;
-            opTypeTbody.appendChild(tr);
-        });
-
-        // Faults by cursor operation
-        const cursorOpTbody = document.querySelector('#faults-by-cursor-op-table tbody');
-        if (dfa.faults_by_cursor_op && dfa.faults_by_cursor_op.length > 0) {
-            dfa.faults_by_cursor_op.forEach(t => {
-                const tr = document.createElement('tr');
-                tr.innerHTML = `<td>${t.cursor_op}</td><td>${fmt(t.total_faults)}</td><td>${fmt(t.major_faults)}</td><td>${t.percentage.toFixed(1)}%</td>`;
-                cursorOpTbody.appendChild(tr);
-            });
-        } else {
-            cursorOpTbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:#71717a;">No CURSOR_GET faults</td></tr>';
-        }
-    }
-
     // Access patterns
     const seqPct = (DATA.patterns.sequential_ratio * 100);
     const randPct = (DATA.patterns.random_ratio * 100);
@@ -1425,60 +1324,122 @@ function initOverview() {
     });
 }
 
-function initCursors() {
-    const c = DATA.cursor_data;
-    if (!c.has_data) {
-        document.getElementById('cursor-no-data').style.display = 'block';
-        document.getElementById('cursor-content').style.display = 'none';
+function initTables() {
+    const unified = DATA.unified_tables;
+    const dfa = DATA.direct_fault_attribution;
+
+    if (!unified || unified.length === 0) {
+        document.getElementById('tables-no-data').style.display = 'block';
+        document.getElementById('tables-attribution-header').style.display = 'none';
         return;
     }
 
-    document.getElementById('cursor-no-data').style.display = 'none';
-    document.getElementById('cursor-content').style.display = 'block';
+    // Attribution summary
+    if (dfa && dfa.has_data) {
+        const total = dfa.directly_attributed_count + dfa.timestamp_fallback_count + dfa.uncorrelated_count;
+        const directPct = (dfa.directly_attributed_count / total * 100).toFixed(1);
+        document.getElementById('tables-attribution-summary').innerHTML =
+            `<strong>${fmt(dfa.directly_attributed_count)}</strong> directly attributed (${directPct}%) · ` +
+            `${fmt(dfa.uncorrelated_count)} uncorrelated`;
+    }
 
-    const s = c.summary;
-    document.getElementById('cursor-total-ops').textContent = fmt(s.total_ops);
-    document.getElementById('cursor-op-rate').textContent = fmt(s.op_rate_per_sec);
-    document.getElementById('cursor-avg-latency').textContent = fmtLat(s.avg_latency_us);
-    document.getElementById('cursor-p50-latency').textContent = fmtLat(s.p50_latency_us);
-    document.getElementById('cursor-p95-latency').textContent = fmtLat(s.p95_latency_us);
-    document.getElementById('cursor-p99-latency').textContent = fmtLat(s.p99_latency_us);
-    document.getElementById('cursor-seeks').textContent = fmt(s.seek_count);
-    document.getElementById('cursor-navs').textContent = fmt(s.nav_count);
+    // Build unified table with expandable rows
+    const tbody = document.querySelector('#unified-tables tbody');
 
-    // Operations chart - horizontal bars (blue scheme)
-    const ops = c.operations.slice(0, 8);
-    new Chart(document.getElementById('cursor-ops-chart'))
-        .drawHorizontalBar(ops.map(o => o.name), ops.map(o => o.count), '#3b82f6');
-
-    // Tables chart - horizontal bars (light blue)
-    const tables = c.table_stats.slice(0, 8);
-    new Chart(document.getElementById('cursor-tables-chart'))
-        .drawHorizontalBar(tables.map(t => t.name), tables.map(t => t.ops), '#60a5fa');
-
-    // Table details
-    const tbody = document.querySelector('#cursor-tables-table tbody');
-    c.table_stats.forEach(t => {
+    unified.forEach((t, idx) => {
+        // Main row
         const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${t.name}</td><td>${fmt(t.ops)}</td><td>${fmt(t.seeks)}</td><td>${fmt(t.navs)}</td><td>${fmtLat(t.avg_latency_us)}</td><td>${fmtLat(t.p50_latency_us)}</td><td>${fmtLat(t.p95_latency_us)}</td><td>${fmtLat(t.p99_latency_us)}</td>`;
+        tr.className = 'table-row';
+        tr.dataset.idx = idx;
+
+        const timeLost = t.time_lost_ms >= 1000
+            ? (t.time_lost_ms / 1000).toFixed(1) + 's'
+            : t.time_lost_ms.toFixed(0) + 'ms';
+
+        tr.innerHTML = `
+            <td><span class="expand-icon">▶</span></td>
+            <td>${t.name}</td>
+            <td>${fmt(t.faults)}</td>
+            <td class="major">${fmt(t.major_faults)}</td>
+            <td>${t.slow_ops > 0 ? fmt(t.slow_ops) + ' (' + t.slow_ops_percentage.toFixed(1) + '%)' : '-'}</td>
+            <td class="time-lost">${t.time_lost_ms > 0 ? timeLost : '-'}</td>
+            <td>${t.top_operation || '-'}</td>
+        `;
         tbody.appendChild(tr);
-    });
 
-    // Slow ops
-    const slowTbody = document.querySelector('#slow-ops-table tbody');
-    c.slow_ops_by_table.forEach(t => {
-        const topOps = t.by_operation.slice(0, 2).map(o => `${o.operation}: ${fmt(o.count)}`).join(', ');
-        const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${t.table}</td><td>${fmt(t.slow_op_count)}</td><td>${fmt(t.total_op_count)}</td><td style="color:${t.slow_op_percentage > 20 ? '#f87171' : '#a1a1aa'}">${t.slow_op_percentage.toFixed(1)}%</td><td>${fmtLat(t.avg_slow_latency_us)}</td><td>${fmtLat(t.max_latency_us)}</td><td>${(t.total_slow_time_ms/1000).toFixed(1)}s</td><td style="font-size:11px;color:#71717a">${topOps}</td>`;
-        slowTbody.appendChild(tr);
-    });
+        // Details row (hidden by default)
+        const detailsTr = document.createElement('tr');
+        detailsTr.className = 'details-row hidden';
+        detailsTr.dataset.idx = idx;
 
-    // Slow keys
-    const keysTbody = document.querySelector('#slow-keys-table tbody');
-    c.slow_keys.slice(0, 25).forEach(k => {
-        const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${k.table}</td><td style="font-family:monospace;font-size:11px">${k.key_prefix}</td><td>${fmt(k.slow_access_count)}</td><td>${fmt(k.total_access_count)}</td><td>${fmtLat(k.avg_latency_us)}</td><td>${fmtLat(k.max_latency_us)}</td>`;
-        keysTbody.appendChild(tr);
+        let detailsHtml = '<td colspan="7"><div class="details-content">';
+
+        // Faults by Operation Type
+        detailsHtml += '<div class="details-section"><div class="details-section-title">Faults by Operation</div><div class="details-list">';
+        if (t.details.faults_by_op && t.details.faults_by_op.length > 0) {
+            t.details.faults_by_op.forEach(op => {
+                detailsHtml += `<div class="details-item">
+                    <span class="details-item-name">${op.operation}</span>
+                    <span class="details-item-value">${fmt(op.faults)} <span class="major">(${fmt(op.major_faults)} major)</span></span>
+                </div>`;
+            });
+        } else {
+            detailsHtml += '<div class="details-item"><span class="details-item-name" style="color:#52525b;">No fault data</span></div>';
+        }
+        detailsHtml += '</div></div>';
+
+        // Faults by Cursor Operation (for CURSOR_GET)
+        detailsHtml += '<div class="details-section"><div class="details-section-title">By Cursor Op (GET)</div><div class="details-list">';
+        if (t.details.faults_by_cursor_op && t.details.faults_by_cursor_op.length > 0) {
+            t.details.faults_by_cursor_op.slice(0, 5).forEach(op => {
+                detailsHtml += `<div class="details-item">
+                    <span class="details-item-name">${op.operation}</span>
+                    <span class="details-item-value">${fmt(op.faults)}</span>
+                </div>`;
+            });
+        } else {
+            detailsHtml += '<div class="details-item"><span class="details-item-name" style="color:#52525b;">No GET operations</span></div>';
+        }
+        detailsHtml += '</div></div>';
+
+        // Hot Keys
+        detailsHtml += '<div class="details-section"><div class="details-section-title">Hot Keys</div><div class="details-list">';
+        if (t.details.hot_keys && t.details.hot_keys.length > 0) {
+            t.details.hot_keys.slice(0, 4).forEach(key => {
+                const keyShort = key.key_hex.length > 20 ? key.key_hex.substring(0, 20) + '...' : key.key_hex;
+                const avgMs = (key.avg_latency_us / 1000).toFixed(1);
+                detailsHtml += `<div class="details-item">
+                    <span class="details-item-name" style="font-family:monospace;font-size:11px;">${keyShort}</span>
+                    <span class="details-item-value">${fmt(key.slow_count)} slow, ${avgMs}ms avg</span>
+                </div>`;
+            });
+        } else {
+            detailsHtml += '<div class="details-item"><span class="details-item-name" style="color:#52525b;">No hot keys</span></div>';
+        }
+        detailsHtml += '</div></div>';
+
+        detailsHtml += '</div></td>';
+        detailsTr.innerHTML = detailsHtml;
+        tbody.appendChild(detailsTr);
+
+        // Click handler to expand/collapse
+        tr.addEventListener('click', () => {
+            const isExpanded = tr.classList.contains('expanded');
+
+            // Collapse all other rows
+            document.querySelectorAll('#unified-tables .table-row.expanded').forEach(r => {
+                r.classList.remove('expanded');
+            });
+            document.querySelectorAll('#unified-tables .details-row').forEach(r => {
+                r.classList.add('hidden');
+            });
+
+            // Toggle this row
+            if (!isExpanded) {
+                tr.classList.add('expanded');
+                detailsTr.classList.remove('hidden');
+            }
+        });
     });
 }
 
@@ -1540,7 +1501,7 @@ function initTxns() {
 }
 
 // Init overview on load
-initTab('overview');
+initTab('physical');
 
 // Resize charts after initial render (ensure proper sizing)
 setTimeout(() => {

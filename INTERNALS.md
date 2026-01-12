@@ -8,30 +8,30 @@ this document explains how the profiler bridges physical I/O events with logical
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │ RETH PROCESS                                                                │
 │                                                                             │
-│  mdbx_cursor_get(HashedStorages, key, SET_RANGE)                           │
+│  mdbx_cursor_get(HashedStorages, key, SET_RANGE)                            │
 │  │                                                                          │
-│  ├─► uprobe fires → registers active_op for this thread                    │
+│  ├─► uprobe fires → registers active_op for this thread                     │
 │  │                                                                          │
-│  │   [page fault occurs - kernel calls handle_mm_fault]                    │
+│  │   [page fault occurs - kernel calls handle_mm_fault]                     │ 
 │  │   │                                                                      │
-│  │   └─► kprobe fires → looks up active_op → enriches fault event          │
+│  │   └─► kprobe fires → looks up active_op → enriches fault event           │
 │  │                                                                          │
-│  └─► uretprobe fires → clears active_op, emits cursor_event                │
+│  └─► uretprobe fires → clears active_op, emits cursor_event                 │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │ RING BUFFER (16MB)                                                          │
 │                                                                             │
-│  [page_fault_event with active_op context][cursor_event][page_fault]...    │
+│  [page_fault_event with active_op context][cursor_event][page_fault]...     │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │ USERSPACE                                                                   │
 │                                                                             │
-│  tracer: polls ring buffer → writes trace.jsonl                            │
-│  analyzer: reads trace → generates html visualization                      │
+│  tracer: polls ring buffer → writes trace.jsonl                             │
+│  analyzer: reads trace → generates html visualization                       │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
