@@ -349,6 +349,8 @@ fn run_trace(
         let is_uprobe = section.contains("uprobe")
             || name.contains("cursor")
             || name.contains("direct_get")
+            || name.contains("direct_put")
+            || name.contains("direct_del")
             || name.contains("txn_");
         if is_uprobe && !trace_cursors {
             debug!("Skipping cursor probe: {} (section: {})", name, section);
