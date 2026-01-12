@@ -25,7 +25,7 @@ pub fn generate_html(data: &ViewerData) -> String {
         <nav class="tabs">
             <button class="tab active" data-tab="physical">Physical</button>
             <button class="tab" data-tab="tables">Tables</button>
-            <button class="tab" data-tab="transactions">Transactions</button>
+            <button class="tab" data-tab="transactions">MDBX Txns</button>
             <button class="export-btn" id="export-compact-btn" title="Download JSON for analysis">Export</button>
         </nav>
 
