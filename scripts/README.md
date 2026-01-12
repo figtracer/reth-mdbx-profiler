@@ -17,14 +17,18 @@ profiles individual RPC methods in isolation to compare their MDBX impact. runs 
 | option | description | default |
 |--------|-------------|---------|
 | `--methods LIST` | comma-separated list of methods to test | all |
-| `--duration SECS` | duration per method | 300 (5 min) |
-| `--concurrency N` | concurrent requests | 20 |
+| `--duration SECS` | duration per method | 2700 (45 min) |
+| `--concurrency N` | concurrent requests | 50 |
 | `--pid PID` | reth process ID | auto-detect |
 | `--mdbx-path PATH` | path to mdbx.dat | required |
 | `--reth-binary PATH` | path to reth binary (for cursor tracing) | - |
 | `--rpc-url URL` | RPC endpoint | http://localhost:8545 |
 | `--metrics-url URL` | metrics endpoint | http://localhost:9001 |
 | `--output-dir DIR` | output directory | ./method_profiles |
+| `--settle-time SECS` | wait time between tests for system to settle | 30 |
+| `--flush-caches` | flush OS page caches before each test (requires root) | false |
+| `--baseline-runs N` | number of baseline runs for variance estimation | 3 |
+| `--quick` | quick mode (~1 hour total: 4 min/test, 1 baseline, 10s settle) | false |
 
 ### available methods
 

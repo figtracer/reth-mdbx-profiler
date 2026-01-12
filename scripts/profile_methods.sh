@@ -10,14 +10,18 @@
 #
 # Options:
 #   --methods LIST      Comma-separated list of methods to test (default: all)
-#   --duration SECS     Duration per method (default: 300 = 5 minutes)
-#   --concurrency N     Number of concurrent requests (default: 20)
+#   --duration SECS     Duration per method (default: 2700 = 45 minutes)
+#   --concurrency N     Number of concurrent requests (default: 50)
 #   --pid PID           Reth process ID (auto-detects if not specified)
 #   --mdbx-path PATH    Path to mdbx.dat (required)
 #   --reth-binary PATH  Path to reth binary (for cursor tracing)
 #   --rpc-url URL       RPC endpoint (default: http://localhost:8545)
 #   --metrics-url URL   Metrics endpoint (default: http://localhost:9001)
 #   --output-dir DIR    Output directory (default: ./method_profiles)
+#   --settle-time SECS  Time to wait between tests for system to settle (default: 30)
+#   --flush-caches      Flush OS page caches before each test (requires root)
+#   --baseline-runs N   Number of baseline runs for variance estimation (default: 3)
+#   --quick             Quick mode: ~1 hour total (4 min/test, 1 baseline, 10s settle)
 #
 # Available methods:
 #   eth_getBalance, eth_getCode, eth_getStorageAt, eth_getTransactionCount,
@@ -35,14 +39,18 @@ set -euo pipefail
 
 # Defaults
 METHODS="eth_getBalance,eth_getStorageAt,eth_getCode,eth_getProof,eth_getBlockReceipts,eth_call,trace_transaction,trace_block,debug_traceTransaction,metrics"
-DURATION=300
-CONCURRENCY=20
+DURATION=2700
+CONCURRENCY=50
+QUICK=false
 PID=""
 MDBX_PATH=""
 RETH_BINARY=""
 RPC_URL="http://localhost:8545"
 METRICS_URL="http://localhost:9001"
 OUTPUT_DIR="./method_profiles"
+SETTLE_TIME=30
+FLUSH_CACHES=false
+BASELINE_RUNS=3
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROFILER="$SCRIPT_DIR/../target/release/mdbx-profiler"
@@ -68,6 +76,10 @@ while [[ $# -gt 0 ]]; do
         --rpc-url) RPC_URL="$2"; shift 2 ;;
         --metrics-url) METRICS_URL="$2"; shift 2 ;;
         --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
+        --settle-time) SETTLE_TIME="$2"; shift 2 ;;
+        --flush-caches) FLUSH_CACHES=true; shift ;;
+        --baseline-runs) BASELINE_RUNS="$2"; shift 2 ;;
+        --quick) QUICK=true; shift ;;
         --help|-h)
             head -40 "$0" | grep "^#" | cut -c3-
             exit 0
@@ -75,6 +87,14 @@ while [[ $# -gt 0 ]]; do
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
+
+# Quick mode: 1 hour total (~4 min per test)
+if [ "$QUICK" = true ]; then
+    DURATION=240
+    BASELINE_RUNS=1
+    SETTLE_TIME=10
+    echo -e "${YELLOW}Quick mode: 4 min/test, 1 baseline, 10s settle (~1 hour total)${NC}"
+fi
 
 # Validate
 if [ -z "$MDBX_PATH" ]; then
@@ -126,6 +146,9 @@ echo -e "========================================${NC}"
 echo "Methods:     ${METHOD_LIST[*]}"
 echo "Duration:    ${DURATION}s per method"
 echo "Concurrency: $CONCURRENCY"
+echo "Settle time: ${SETTLE_TIME}s between tests"
+echo "Flush cache: $FLUSH_CACHES"
+echo "Baseline runs: $BASELINE_RUNS"
 echo "PID:         $PID"
 echo "MDBX:        $MDBX_PATH"
 echo "Output:      $SESSION_DIR"
@@ -350,17 +373,53 @@ stress_metrics() {
 REQUEST_COUNTS=()
 
 # ============================================================================
-# Capture baseline profile (idle, no load)
+# Helper: Flush caches and wait for system to settle
+# ============================================================================
+
+flush_and_settle() {
+    local reason="$1"
+    echo -e "  ${CYAN}Preparing for $reason...${NC}"
+
+    # Flush OS page caches if enabled and running as root
+    if [ "$FLUSH_CACHES" = true ]; then
+        if [ "$(id -u)" = "0" ]; then
+            echo "    Flushing OS page caches..."
+            sync
+            echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
+        else
+            echo -e "    ${YELLOW}Warning: --flush-caches requires root, skipping${NC}"
+        fi
+    fi
+
+    # Wait for system to settle
+    echo "    Waiting ${SETTLE_TIME}s for system to settle..."
+    sleep "$SETTLE_TIME"
+}
+
+# ============================================================================
+# Capture baseline profiles (idle, no load) - multiple runs for variance
 # ============================================================================
 
 echo ""
-echo -e "${YELLOW}[0/${#METHOD_LIST[@]}] Capturing baseline profile (no load)${NC}"
-echo "Duration: ${DURATION}s - measuring idle/background activity"
+echo -e "${YELLOW}[0/${#METHOD_LIST[@]}] Capturing baseline profiles (no load)${NC}"
+echo "Will run $BASELINE_RUNS baseline measurements for variance estimation"
 
-$PROFILER_CMD --output "$SESSION_DIR/baseline.jsonl" 2>&1 | tee "$SESSION_DIR/baseline_profiler.log"
+for run in $(seq 1 $BASELINE_RUNS); do
+    echo ""
+    echo -e "  ${CYAN}Baseline run $run/$BASELINE_RUNS${NC}"
 
-echo -e "${GREEN}  Baseline complete${NC}"
-sleep 2
+    flush_and_settle "baseline run $run"
+
+    echo "  Profiling for ${DURATION}s..."
+    $PROFILER_CMD --output "$SESSION_DIR/baseline_${run}.jsonl" 2>&1 | tee "$SESSION_DIR/baseline_${run}_profiler.log"
+
+    echo -e "  ${GREEN}Baseline run $run complete${NC}"
+done
+
+# Use the last baseline run as the primary baseline for comparison
+cp "$SESSION_DIR/baseline_${BASELINE_RUNS}.jsonl" "$SESSION_DIR/baseline.jsonl"
+echo ""
+echo -e "${GREEN}Baseline capture complete ($BASELINE_RUNS runs)${NC}"
 
 # ============================================================================
 # Profile each method
@@ -397,9 +456,23 @@ for method in "${METHOD_LIST[@]}"; do
             ;;
     esac
 
-    # Start stress workers
+    # Flush caches and settle before this method
+    flush_and_settle "$method"
+
+    # Start profiler FIRST (before stress workers)
+    # This ensures we capture all activity from the start
+    $PROFILER_CMD --output "$SESSION_DIR/${method}.jsonl" 2>&1 | tee "$SESSION_DIR/${method}_profiler.log" &
+    PROFILER_PID=$!
+
+    # Give profiler a moment to initialize BPF hooks
+    sleep 2
+
+    # Now start stress workers - calculate end time AFTER profiler is ready
     START_TIME=$(date +%s)
-    END_TIME=$((START_TIME + DURATION))
+    # Stress workers run for slightly less than DURATION to ensure they finish
+    # before profiler stops, so we capture clean shutdown
+    STRESS_DURATION=$((DURATION - 5))
+    END_TIME=$((START_TIME + STRESS_DURATION))
 
     STRESS_PIDS=()
     for i in $(seq 1 $CONCURRENCY); do
@@ -407,26 +480,18 @@ for method in "${METHOD_LIST[@]}"; do
         STRESS_PIDS+=($!)
     done
 
-    # Give stress test a moment to start
-    sleep 1
-
-    # Run profiler
-    $PROFILER_CMD --output "$SESSION_DIR/${method}.jsonl" 2>&1 | tee "$SESSION_DIR/${method}_profiler.log" &
-    PROFILER_PID=$!
+    echo "  Stress workers started ($CONCURRENCY concurrent)"
 
     # Wait for profiler (it will exit after duration)
     wait $PROFILER_PID 2>/dev/null || true
 
-    # Kill stress workers
+    # Kill any remaining stress workers (they should have finished already)
     for pid in "${STRESS_PIDS[@]}"; do
         kill $pid 2>/dev/null || true
     done
     wait 2>/dev/null || true
 
     echo -e "${GREEN}  $method complete${NC}"
-
-    # Brief pause between methods
-    sleep 2
 done
 
 # ============================================================================
@@ -436,9 +501,18 @@ done
 echo ""
 echo -e "${CYAN}Analyzing profiles...${NC}"
 
-# Analyze baseline first
+# Analyze all baseline runs
+for run in $(seq 1 $BASELINE_RUNS); do
+    if [ -f "$SESSION_DIR/baseline_${run}.jsonl" ]; then
+        echo "  Analyzing baseline run ${run}..."
+        "$ANALYZER" --input "$SESSION_DIR/baseline_${run}.jsonl" --mdbx-path "$MDBX_PATH" \
+            --format compact --label "baseline_${run}" 2>/dev/null > "$SESSION_DIR/baseline_${run}.json"
+    fi
+done
+
+# Use last baseline as the primary comparison baseline
 if [ -f "$SESSION_DIR/baseline.jsonl" ]; then
-    echo "  Analyzing baseline..."
+    echo "  Analyzing primary baseline..."
     "$ANALYZER" --input "$SESSION_DIR/baseline.jsonl" --mdbx-path "$MDBX_PATH" \
         --format compact --label "baseline" 2>/dev/null > "$SESSION_DIR/baseline.json"
 fi
