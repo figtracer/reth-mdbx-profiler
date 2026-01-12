@@ -132,8 +132,14 @@ pub fn generate_html(data: &ViewerData) -> String {
 
                 <!-- Fault distribution bar chart -->
                 <div class="card full-width" id="fault-dist-card" style="display:none;">
-                    <div class="card-header">Fault Distribution by Table</div>
-                    <div class="card-body" style="height: 200px; padding: 8px 16px;">
+                    <div class="card-header">
+                        Fault Distribution by Table
+                        <span class="chart-legend">
+                            <span class="legend-item"><span class="legend-swatch minor-swatch"></span>Minor</span>
+                            <span class="legend-item"><span class="legend-swatch major-swatch"></span>Major</span>
+                        </span>
+                    </div>
+                    <div class="card-body" style="padding: 8px 16px;">
                         <canvas id="fault-dist-chart"></canvas>
                     </div>
                 </div>
@@ -451,6 +457,31 @@ body {
     text-transform: none;
     margin-left: auto;
 }
+
+/* Chart legend (inline in header) */
+.chart-legend {
+    display: flex;
+    gap: 16px;
+    font-size: 11px;
+    font-weight: 400;
+    text-transform: none;
+}
+
+.legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: #a1a1aa;
+}
+
+.legend-swatch {
+    width: 12px;
+    height: 12px;
+    border-radius: 2px;
+}
+
+.legend-swatch.minor-swatch { background: #60a5fa; }
+.legend-swatch.major-swatch { background: #f87171; }
 
 /* Expandable table rows */
 .expandable-table tbody tr.table-row {
@@ -1182,12 +1213,12 @@ function drawFaultDistChart(canvas, labels, totalFaults, majorFaults) {
 
     const w = rect.width;
     const h = rect.height;
-    const pad = { t: 8, r: 70, b: 8, l: 140 };
+    const pad = { t: 8, r: 80, b: 24, l: 140 };
     const chartW = w - pad.l - pad.r;
     const chartH = h - pad.t - pad.b;
 
     const max = Math.max(...totalFaults) * 1.1 || 1;
-    const barH = Math.min(20, (chartH / labels.length) * 0.75);
+    const barH = Math.min(18, (chartH / labels.length) * 0.7);
     const gap = (chartH / labels.length) - barH;
 
     ctx.clearRect(0, 0, w, h);
@@ -1195,20 +1226,18 @@ function drawFaultDistChart(canvas, labels, totalFaults, majorFaults) {
     labels.forEach((label, i) => {
         const total = totalFaults[i];
         const major = majorFaults[i];
-        const minor = total - major;
 
         const totalBarW = (total / max) * chartW;
-        const majorBarW = (major / max) * chartW;
+        const minorBarW = ((total - major) / max) * chartW;
         const y = pad.t + i * (barH + gap) + gap / 2;
 
-        // Minor faults bar (blue) - full width
+        // Draw minor faults (blue) first, then major (red) stacked after
         ctx.fillStyle = '#3b82f6';
-        ctx.fillRect(pad.l, y, totalBarW, barH);
+        ctx.fillRect(pad.l, y, minorBarW, barH);
 
-        // Major faults bar (red) - overlaid on the right portion
         if (major > 0) {
             ctx.fillStyle = '#f87171';
-            ctx.fillRect(pad.l + totalBarW - majorBarW, y, majorBarW, barH);
+            ctx.fillRect(pad.l + minorBarW, y, totalBarW - minorBarW, barH);
         }
 
         // Label (left)
@@ -1218,25 +1247,27 @@ function drawFaultDistChart(canvas, labels, totalFaults, majorFaults) {
         const labelText = label.length > 18 ? label.substring(0, 16) + '...' : label;
         ctx.fillText(labelText, pad.l - 8, y + barH / 2 + 4);
 
-        // Value (right)
+        // Value (right of bar)
         ctx.fillStyle = '#71717a';
         ctx.textAlign = 'left';
         const fmtVal = n => n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'K' : n.toFixed(0);
         ctx.fillText(fmtVal(total), pad.l + totalBarW + 8, y + barH / 2 + 4);
     });
 
-    // Legend
+    // Legend at bottom right
     ctx.font = '10px sans-serif';
-    ctx.textAlign = 'right';
+    const legendY = h - 10;
+
     ctx.fillStyle = '#3b82f6';
-    ctx.fillRect(w - 65, 8, 10, 10);
+    ctx.fillRect(w - 140, legendY - 8, 10, 10);
     ctx.fillStyle = '#71717a';
-    ctx.fillText('Minor', w - 70, 16);
+    ctx.textAlign = 'left';
+    ctx.fillText('Minor', w - 126, legendY);
 
     ctx.fillStyle = '#f87171';
-    ctx.fillRect(w - 65, 22, 10, 10);
+    ctx.fillRect(w - 70, legendY - 8, 10, 10);
     ctx.fillStyle = '#71717a';
-    ctx.fillText('Major', w - 70, 30);
+    ctx.fillText('Major', w - 56, legendY);
 }
 
 // Utilities
