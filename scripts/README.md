@@ -27,8 +27,7 @@ profiles individual RPC methods in isolation to compare their MDBX impact. runs 
 | `--output-dir DIR` | output directory | ./method_profiles |
 | `--settle-time SECS` | wait time between tests for system to settle | 30 |
 | `--flush-caches` | flush OS page caches before each test (requires root) | false |
-| `--baseline-runs N` | number of baseline runs for variance estimation | 3 |
-| `--quick` | quick mode (~1 hour total: 4 min/test, 1 baseline, 10s settle) | false |
+| `--quick` | quick mode (~1 hour total: 4 min/test, 10s settle) | false |
 
 ### available methods
 

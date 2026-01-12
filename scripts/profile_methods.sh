@@ -20,8 +20,7 @@
 #   --output-dir DIR    Output directory (default: ./method_profiles)
 #   --settle-time SECS  Time to wait between tests for system to settle (default: 30)
 #   --flush-caches      Flush OS page caches before each test (requires root)
-#   --baseline-runs N   Number of baseline runs for variance estimation (default: 3)
-#   --quick             Quick mode: ~1 hour total (4 min/test, 1 baseline, 10s settle)
+#   --quick             Quick mode: ~1 hour total (4 min/test, 10s settle)
 #
 # Available methods:
 #   eth_getBalance, eth_getCode, eth_getStorageAt, eth_getTransactionCount,
@@ -50,7 +49,6 @@ METRICS_URL="http://localhost:9001"
 OUTPUT_DIR="./method_profiles"
 SETTLE_TIME=30
 FLUSH_CACHES=false
-BASELINE_RUNS=3
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROFILER="$SCRIPT_DIR/../target/release/mdbx-profiler"
@@ -78,7 +76,6 @@ while [[ $# -gt 0 ]]; do
         --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
         --settle-time) SETTLE_TIME="$2"; shift 2 ;;
         --flush-caches) FLUSH_CACHES=true; shift ;;
-        --baseline-runs) BASELINE_RUNS="$2"; shift 2 ;;
         --quick) QUICK=true; shift ;;
         --help|-h)
             head -40 "$0" | grep "^#" | cut -c3-
@@ -91,9 +88,8 @@ done
 # Quick mode: 1 hour total (~4 min per test)
 if [ "$QUICK" = true ]; then
     DURATION=240
-    BASELINE_RUNS=1
     SETTLE_TIME=10
-    echo -e "${YELLOW}Quick mode: 4 min/test, 1 baseline, 10s settle (~1 hour total)${NC}"
+    echo -e "${YELLOW}Quick mode: 4 min/test, 10s settle (~1 hour total)${NC}"
 fi
 
 # Validate
@@ -148,7 +144,6 @@ echo "Duration:    ${DURATION}s per method"
 echo "Concurrency: $CONCURRENCY"
 echo "Settle time: ${SETTLE_TIME}s between tests"
 echo "Flush cache: $FLUSH_CACHES"
-echo "Baseline runs: $BASELINE_RUNS"
 echo "PID:         $PID"
 echo "MDBX:        $MDBX_PATH"
 echo "Output:      $SESSION_DIR"
@@ -397,29 +392,18 @@ flush_and_settle() {
 }
 
 # ============================================================================
-# Capture baseline profiles (idle, no load) - multiple runs for variance
+# Capture baseline profile (idle, no load)
 # ============================================================================
 
 echo ""
-echo -e "${YELLOW}[0/${#METHOD_LIST[@]}] Capturing baseline profiles (no load)${NC}"
-echo "Will run $BASELINE_RUNS baseline measurements for variance estimation"
+echo -e "${YELLOW}[0/${#METHOD_LIST[@]}] Capturing baseline profile (no load)${NC}"
 
-for run in $(seq 1 $BASELINE_RUNS); do
-    echo ""
-    echo -e "  ${CYAN}Baseline run $run/$BASELINE_RUNS${NC}"
+flush_and_settle "baseline"
 
-    flush_and_settle "baseline run $run"
+echo "  Profiling for ${DURATION}s..."
+$PROFILER_CMD --output "$SESSION_DIR/baseline.jsonl" 2>&1 | tee "$SESSION_DIR/baseline_profiler.log"
 
-    echo "  Profiling for ${DURATION}s..."
-    $PROFILER_CMD --output "$SESSION_DIR/baseline_${run}.jsonl" 2>&1 | tee "$SESSION_DIR/baseline_${run}_profiler.log"
-
-    echo -e "  ${GREEN}Baseline run $run complete${NC}"
-done
-
-# Use the last baseline run as the primary baseline for comparison
-cp "$SESSION_DIR/baseline_${BASELINE_RUNS}.jsonl" "$SESSION_DIR/baseline.jsonl"
-echo ""
-echo -e "${GREEN}Baseline capture complete ($BASELINE_RUNS runs)${NC}"
+echo -e "${GREEN}Baseline complete${NC}"
 
 # ============================================================================
 # Profile each method
@@ -501,18 +485,9 @@ done
 echo ""
 echo -e "${CYAN}Analyzing profiles...${NC}"
 
-# Analyze all baseline runs
-for run in $(seq 1 $BASELINE_RUNS); do
-    if [ -f "$SESSION_DIR/baseline_${run}.jsonl" ]; then
-        echo "  Analyzing baseline run ${run}..."
-        "$ANALYZER" --input "$SESSION_DIR/baseline_${run}.jsonl" --mdbx-path "$MDBX_PATH" \
-            --format compact --label "baseline_${run}" 2>/dev/null > "$SESSION_DIR/baseline_${run}.json"
-    fi
-done
-
-# Use last baseline as the primary comparison baseline
+# Analyze baseline
 if [ -f "$SESSION_DIR/baseline.jsonl" ]; then
-    echo "  Analyzing primary baseline..."
+    echo "  Analyzing baseline..."
     "$ANALYZER" --input "$SESSION_DIR/baseline.jsonl" --mdbx-path "$MDBX_PATH" \
         --format compact --label "baseline" 2>/dev/null > "$SESSION_DIR/baseline.json"
 fi
