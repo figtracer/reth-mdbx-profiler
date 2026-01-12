@@ -59,6 +59,12 @@
 // VM_FAULT flags from kernel (used in handle_mm_fault return value)
 #define VM_FAULT_MAJOR   0x0004
 
+// Maximum key prefix size for active operation tracking (smaller than full key)
+#define ACTIVE_OP_KEY_PREFIX_SIZE 16
+
+// Sentinel value for "no active operation" on this thread
+#define NO_ACTIVE_OP_DBI 0xFFFFFFFF
+
 // Page fault event sent to userspace
 struct page_fault_event {
     __u64 timestamp_ns;      // Kernel timestamp
@@ -72,6 +78,12 @@ struct page_fault_event {
     __u32 fault_flags;       // Page fault flags (read/write/etc)
     __u64 latency_ns;        // Time spent in fault handler (if available)
     __u8  is_major;          // Major fault (disk I/O) vs minor (in page cache)
+    __u8  _pad1[3];          // Padding for alignment
+    // Active operation context (filled if page fault occurred during MDBX operation)
+    __u32 active_dbi;        // DBI of active operation (NO_ACTIVE_OP_DBI if none)
+    __u32 active_op_type;    // Operation type: EVENT_CURSOR_GET, EVENT_CURSOR_PUT, etc.
+    __u32 active_cursor_op;  // Cursor operation (SET_RANGE, NEXT, etc.) for get operations
+    __u8  active_key_prefix[ACTIVE_OP_KEY_PREFIX_SIZE]; // First 16 bytes of key
 };
 
 // MDBX cursor operation event sent to userspace
@@ -352,6 +364,35 @@ struct {
     __type(value, struct direct_del_context);
 } pending_direct_dels SEC(".maps");
 
+// ============================================================================
+// Active Operation Tracking for Physical-Logical Layer Bridging
+// ============================================================================
+//
+// This map tracks what MDBX operation each thread is currently executing.
+// When a page fault occurs, we can look up the active operation on that thread
+// to get 100% accurate attribution (no timestamp-based correlation needed).
+//
+// Key: pid_tgid (thread ID)
+// Value: active_op struct with operation details
+
+struct active_op {
+    __u64 start_ns;          // When the operation started
+    __u32 dbi;               // Which table (DBI)
+    __u32 op_type;           // Operation type: EVENT_CURSOR_GET, EVENT_CURSOR_PUT, etc.
+    __u32 cursor_op;         // Cursor operation (SET_RANGE, NEXT, etc.) for get operations
+    __u32 _pad;              // Padding for alignment
+    __u8  key_prefix[ACTIVE_OP_KEY_PREFIX_SIZE]; // First 16 bytes of key for identification
+};
+
+// Active operations map: tracks what each thread is currently doing
+// This enables 100% accurate page fault attribution to MDBX operations
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 4096);
+    __type(key, __u64);      // pid_tgid (thread ID)
+    __type(value, struct active_op);
+} active_ops SEC(".maps");
+
 #define STAT_TOTAL_FAULTS     0
 #define STAT_MDBX_FAULTS      1
 #define STAT_MAJOR_FAULTS     2
@@ -505,6 +546,32 @@ int BPF_KRETPROBE(trace_page_fault_ret, vm_fault_t ret)
     e->fault_flags = fctx->fault_flags;
     e->latency_ns = latency;
     e->is_major = is_major;
+    e->_pad1[0] = 0;
+    e->_pad1[1] = 0;
+    e->_pad1[2] = 0;
+    
+    struct active_op *op = bpf_map_lookup_elem(&active_ops, &pid_tgid);
+    if (op) {
+        // Page fault occurred during an MDBX operation - we know exactly what caused it!
+        e->active_dbi = op->dbi;
+        e->active_op_type = op->op_type;
+        e->active_cursor_op = op->cursor_op;
+        // Copy key prefix
+        #pragma unroll
+        for (int i = 0; i < ACTIVE_OP_KEY_PREFIX_SIZE; i++) {
+            e->active_key_prefix[i] = op->key_prefix[i];
+        }
+    } else {
+        // No active MDBX operation - fault happened between operations
+        // (could be background I/O, prefetching, or non-MDBX code)
+        e->active_dbi = NO_ACTIVE_OP_DBI;
+        e->active_op_type = 0;
+        e->active_cursor_op = 0;
+        #pragma unroll
+        for (int i = 0; i < ACTIVE_OP_KEY_PREFIX_SIZE; i++) {
+            e->active_key_prefix[i] = 0;
+        }
+    }
     
     bpf_ringbuf_submit(e, 0);
     
@@ -607,9 +674,11 @@ int BPF_UPROBE(trace_cursor_get, void *cursor, struct mdbx_val *key,
         inc_stat(STAT_CURSOR_NEXTS);
     }
     
+    __u64 now = bpf_ktime_get_ns();
+    
     // Build cursor context (named cctx to avoid conflict with BPF_UPROBE's ctx)
     struct cursor_context cctx = {
-        .timestamp_ns = bpf_ktime_get_ns(),
+        .timestamp_ns = now,
         .pid = pid,
         .tid = (__u32)pid_tgid,
         .cursor_op = op,
@@ -699,6 +768,29 @@ int BPF_UPROBE(trace_cursor_get, void *cursor, struct mdbx_val *key,
     
     // Save context for uretprobe
     bpf_map_update_elem(&pending_cursors, &pid_tgid, &cctx, BPF_ANY);
+    
+    // Register this operation as active on this thread for page fault attribution
+    struct active_op aop = {
+        .start_ns = now,
+        .dbi = cctx.dbi,
+        .op_type = EVENT_CURSOR_GET,
+        .cursor_op = op,
+        ._pad = 0,
+    };
+    // Copy key prefix (first 16 bytes)
+    __u32 prefix_len = cctx.key_size;
+    if (prefix_len > ACTIVE_OP_KEY_PREFIX_SIZE) {
+        prefix_len = ACTIVE_OP_KEY_PREFIX_SIZE;
+    }
+    #pragma unroll
+    for (int i = 0; i < ACTIVE_OP_KEY_PREFIX_SIZE; i++) {
+        if (i < prefix_len) {
+            aop.key_prefix[i] = cctx.key_data[i];
+        } else {
+            aop.key_prefix[i] = 0;
+        }
+    }
+    bpf_map_update_elem(&active_ops, &pid_tgid, &aop, BPF_ANY);
     
     return 0;
 }
@@ -860,9 +952,11 @@ int BPF_UPROBE(trace_direct_get, void *txn, __u32 dbi, struct mdbx_val *key, voi
     
     inc_stat(STAT_DIRECT_GETS);
     
+    __u64 now = bpf_ktime_get_ns();
+    
     // Build direct get context
     struct direct_get_context dctx = {
-        .timestamp_ns = bpf_ktime_get_ns(),
+        .timestamp_ns = now,
         .pid = pid,
         .tid = (__u32)pid_tgid,
         .dbi = dbi,
@@ -885,6 +979,29 @@ int BPF_UPROBE(trace_direct_get, void *txn, __u32 dbi, struct mdbx_val *key, voi
     
     // Save context for uretprobe
     bpf_map_update_elem(&pending_direct_gets, &pid_tgid, &dctx, BPF_ANY);
+    
+    // Register this operation as active on this thread for page fault attribution
+    struct active_op aop = {
+        .start_ns = now,
+        .dbi = dbi,
+        .op_type = EVENT_DIRECT_GET,
+        .cursor_op = 0,  // Not applicable for direct get
+        ._pad = 0,
+    };
+    // Copy key prefix (first 16 bytes)
+    __u32 prefix_len = dctx.key_size;
+    if (prefix_len > ACTIVE_OP_KEY_PREFIX_SIZE) {
+        prefix_len = ACTIVE_OP_KEY_PREFIX_SIZE;
+    }
+    #pragma unroll
+    for (int i = 0; i < ACTIVE_OP_KEY_PREFIX_SIZE; i++) {
+        if (i < prefix_len) {
+            aop.key_prefix[i] = dctx.key_data[i];
+        } else {
+            aop.key_prefix[i] = 0;
+        }
+    }
+    bpf_map_update_elem(&active_ops, &pid_tgid, &aop, BPF_ANY);
     
     return 0;
 }
@@ -914,6 +1031,7 @@ int BPF_URETPROBE(trace_direct_get_ret, int ret)
     if (!e) {
         inc_stat(STAT_EVENTS_DROPPED);
         bpf_map_delete_elem(&pending_direct_gets, &pid_tgid);
+        bpf_map_delete_elem(&active_ops, &pid_tgid);
         return 0;
     }
     
@@ -942,6 +1060,9 @@ int BPF_URETPROBE(trace_direct_get_ret, int ret)
     // Clean up
     bpf_map_delete_elem(&pending_direct_gets, &pid_tgid);
     
+    // Clear active operation
+    bpf_map_delete_elem(&active_ops, &pid_tgid);
+    
     return 0;
 }
 
@@ -968,8 +1089,10 @@ int BPF_UPROBE(trace_cursor_put, void *cursor, struct mdbx_val *key,
 
     inc_stat(STAT_CURSOR_PUTS);
 
+    __u64 now = bpf_ktime_get_ns();
+
     struct cursor_put_context pctx = {
-        .timestamp_ns = bpf_ktime_get_ns(),
+        .timestamp_ns = now,
         .pid = pid,
         .tid = (__u32)pid_tgid,
         .dbi = 0,
@@ -1012,6 +1135,30 @@ int BPF_UPROBE(trace_cursor_put, void *cursor, struct mdbx_val *key,
     }
 
     bpf_map_update_elem(&pending_cursor_puts, &pid_tgid, &pctx, BPF_ANY);
+
+    // Register this operation as active on this thread for page fault attribution
+    struct active_op aop = {
+        .start_ns = now,
+        .dbi = pctx.dbi,
+        .op_type = EVENT_CURSOR_PUT,
+        .cursor_op = 0,  // Not applicable for put
+        ._pad = 0,
+    };
+    // Copy key prefix
+    __u32 prefix_len = pctx.key_size;
+    if (prefix_len > ACTIVE_OP_KEY_PREFIX_SIZE) {
+        prefix_len = ACTIVE_OP_KEY_PREFIX_SIZE;
+    }
+    #pragma unroll
+    for (int i = 0; i < ACTIVE_OP_KEY_PREFIX_SIZE; i++) {
+        if (i < prefix_len) {
+            aop.key_prefix[i] = pctx.key_data[i];
+        } else {
+            aop.key_prefix[i] = 0;
+        }
+    }
+    bpf_map_update_elem(&active_ops, &pid_tgid, &aop, BPF_ANY);
+
     return 0;
 }
 
@@ -1036,6 +1183,7 @@ int BPF_URETPROBE(trace_cursor_put_ret, int ret)
     if (!e) {
         inc_stat(STAT_EVENTS_DROPPED);
         bpf_map_delete_elem(&pending_cursor_puts, &pid_tgid);
+        bpf_map_delete_elem(&active_ops, &pid_tgid);
         return 0;
     }
 
@@ -1059,6 +1207,10 @@ int BPF_URETPROBE(trace_cursor_put_ret, int ret)
 
     bpf_ringbuf_submit(e, 0);
     bpf_map_delete_elem(&pending_cursor_puts, &pid_tgid);
+    
+    // Clear active operation
+    bpf_map_delete_elem(&active_ops, &pid_tgid);
+    
     return 0;
 }
 
@@ -1082,8 +1234,10 @@ int BPF_UPROBE(trace_cursor_del, void *cursor, __u32 flags)
 
     inc_stat(STAT_CURSOR_DELS);
 
+    __u64 now = bpf_ktime_get_ns();
+
     struct cursor_del_context dctx = {
-        .timestamp_ns = bpf_ktime_get_ns(),
+        .timestamp_ns = now,
         .pid = pid,
         .tid = (__u32)pid_tgid,
         .dbi = 0,
@@ -1102,6 +1256,22 @@ int BPF_UPROBE(trace_cursor_del, void *cursor, __u32 flags)
     }
 
     bpf_map_update_elem(&pending_cursor_dels, &pid_tgid, &dctx, BPF_ANY);
+
+    // Register this operation as active on this thread for page fault attribution
+    struct active_op aop = {
+        .start_ns = now,
+        .dbi = dctx.dbi,
+        .op_type = EVENT_CURSOR_DEL,
+        .cursor_op = 0,
+        ._pad = 0,
+    };
+    // No key for delete at current position - zero out prefix
+    #pragma unroll
+    for (int i = 0; i < ACTIVE_OP_KEY_PREFIX_SIZE; i++) {
+        aop.key_prefix[i] = 0;
+    }
+    bpf_map_update_elem(&active_ops, &pid_tgid, &aop, BPF_ANY);
+
     return 0;
 }
 
@@ -1126,6 +1296,7 @@ int BPF_URETPROBE(trace_cursor_del_ret, int ret)
     if (!e) {
         inc_stat(STAT_EVENTS_DROPPED);
         bpf_map_delete_elem(&pending_cursor_dels, &pid_tgid);
+        bpf_map_delete_elem(&active_ops, &pid_tgid);
         return 0;
     }
 
@@ -1150,6 +1321,10 @@ int BPF_URETPROBE(trace_cursor_del_ret, int ret)
 
     bpf_ringbuf_submit(e, 0);
     bpf_map_delete_elem(&pending_cursor_dels, &pid_tgid);
+    
+    // Clear active operation
+    bpf_map_delete_elem(&active_ops, &pid_tgid);
+    
     return 0;
 }
 
@@ -1380,8 +1555,10 @@ int BPF_UPROBE(trace_direct_put, void *txn, __u32 dbi,
 
     inc_stat(STAT_DIRECT_PUTS);
 
+    __u64 now = bpf_ktime_get_ns();
+
     struct direct_put_context pctx = {
-        .timestamp_ns = bpf_ktime_get_ns(),
+        .timestamp_ns = now,
         .pid = pid,
         .tid = (__u32)pid_tgid,
         .dbi = dbi,
@@ -1409,6 +1586,29 @@ int BPF_UPROBE(trace_direct_put, void *txn, __u32 dbi,
     }
 
     bpf_map_update_elem(&pending_direct_puts, &pid_tgid, &pctx, BPF_ANY);
+
+    // Register this operation as active on this thread for page fault attribution
+    struct active_op aop = {
+        .start_ns = now,
+        .dbi = dbi,
+        .op_type = EVENT_DIRECT_PUT,
+        .cursor_op = 0,
+        ._pad = 0,
+    };
+    __u32 prefix_len = pctx.key_size;
+    if (prefix_len > ACTIVE_OP_KEY_PREFIX_SIZE) {
+        prefix_len = ACTIVE_OP_KEY_PREFIX_SIZE;
+    }
+    #pragma unroll
+    for (int i = 0; i < ACTIVE_OP_KEY_PREFIX_SIZE; i++) {
+        if (i < prefix_len) {
+            aop.key_prefix[i] = pctx.key_data[i];
+        } else {
+            aop.key_prefix[i] = 0;
+        }
+    }
+    bpf_map_update_elem(&active_ops, &pid_tgid, &aop, BPF_ANY);
+
     return 0;
 }
 
@@ -1431,6 +1631,7 @@ int BPF_URETPROBE(trace_direct_put_ret, int ret)
     if (!e) {
         inc_stat(STAT_EVENTS_DROPPED);
         bpf_map_delete_elem(&pending_direct_puts, &pid_tgid);
+        bpf_map_delete_elem(&active_ops, &pid_tgid);
         return 0;
     }
 
@@ -1454,6 +1655,10 @@ int BPF_URETPROBE(trace_direct_put_ret, int ret)
 
     bpf_ringbuf_submit(e, 0);
     bpf_map_delete_elem(&pending_direct_puts, &pid_tgid);
+    
+    // Clear active operation
+    bpf_map_delete_elem(&active_ops, &pid_tgid);
+    
     return 0;
 }
 
@@ -1477,8 +1682,10 @@ int BPF_UPROBE(trace_direct_del, void *txn, __u32 dbi,
 
     inc_stat(STAT_DIRECT_DELS);
 
+    __u64 now = bpf_ktime_get_ns();
+
     struct direct_del_context dctx = {
-        .timestamp_ns = bpf_ktime_get_ns(),
+        .timestamp_ns = now,
         .pid = pid,
         .tid = (__u32)pid_tgid,
         .dbi = dbi,
@@ -1497,6 +1704,29 @@ int BPF_UPROBE(trace_direct_del, void *txn, __u32 dbi,
     }
 
     bpf_map_update_elem(&pending_direct_dels, &pid_tgid, &dctx, BPF_ANY);
+
+    // Register this operation as active on this thread for page fault attribution
+    struct active_op aop = {
+        .start_ns = now,
+        .dbi = dbi,
+        .op_type = EVENT_DIRECT_DEL,
+        .cursor_op = 0,
+        ._pad = 0,
+    };
+    __u32 prefix_len = dctx.key_size;
+    if (prefix_len > ACTIVE_OP_KEY_PREFIX_SIZE) {
+        prefix_len = ACTIVE_OP_KEY_PREFIX_SIZE;
+    }
+    #pragma unroll
+    for (int i = 0; i < ACTIVE_OP_KEY_PREFIX_SIZE; i++) {
+        if (i < prefix_len) {
+            aop.key_prefix[i] = dctx.key_data[i];
+        } else {
+            aop.key_prefix[i] = 0;
+        }
+    }
+    bpf_map_update_elem(&active_ops, &pid_tgid, &aop, BPF_ANY);
+
     return 0;
 }
 
@@ -1519,6 +1749,7 @@ int BPF_URETPROBE(trace_direct_del_ret, int ret)
     if (!e) {
         inc_stat(STAT_EVENTS_DROPPED);
         bpf_map_delete_elem(&pending_direct_dels, &pid_tgid);
+        bpf_map_delete_elem(&active_ops, &pid_tgid);
         return 0;
     }
 
@@ -1542,6 +1773,10 @@ int BPF_URETPROBE(trace_direct_del_ret, int ret)
 
     bpf_ringbuf_submit(e, 0);
     bpf_map_delete_elem(&pending_direct_dels, &pid_tgid);
+    
+    // NEW: Clear active operation
+    bpf_map_delete_elem(&active_ops, &pid_tgid);
+    
     return 0;
 }
 

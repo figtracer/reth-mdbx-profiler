@@ -9,8 +9,8 @@ use libbpf_rs::{MapCore, MapFlags, ObjectBuilder, ProgramMut, RingBufferBuilder}
 use std::{
     path::PathBuf,
     sync::{
-        Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
     },
     time::{Duration, Instant},
 };

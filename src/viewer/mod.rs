@@ -5,7 +5,7 @@
 
 mod template;
 
-use crate::event::{dbi_to_table_name, is_pre_trace_cursor, CursorEvent, PageFaultEvent, TxnEvent};
+use crate::event::{CursorEvent, PageFaultEvent, TxnEvent, dbi_to_table_name, is_pre_trace_cursor};
 use crate::mdbx_metadata::{PageAttribution, RethTable};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -114,16 +114,26 @@ pub struct FaultCorrelation {
     pub uncorrelated_major_faults: u64,
     /// Total faults processed
     pub total_faults: u64,
+    /// Number of faults with direct BPF attribution (100% accurate)
+    pub directly_attributed: u64,
+    /// Number of faults correlated via timestamp matching (fallback)
+    pub timestamp_correlated: u64,
 }
 
-/// Correlate page faults with cursor operations by matching thread ID and timestamp windows.
+/// Correlate page faults with cursor operations.
 ///
-/// A page fault is attributed to a cursor operation if:
-/// 1. It occurred on the same thread (tid matches)
-/// 2. The fault timestamp falls within the cursor operation's time window
-///    (between cursor start and cursor start + latency)
+/// This function uses two methods, in order of preference:
 ///
-/// This gives us accurate per-table fault attribution instead of proportional estimates.
+/// 1. Direct BPF Attribution (100% accurate): Page faults that occurred during an
+///    active MDBX operation have the operation's DBI embedded directly in the event
+///    by the BPF probe.
+///
+/// 2. Timestamp + Thread ID Matching (fallback)**: For page faults without direct
+///    attribution (e.g., from older traces), we fall back to matching the fault's
+///    timestamp against cursor operation time windows on the same thread.
+///
+/// Direct attribution provides 100% accurate correlation - we know exactly which
+/// MDBX operation caused each page fault. Timestamp matching is a statistical fallback.
 pub fn correlate_faults_with_cursors(
     page_faults: &[&PageFaultEvent],
     cursor_events: &[CursorEvent],
@@ -131,10 +141,49 @@ pub fn correlate_faults_with_cursors(
     let mut result = FaultCorrelation::default();
     result.total_faults = page_faults.len() as u64;
 
+    // First pass: use direct BPF attribution for faults that have it
+    let mut faults_needing_timestamp_correlation: Vec<&PageFaultEvent> = Vec::new();
+
+    for fault in page_faults {
+        let is_major = fault.is_major_fault();
+
+        // Check if this fault has direct BPF attribution (active_dbi is set)
+        if fault.has_active_op() {
+            // Direct attribution - we know exactly which table caused this fault
+            result.directly_attributed += 1;
+
+            let table_name = if fault.active_dbi < 100 {
+                dbi_to_table_name(fault.active_dbi).to_string()
+            } else if is_pre_trace_cursor(fault.active_dbi) {
+                "Unknown (pre-trace cursor)".to_string()
+            } else {
+                format!("Unknown (DBI {})", fault.active_dbi)
+            };
+
+            let entry = result.correlated_faults.entry(table_name).or_insert((0, 0));
+            entry.0 += 1;
+            if is_major {
+                entry.1 += 1;
+            }
+        } else {
+            // No direct attribution - need timestamp correlation
+            faults_needing_timestamp_correlation.push(fault);
+        }
+    }
+
+    // If all faults have direct attribution, we're done
+    if faults_needing_timestamp_correlation.is_empty() {
+        return result;
+    }
+
+    // Second pass: timestamp correlation for faults without direct attribution
     if cursor_events.is_empty() {
-        result.uncorrelated_faults = page_faults.len() as u64;
-        result.uncorrelated_major_faults =
-            page_faults.iter().filter(|e| e.is_major_fault()).count() as u64;
+        // No cursor events to correlate against
+        result.uncorrelated_faults = faults_needing_timestamp_correlation.len() as u64;
+        result.uncorrelated_major_faults = faults_needing_timestamp_correlation
+            .iter()
+            .filter(|e| e.is_major_fault())
+            .count() as u64;
         return result;
     }
 
@@ -148,7 +197,7 @@ pub fn correlate_faults_with_cursors(
         let table_name = if cursor.dbi < 100 {
             dbi_to_table_name(cursor.dbi).to_string()
         } else {
-            format!("Unknown (pre-trace cursor)")
+            "Unknown (pre-trace cursor)".to_string()
         };
 
         cursor_windows_by_tid
@@ -162,8 +211,8 @@ pub fn correlate_faults_with_cursors(
         windows.sort_by_key(|w| w.0);
     }
 
-    // Now correlate each page fault
-    for fault in page_faults {
+    // Now correlate remaining page faults using timestamp matching
+    for fault in faults_needing_timestamp_correlation {
         let fault_time = fault.timestamp_ns;
         let fault_tid = fault.tid;
         let is_major = fault.is_major_fault();
@@ -172,7 +221,6 @@ pub fn correlate_faults_with_cursors(
         let mut correlated = false;
         if let Some(windows) = cursor_windows_by_tid.get(&fault_tid) {
             // Binary search to find potential matching windows
-            // Find first window that could contain this fault (start_time <= fault_time)
             let search_result = windows.binary_search_by(|w| {
                 if w.1 < fault_time {
                     std::cmp::Ordering::Less
@@ -193,7 +241,8 @@ pub fn correlate_faults_with_cursors(
             for i in check_start..check_end {
                 let (start, end, _dbi, ref table_name) = windows[i];
                 if fault_time >= start && fault_time <= end {
-                    // Found a match!
+                    // Found a match via timestamp correlation
+                    result.timestamp_correlated += 1;
                     let entry = result
                         .correlated_faults
                         .entry(table_name.clone())
@@ -1521,8 +1570,9 @@ fn generate_timeline(
 
 /// Generate table stats using direct correlation between page faults and cursor operations.
 ///
-/// This is the preferred method - it uses timestamp + thread matching to attribute
-/// each page fault to the cursor operation that caused it.
+/// This uses two attribution methods:
+/// 1. Direct BPF attribution (100% accurate) - faults that have active_dbi set
+/// 2. Timestamp + thread matching (fallback) - for older traces without direct attribution
 fn generate_table_stats_correlated(
     events: &[&PageFaultEvent],
     correlation: &FaultCorrelation,
@@ -1569,13 +1619,44 @@ fn generate_table_stats_correlated(
 
     stats.sort_by(|a, b| b.faults.cmp(&a.faults));
 
-    // Generate informative message about correlation
+    // Generate informative message about correlation method used
     let correlation_rate = correlated_total as f64 / total_faults as f64 * 100.0;
-    let warning = Some(format!(
-        "Correlated {:.1}% of page faults ({} of {}) with cursor operations. \
-         {} faults occurred outside cursor windows (background I/O, prefetch, or kernel activity).",
-        correlation_rate, correlated_total, total_faults, correlation.uncorrelated_faults
-    ));
+
+    let warning = if correlation.directly_attributed > 0 {
+        // New BPF-based direct attribution
+        let direct_pct = correlation.directly_attributed as f64 / total_faults as f64 * 100.0;
+        if correlation.timestamp_correlated == 0 {
+            // All faults have direct attribution - best case
+            Some(format!(
+                "Direct BPF attribution: {:.1}% of page faults ({} of {}) attributed with 100% accuracy. \
+                 {} faults occurred outside MDBX operations (background I/O, prefetch, or kernel activity).",
+                direct_pct,
+                correlation.directly_attributed,
+                total_faults,
+                correlation.uncorrelated_faults
+            ))
+        } else {
+            // Mix of direct and timestamp correlation
+            Some(format!(
+                "Correlated {:.1}% of page faults ({} of {}): {} via direct BPF attribution (100% accurate), \
+                 {} via timestamp matching. {} faults occurred outside cursor windows.",
+                correlation_rate,
+                correlated_total,
+                total_faults,
+                correlation.directly_attributed,
+                correlation.timestamp_correlated,
+                correlation.uncorrelated_faults
+            ))
+        }
+    } else {
+        // Fallback to timestamp matching only (older traces)
+        Some(format!(
+            "Timestamp correlation: {:.1}% of page faults ({} of {}) correlated with cursor operations. \
+             {} faults occurred outside cursor windows (background I/O, prefetch, or kernel activity). \
+             Note: Upgrade your trace for 100% accurate direct BPF attribution.",
+            correlation_rate, correlated_total, total_faults, correlation.uncorrelated_faults
+        ))
+    };
 
     (stats, warning)
 }

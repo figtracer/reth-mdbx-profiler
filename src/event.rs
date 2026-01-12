@@ -67,6 +67,13 @@ pub fn dbi_to_table_name(dbi: u32) -> &'static str {
 /// Maximum key size captured in cursor events (must match BPF MAX_KEY_SIZE)
 pub const MAX_KEY_SIZE: usize = 64;
 
+/// Maximum key prefix size for active operation tracking (must match BPF ACTIVE_OP_KEY_PREFIX_SIZE)
+pub const ACTIVE_OP_KEY_PREFIX_SIZE: usize = 16;
+
+/// Sentinel value indicating no active MDBX operation on this thread
+/// (must match BPF NO_ACTIVE_OP_DBI)
+pub const NO_ACTIVE_OP_DBI: u32 = 0xFFFFFFFF;
+
 /// Event types matching the BPF definitions
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,7 +164,11 @@ impl TxnFlags {
     }
 
     pub fn name(&self) -> &'static str {
-        if self.is_read_only() { "RO" } else { "RW" }
+        if self.is_read_only() {
+            "RO"
+        } else {
+            "RW"
+        }
     }
 }
 
@@ -298,7 +309,8 @@ impl std::fmt::Display for CursorOp {
 /// Page fault event from BPF
 ///
 /// This struct must match the layout in mdbx_tracer.bpf.c exactly.
-/// Layout on x86_64 Linux (72 bytes total):
+///
+/// Layout on x86_64 Linux (96 bytes total):
 ///   - timestamp_ns: offset 0, size 8
 ///   - address: offset 8, size 8
 ///   - file_offset: offset 16, size 8
@@ -310,7 +322,11 @@ impl std::fmt::Display for CursorOp {
 ///   - fault_flags: offset 52, size 4
 ///   - latency_ns: offset 56, size 8
 ///   - is_major: offset 64, size 1
-///   - padding: offset 65, size 7 (for 8-byte alignment)
+///   - _pad1: offset 65, size 3 (alignment)
+///   - active_dbi: offset 68, size 4
+///   - active_op_type: offset 72, size 4
+///   - active_cursor_op: offset 76, size 4
+///   - active_key_prefix: offset 80, size 16
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct PageFaultEvent {
@@ -336,8 +352,16 @@ pub struct PageFaultEvent {
     pub latency_ns: u64,
     /// Major fault (disk I/O) vs minor (in page cache)
     pub is_major: u8,
-    // Padding to match C struct alignment (7 bytes to reach 72 total)
-    pub _pad: [u8; 7],
+    /// Padding for alignment
+    pub _pad1: [u8; 3],
+    /// DBI of active MDBX operation (NO_ACTIVE_OP_DBI if none)
+    pub active_dbi: u32,
+    /// Operation type of active operation (EVENT_CURSOR_GET, etc.)
+    pub active_op_type: u32,
+    /// Cursor operation (SET_RANGE, NEXT, etc.) for get operations
+    pub active_cursor_op: u32,
+    /// First 16 bytes of key from active operation
+    pub active_key_prefix: [u8; ACTIVE_OP_KEY_PREFIX_SIZE],
 }
 
 impl PageFaultEvent {
@@ -374,6 +398,53 @@ impl PageFaultEvent {
         } else {
             "data-pages"
         }
+    }
+
+    /// Returns true if this page fault has an associated active MDBX operation.
+    /// This means we know exactly which operation caused this fault.
+    pub fn has_active_op(&self) -> bool {
+        self.active_dbi != NO_ACTIVE_OP_DBI
+    }
+
+    /// Returns the active operation type as an EventType enum, if available
+    pub fn active_op_event_type(&self) -> Option<EventType> {
+        if !self.has_active_op() {
+            return None;
+        }
+        match self.active_op_type {
+            3 => Some(EventType::CursorGet),
+            4 => Some(EventType::CursorPut),
+            5 => Some(EventType::DirectGet),
+            6 => Some(EventType::CursorDel),
+            10 => Some(EventType::DirectPut),
+            11 => Some(EventType::DirectDel),
+            _ => None,
+        }
+    }
+
+    /// Returns the active cursor operation as a CursorOp enum, if applicable
+    pub fn active_cursor_op(&self) -> Option<CursorOp> {
+        if !self.has_active_op() || self.active_op_type != 3 {
+            // Only cursor_get has a meaningful cursor_op
+            return None;
+        }
+        Some(CursorOp::from_raw(self.active_cursor_op))
+    }
+
+    /// Returns the active key prefix as a hex string
+    pub fn active_key_prefix_hex(&self) -> String {
+        if !self.has_active_op() {
+            return String::new();
+        }
+        hex::encode(&self.active_key_prefix)
+    }
+
+    /// Returns the table name for the active operation, if available
+    pub fn active_table_name(&self) -> Option<&'static str> {
+        if !self.has_active_op() {
+            return None;
+        }
+        Some(dbi_to_table_name(self.active_dbi))
     }
 }
 
