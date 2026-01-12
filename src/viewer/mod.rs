@@ -5,7 +5,7 @@
 
 mod template;
 
-use crate::event::{dbi_to_table_name, is_pre_trace_cursor, CursorEvent, PageFaultEvent, TxnEvent};
+use crate::event::{CursorEvent, PageFaultEvent, TxnEvent, dbi_to_table_name, is_pre_trace_cursor};
 use crate::mdbx_metadata::{PageAttribution, RethTable};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -371,7 +371,7 @@ pub struct SlowOpsTableStats {
     pub by_operation: Vec<SlowOpBreakdown>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SlowOpBreakdown {
     pub operation: String,
     pub count: u64,
