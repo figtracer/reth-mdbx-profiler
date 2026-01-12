@@ -89,10 +89,14 @@ fi
 
 # Auto-detect PID
 if [ -z "$PID" ]; then
-    PID=$(pgrep -x reth 2>/dev/null | head -1 || echo "")
-    if [ -z "$PID" ] && [ -n "$RETH_BINARY" ]; then
+    # Try reth binary name if specified
+    if [ -n "$RETH_BINARY" ]; then
         BINARY_NAME=$(basename "$RETH_BINARY")
         PID=$(pgrep -x "$BINARY_NAME" 2>/dev/null | head -1 || echo "")
+    fi
+    # Fall back to default 'reth' name
+    if [ -z "$PID" ]; then
+        PID=$(pgrep -x reth 2>/dev/null | head -1 || echo "")
     fi
     if [ -z "$PID" ]; then
         echo "Error: could not find reth process. use --pid"
