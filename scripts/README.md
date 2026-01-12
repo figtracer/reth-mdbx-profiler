@@ -1,32 +1,25 @@
 # stress testing scripts
 
-scripts for reproducing and analyzing blocking I/O issues in reth.
+scripts for reproducing and analyzing blocking I/O issues in reth using mdbx-profiler.
 
 ## what these do
 
-- generate targeted RPC and metrics endpoint traffic
-- capture profiles during stress workloads
-- produce comparison reports (baseline vs stressed)
+- capture mdbx-profiler traces under different workloads
+- compare baseline (idle) vs stressed I/O patterns
+- generate html reports for each scenario
 
 ## quick start
 
 ```bash
-# stress test the metrics endpoint (blocking I/O issue)
+# run full comparison: baseline vs rpc stress vs metrics stress
+./profile_compare.sh \
+    --mdbx-path /data/reth/db/mdbx.dat \
+    --reth-binary /usr/local/bin/reth \
+    --duration 30
+
+# or run stress tests individually
 ./metrics_stress.sh 30 10 http://localhost:9001
-
-# stress test RPC state queries (unbounded, no semaphore)
-./rpc_stress.sh state_unbounded 30 http://localhost:8545 20
-
-# full profiling session with samply
-./profile_workload.sh \
-    --workload metrics \
-    --duration 30 \
-    --baseline \
-    --samply \
-    --pid $(pgrep reth)
-
-# generate comparison report
-./compare_profiles.sh ./profiles/session_*
+./rpc_stress.sh mixed 30 http://localhost:8545 20
 ```
 
 ## scripts
@@ -65,31 +58,27 @@ generates RPC traffic by category:
 ./rpc_stress.sh state_unbounded 30 http://localhost:8545 50
 ```
 
-### profile_workload.sh
+### profile_compare.sh
 
-orchestrates complete profiling sessions.
+runs mdbx-profiler under three conditions and generates comparison html:
+
+1. **baseline** - idle node, no workload
+2. **rpc_stress** - while hammering RPC endpoints  
+3. **metrics_stress** - while hammering /metrics endpoint
 
 ```bash
-./profile_workload.sh [options]
+./profile_compare.sh [options]
 ```
 
 options:
-- `--workload TYPE`: metrics, rpc_state, rpc_mixed, all
-- `--duration SECS`: duration per test (default: 30)
-- `--baseline`: capture baseline profile first (idle node)
-- `--samply`: use samply for CPU profiling
-- `--mdbx`: use mdbx-profiler for I/O profiling
-- `--mdbx-path PATH`: path to mdbx.dat
-- `--pid PID`: target process (auto-detects reth)
-- `--concurrency N`: concurrent workers (default: 20)
-
-### compare_profiles.sh
-
-generates html comparison report from a profiling session.
-
-```bash
-./compare_profiles.sh SESSION_DIR [OUTPUT_FILE]
-```
+- `--duration SECS`: duration per profile (default: 30)
+- `--pid PID`: reth process id (auto-detects)
+- `--mdbx-path PATH`: path to mdbx.dat (required)
+- `--reth-binary PATH`: path to reth binary (for cursor tracing)
+- `--rpc-url URL`: rpc endpoint (default: http://localhost:8545)
+- `--metrics-url URL`: metrics endpoint (default: http://localhost:9001)
+- `--output-dir DIR`: output directory (default: ./profiles)
+- `--concurrency N`: stress test concurrency (default: 10)
 
 ## the blocking I/O problem
 
@@ -132,30 +121,6 @@ high latencies = blocking I/O contention with node workload.
 - `state_unbounded`: high throughput, may cause mdbx contention
 - `state_execution`: limited by `blocking_io_request_semaphore`
 - `debug_trace`: very low throughput (BlockingTaskGuard, ~4-10 concurrent)
-
-## with profilers
-
-### samply (cpu)
-
-```bash
-samply record --pid $(pgrep reth) --duration 30 &
-./metrics_stress.sh 30 10
-
-samply load ./profile.json
-```
-
-### mdbx-profiler (I/O)
-
-```bash
-sudo ../target/release/mdbx-profiler trace \
-    --pid $(pgrep reth) \
-    --mdbx-path /data/reth/db/mdbx.dat \
-    --duration 30s &
-
-./metrics_stress.sh 30 10
-
-../target/release/mdbx-profiler analyze --input trace.jsonl --format summary
-```
 
 ## reth source references
 
