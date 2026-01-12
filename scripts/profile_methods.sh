@@ -350,6 +350,19 @@ stress_metrics() {
 REQUEST_COUNTS=()
 
 # ============================================================================
+# Capture baseline profile (idle, no load)
+# ============================================================================
+
+echo ""
+echo -e "${YELLOW}[0/${#METHOD_LIST[@]}] Capturing baseline profile (no load)${NC}"
+echo "Duration: ${DURATION}s - measuring idle/background activity"
+
+$PROFILER_CMD --output "$SESSION_DIR/baseline.jsonl" 2>&1 | tee "$SESSION_DIR/baseline_profiler.log"
+
+echo -e "${GREEN}  Baseline complete${NC}"
+sleep 2
+
+# ============================================================================
 # Profile each method
 # ============================================================================
 
@@ -423,6 +436,13 @@ done
 echo ""
 echo -e "${CYAN}Analyzing profiles...${NC}"
 
+# Analyze baseline first
+if [ -f "$SESSION_DIR/baseline.jsonl" ]; then
+    echo "  Analyzing baseline..."
+    "$ANALYZER" --input "$SESSION_DIR/baseline.jsonl" --mdbx-path "$MDBX_PATH" \
+        --format compact --label "baseline" 2>/dev/null > "$SESSION_DIR/baseline.json"
+fi
+
 for method in "${METHOD_LIST[@]}"; do
     if [ -f "$SESSION_DIR/${method}.jsonl" ]; then
         echo "  Analyzing ${method}..."
@@ -438,10 +458,18 @@ done
 
 echo "Generating comparison report..."
 
-# Collect all compact JSONs
+# Collect all compact JSONs (baseline first, then methods)
 COMPARISON_JSON="$SESSION_DIR/comparison_data.json"
 echo "[" > "$COMPARISON_JSON"
 first=true
+
+# Add baseline first
+if [ -f "$SESSION_DIR/baseline.json" ] && [ -s "$SESSION_DIR/baseline.json" ]; then
+    first=false
+    cat "$SESSION_DIR/baseline.json" >> "$COMPARISON_JSON"
+fi
+
+# Add all methods
 for method in "${METHOD_LIST[@]}"; do
     json="$SESSION_DIR/${method}.json"
     if [ -f "$json" ] && [ -s "$json" ]; then
@@ -580,6 +608,42 @@ cat > "$SESSION_DIR/comparison.html" << 'HTMLEOF'
             margin-top: 24px;
         }
         .table-breakdown th:first-child { width: 200px; }
+
+        .baseline-banner {
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            border: 1px solid #3b82f6;
+            border-radius: 8px;
+            padding: 16px 20px;
+            margin-bottom: 24px;
+        }
+        .baseline-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: #3b82f6;
+            margin-bottom: 8px;
+        }
+        .baseline-stats {
+            display: flex;
+            gap: 24px;
+            font-size: 13px;
+            color: #e4e4e7;
+            margin-bottom: 8px;
+        }
+        .baseline-note {
+            font-size: 11px;
+            color: #71717a;
+        }
+        .stat-delta {
+            font-size: 10px;
+            margin-top: 4px;
+        }
+        .stat-delta.delta-bad { color: #f87171; }
+        .stat-delta.delta-good { color: #22c55e; }
+
+        .delta-bar-bad { background: #f87171; }
+        .delta-bar-good { background: #22c55e; }
+        .delta-text-bad { color: #f87171; }
+        .delta-text-good { color: #22c55e; }
     </style>
 </head>
 <body>
@@ -606,22 +670,55 @@ cat >> "$SESSION_DIR/comparison.html" << 'HTMLEOF2'
 
         const fmtPct = n => (n * 100).toFixed(1) + '%';
 
+        const fmtDelta = n => {
+            if (n === null || n === undefined) return '-';
+            const prefix = n > 0 ? '+' : '';
+            if (Math.abs(n) >= 1e6) return prefix + (n/1e6).toFixed(1) + 'M';
+            if (Math.abs(n) >= 1e3) return prefix + (n/1e3).toFixed(1) + 'K';
+            return prefix + (n.toFixed ? n.toFixed(0) : n);
+        };
+
         if (!DATA || !Array.isArray(DATA) || DATA.length === 0) {
             document.getElementById('content').innerHTML =
                 '<p style="color: #f87171;">No profile data found.</p>';
         } else {
 
-        // Sort by total faults (worst first)
-        const sorted = [...DATA].sort((a, b) => b.page_faults.total - a.page_faults.total);
+        // Extract baseline and methods
+        const baseline = DATA.find(d => d.label === 'baseline');
+        const methods = DATA.filter(d => d.label !== 'baseline');
+
+        // Sort methods by delta from baseline (worst first)
+        const sorted = [...methods].sort((a, b) => {
+            const deltaA = baseline ? (a.page_faults.total - baseline.page_faults.total) : a.page_faults.total;
+            const deltaB = baseline ? (b.page_faults.total - baseline.page_faults.total) : b.page_faults.total;
+            return deltaB - deltaA;
+        });
+
         const maxFaults = sorted[0]?.page_faults?.total || 1;
-        const maxMajor = Math.max(...DATA.map(d => d.page_faults.major));
-        const maxRate = Math.max(...DATA.map(d => d.page_faults.rate_per_sec));
+        const maxMajor = Math.max(...methods.map(d => d.page_faults.major));
+        const maxRate = Math.max(...methods.map(d => d.page_faults.rate_per_sec));
+        const maxDelta = baseline ? Math.max(...methods.map(d => d.page_faults.total - baseline.page_faults.total)) : maxFaults;
 
         // Find best/worst
         const worstMethod = sorted[0]?.label;
         const bestMethod = sorted[sorted.length - 1]?.label;
 
         let html = '';
+
+        // Baseline info banner
+        if (baseline) {
+            const bpf = baseline.page_faults;
+            html += `
+            <div class="baseline-banner">
+                <div class="baseline-title">Baseline (Idle)</div>
+                <div class="baseline-stats">
+                    <span>Total: ${fmt(bpf.total)}</span>
+                    <span>Major: ${fmt(bpf.major)}</span>
+                    <span>Rate: ${fmt(bpf.rate_per_sec)}/s</span>
+                </div>
+                <div class="baseline-note">Delta values below show additional load caused by each method</div>
+            </div>`;
+        }
 
         // Summary cards
         html += '<div class="summary-grid">';
@@ -631,6 +728,11 @@ cat >> "$SESSION_DIR/comparison.html" << 'HTMLEOF2'
             const isBest = profile.label === bestMethod;
             const cardClass = isWorst ? 'worst' : (isBest ? 'best' : '');
 
+            // Calculate deltas from baseline
+            const deltaTotal = baseline ? (pf.total - baseline.page_faults.total) : pf.total;
+            const deltaMajor = baseline ? (pf.major - baseline.page_faults.major) : pf.major;
+            const deltaRate = baseline ? (pf.rate_per_sec - baseline.page_faults.rate_per_sec) : pf.rate_per_sec;
+
             html += `
             <div class="method-card ${cardClass}">
                 <div class="method-name">${profile.label}</div>
@@ -638,14 +740,17 @@ cat >> "$SESSION_DIR/comparison.html" << 'HTMLEOF2'
                     <div class="stat">
                         <div class="stat-label">Total Faults</div>
                         <div class="stat-value">${fmt(pf.total)}</div>
+                        ${baseline ? `<div class="stat-delta ${deltaTotal > 0 ? 'delta-bad' : 'delta-good'}">${fmtDelta(deltaTotal)} vs baseline</div>` : ''}
                     </div>
                     <div class="stat">
                         <div class="stat-label">Major (Disk)</div>
                         <div class="stat-value ${pf.major_ratio > 0.4 ? 'bad' : ''}">${fmt(pf.major)}</div>
+                        ${baseline ? `<div class="stat-delta ${deltaMajor > 0 ? 'delta-bad' : 'delta-good'}">${fmtDelta(deltaMajor)} vs baseline</div>` : ''}
                     </div>
                     <div class="stat">
                         <div class="stat-label">Fault Rate</div>
                         <div class="stat-value">${fmt(pf.rate_per_sec)}/s</div>
+                        ${baseline ? `<div class="stat-delta ${deltaRate > 0 ? 'delta-bad' : 'delta-good'}">${fmtDelta(deltaRate)}/s vs baseline</div>` : ''}
                     </div>
                     <div class="stat">
                         <div class="stat-label">Major Ratio</div>
@@ -659,13 +764,14 @@ cat >> "$SESSION_DIR/comparison.html" << 'HTMLEOF2'
         // Ranking table
         html += `
         <div class="section">
-            <div class="section-title">Method Ranking by Page Faults</div>
+            <div class="section-title">Method Ranking by Page Faults ${baseline ? '(sorted by delta from baseline)' : ''}</div>
             <table class="ranking-table">
                 <thead>
                     <tr>
                         <th>#</th>
                         <th>Method</th>
                         <th>Total Faults</th>
+                        ${baseline ? '<th>Delta from Baseline</th>' : ''}
                         <th>Major Faults</th>
                         <th>Fault Rate</th>
                         <th>Major Ratio</th>
@@ -678,6 +784,8 @@ cat >> "$SESSION_DIR/comparison.html" << 'HTMLEOF2'
             const pf = profile.page_faults;
             const barWidth = (pf.total / maxFaults * 100);
             const majorBarWidth = (pf.major / maxMajor * 100);
+            const deltaTotal = baseline ? (pf.total - baseline.page_faults.total) : 0;
+            const deltaBarWidth = baseline && maxDelta > 0 ? (Math.abs(deltaTotal) / maxDelta * 100) : 0;
 
             html += `
                 <tr>
@@ -689,6 +797,13 @@ cat >> "$SESSION_DIR/comparison.html" << 'HTMLEOF2'
                             <span>${fmt(pf.total)}</span>
                         </div>
                     </td>
+                    ${baseline ? `
+                    <td>
+                        <div class="bar-cell">
+                            <div class="bar ${deltaTotal > 0 ? 'delta-bar-bad' : 'delta-bar-good'}" style="width: ${deltaBarWidth}%; min-width: 4px;"></div>
+                            <span class="${deltaTotal > 0 ? 'delta-text-bad' : 'delta-text-good'}">${fmtDelta(deltaTotal)}</span>
+                        </div>
+                    </td>` : ''}
                     <td>
                         <div class="bar-cell">
                             <div class="bar major" style="width: ${majorBarWidth}%; min-width: 4px;"></div>
