@@ -132,7 +132,7 @@ int BPF_URETPROBE(trace_cursor_get_ret, int ret)
 
 ### result
 
-page fault events now carry full operation context:
+page fault events carry full operation context:
 
 ```rust
 // src/event.rs
