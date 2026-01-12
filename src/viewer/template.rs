@@ -130,6 +130,14 @@ pub fn generate_html(data: &ViewerData) -> String {
                     <span class="attribution-summary" id="tables-attribution-summary"></span>
                 </div>
 
+                <!-- Fault distribution bar chart -->
+                <div class="card full-width" id="fault-dist-card" style="display:none;">
+                    <div class="card-header">Fault Distribution by Table</div>
+                    <div class="card-body" style="height: 200px; padding: 8px 16px;">
+                        <canvas id="fault-dist-chart"></canvas>
+                    </div>
+                </div>
+
                 <!-- Unified table with expandable rows -->
                 <div class="card full-width">
                     <div class="card-header">
@@ -145,7 +153,7 @@ pub fn generate_html(data: &ViewerData) -> String {
                                     <th>Faults</th>
                                     <th>Major</th>
                                     <th>Slow Ops</th>
-                                    <th>Time Lost</th>
+                                    <th>I/O Time</th>
                                     <th>Top Operation</th>
                                 </tr>
                             </thead>
@@ -530,8 +538,8 @@ body {
     color: #f87171;
 }
 
-.time-lost {
-    color: #fbbf24;
+.io-time {
+    color: #60a5fa;
     font-weight: 500;
 }
 
@@ -1162,6 +1170,75 @@ class Chart {
     }
 }
 
+// Horizontal bar chart for fault distribution
+function drawFaultDistChart(canvas, labels, totalFaults, majorFaults) {
+    const ctx = canvas.getContext('2d');
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width === 0) return;
+
+    canvas.width = rect.width * 2;
+    canvas.height = rect.height * 2;
+    ctx.scale(2, 2);
+
+    const w = rect.width;
+    const h = rect.height;
+    const pad = { t: 8, r: 70, b: 8, l: 140 };
+    const chartW = w - pad.l - pad.r;
+    const chartH = h - pad.t - pad.b;
+
+    const max = Math.max(...totalFaults) * 1.1 || 1;
+    const barH = Math.min(20, (chartH / labels.length) * 0.75);
+    const gap = (chartH / labels.length) - barH;
+
+    ctx.clearRect(0, 0, w, h);
+
+    labels.forEach((label, i) => {
+        const total = totalFaults[i];
+        const major = majorFaults[i];
+        const minor = total - major;
+
+        const totalBarW = (total / max) * chartW;
+        const majorBarW = (major / max) * chartW;
+        const y = pad.t + i * (barH + gap) + gap / 2;
+
+        // Minor faults bar (blue) - full width
+        ctx.fillStyle = '#3b82f6';
+        ctx.fillRect(pad.l, y, totalBarW, barH);
+
+        // Major faults bar (red) - overlaid on the right portion
+        if (major > 0) {
+            ctx.fillStyle = '#f87171';
+            ctx.fillRect(pad.l + totalBarW - majorBarW, y, majorBarW, barH);
+        }
+
+        // Label (left)
+        ctx.fillStyle = '#a1a1aa';
+        ctx.font = '11px sans-serif';
+        ctx.textAlign = 'right';
+        const labelText = label.length > 18 ? label.substring(0, 16) + '...' : label;
+        ctx.fillText(labelText, pad.l - 8, y + barH / 2 + 4);
+
+        // Value (right)
+        ctx.fillStyle = '#71717a';
+        ctx.textAlign = 'left';
+        const fmtVal = n => n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'K' : n.toFixed(0);
+        ctx.fillText(fmtVal(total), pad.l + totalBarW + 8, y + barH / 2 + 4);
+    });
+
+    // Legend
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#3b82f6';
+    ctx.fillRect(w - 65, 8, 10, 10);
+    ctx.fillStyle = '#71717a';
+    ctx.fillText('Minor', w - 70, 16);
+
+    ctx.fillStyle = '#f87171';
+    ctx.fillRect(w - 65, 22, 10, 10);
+    ctx.fillStyle = '#71717a';
+    ctx.fillText('Major', w - 70, 30);
+}
+
 // Utilities
 const fmt = n => n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'K' : n.toFixed(0);
 const fmtBlock = n => n.toLocaleString();  // Full block numbers with commas
@@ -1188,9 +1265,89 @@ document.querySelectorAll('.tab').forEach(tab => {
     });
 });
 
-// Export
+// Export - generates compact JSON optimized for analysis
 document.getElementById('export-compact-btn').addEventListener('click', () => {
-    const json = JSON.stringify(DATA, null, 2);
+    // Build compact export (removes large arrays, keeps key metrics)
+    const compact = {
+        trace: {
+            duration_secs: DATA.summary.duration_secs,
+            total_events: DATA.summary.total_events,
+            file_size_gb: DATA.summary.file_size_gb,
+            block_range: DATA.summary.block_range
+        },
+        page_faults: {
+            total: DATA.summary.page_faults,
+            major: DATA.summary.major_faults,
+            minor: DATA.summary.minor_faults,
+            major_ratio: DATA.summary.major_fault_ratio,
+            rate_per_sec: DATA.summary.fault_rate_per_sec,
+            unique_pages: DATA.summary.unique_pages,
+            sequential_ratio: DATA.patterns.sequential_ratio,
+            random_ratio: DATA.patterns.random_ratio,
+            top_strides: DATA.patterns.top_strides
+        },
+        tables: DATA.unified_tables.map(t => ({
+            name: t.name,
+            faults: t.faults,
+            major_faults: t.major_faults,
+            fault_pct: t.fault_percentage,
+            slow_ops: t.slow_ops,
+            time_lost_ms: t.time_lost_ms,
+            top_op: t.top_operation,
+            faults_by_op: t.details.faults_by_op
+        })),
+        threads: DATA.threads.slice(0, 10),
+        cursor_ops: DATA.cursor_data.has_data ? {
+            total: DATA.cursor_data.summary.total_ops,
+            rate_per_sec: DATA.cursor_data.summary.op_rate_per_sec,
+            seek_ratio: DATA.cursor_data.summary.seek_ratio,
+            latency_avg_us: DATA.cursor_data.summary.avg_latency_us,
+            latency_p95_us: DATA.cursor_data.summary.p95_latency_us,
+            latency_p99_us: DATA.cursor_data.summary.p99_latency_us,
+            by_operation: DATA.cursor_data.operations.slice(0, 10),
+            by_table: DATA.cursor_data.table_stats.slice(0, 15).map(t => ({
+                name: t.name,
+                ops: t.ops,
+                pct: t.percentage,
+                avg_latency_us: t.avg_latency_us,
+                p95_latency_us: t.p95_latency_us
+            })),
+            slow_tables: DATA.cursor_data.slow_ops_by_table.slice(0, 10).map(s => ({
+                table: s.table,
+                slow_ops: s.slow_op_count,
+                time_lost_ms: s.total_slow_time_ms,
+                by_op: s.by_operation.slice(0, 5)
+            })),
+            slow_keys: DATA.cursor_data.slow_keys.slice(0, 20)
+        } : null,
+        transactions: DATA.txn_data.has_data ? {
+            total: DATA.txn_data.summary.begin_count,
+            rate_per_sec: DATA.txn_data.summary.txn_rate_per_sec,
+            ro_count: DATA.txn_data.summary.ro_count,
+            rw_count: DATA.txn_data.summary.rw_count,
+            commits: DATA.txn_data.summary.commit_count,
+            aborts: DATA.txn_data.summary.abort_count,
+            commit_latency_avg_us: DATA.txn_data.summary.avg_commit_latency_us,
+            commit_latency_p95_us: DATA.txn_data.summary.p95_commit_latency_us,
+            commit_latency_p99_us: DATA.txn_data.summary.p99_commit_latency_us,
+            commit_latency_max_us: DATA.txn_data.summary.max_commit_latency_us,
+            concurrency: {
+                max_ro: DATA.txn_data.concurrency.max_concurrent_ro,
+                max_rw: DATA.txn_data.concurrency.max_concurrent_rw,
+                avg_ro: DATA.txn_data.concurrency.avg_concurrent_ro
+            },
+            top_threads: DATA.txn_data.thread_stats.slice(0, 10)
+        } : null,
+        attribution: DATA.direct_fault_attribution.has_data ? {
+            directly_attributed: DATA.direct_fault_attribution.directly_attributed_count,
+            timestamp_fallback: DATA.direct_fault_attribution.timestamp_fallback_count,
+            uncorrelated: DATA.direct_fault_attribution.uncorrelated_count,
+            by_op_type: DATA.direct_fault_attribution.faults_by_op_type,
+            by_cursor_op: DATA.direct_fault_attribution.faults_by_cursor_op
+        } : null
+    };
+
+    const json = JSON.stringify(compact, null, 2);
     const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -1355,6 +1512,17 @@ function initTables() {
             `${fmt(dfa.uncorrelated_count)} uncorrelated`;
     }
 
+    // Draw fault distribution bar chart
+    if (unified.length > 0) {
+        document.getElementById('fault-dist-card').style.display = 'block';
+        const chartCanvas = document.getElementById('fault-dist-chart');
+        const topTables = unified.slice(0, 8); // Top 8 tables by faults
+        const labels = topTables.map(t => t.name);
+        const faults = topTables.map(t => t.faults);
+        const majorFaults = topTables.map(t => t.major_faults);
+        drawFaultDistChart(chartCanvas, labels, faults, majorFaults);
+    }
+
     // Build unified table with expandable rows
     const tbody = document.querySelector('#unified-tables tbody');
 
@@ -1364,7 +1532,7 @@ function initTables() {
         tr.className = 'table-row';
         tr.dataset.idx = idx;
 
-        const timeLost = t.time_lost_ms >= 1000
+        const ioTime = t.time_lost_ms >= 1000
             ? (t.time_lost_ms / 1000).toFixed(1) + 's'
             : t.time_lost_ms.toFixed(0) + 'ms';
 
@@ -1374,7 +1542,7 @@ function initTables() {
             <td>${fmt(t.faults)}</td>
             <td class="major">${fmt(t.major_faults)}</td>
             <td>${t.slow_ops > 0 ? fmt(t.slow_ops) + ' (' + t.slow_ops_percentage.toFixed(1) + '%)' : '-'}</td>
-            <td class="time-lost">${t.time_lost_ms > 0 ? timeLost : '-'}</td>
+            <td class="io-time">${t.time_lost_ms > 0 ? ioTime : '-'}</td>
             <td>${t.top_operation || '-'}</td>
         `;
         tbody.appendChild(tr);

@@ -182,28 +182,31 @@ all operations that can cause page faults are tracked:
 
 the html viewer shows three tabs:
 
-### overview tab
+### physical tab
 
-- **fault timeline**: page faults over time (drag to zoom)
+- **metrics row**: duration, block range, fault counts, fault rate, major ratio
+- **fault timeline**: page faults over time (drag to zoom, double-click to reset)
 - **access heatmap**: 2D density of faults by time and file offset
-- **page faults by table**: attributed via direct bpf lookup
-- **page faults by operation type**: CURSOR_GET, CURSOR_PUT, etc.
-- **page faults by cursor op**: SET_RANGE, NEXT, GET_BOTH_RANGE, etc.
+- **access pattern**: sequential vs random ratio, top stride patterns
+- **top threads**: threads causing the most page faults
+
+### tables tab
+
+- **fault distribution chart**: horizontal bar chart showing faults per table
 - **attribution summary**: directly attributed vs uncorrelated counts
+- **i/o impact table**: unified view with expandable rows showing:
+  - faults and major faults per table
+  - slow ops count and percentage
+  - i/o time (cumulative time spent in slow operations)
+  - top operation type causing faults
+  - drill-down details: faults by operation, by cursor op, hot keys
 
-### cursor ops tab
+### transactions tab
 
-- **latency distribution**: avg, p50, p95, p99
-- **operations by type**: seeks vs navigation
-- **operations by table**: which tables are accessed most
-- **slow operations (>100μs)**: likely page faults
-- **hot keys**: frequently slow key accesses
-
-### mdbx txns tab
-
-- **transaction counts**: RO vs RW
+- **transaction metrics**: total, rate, RO/RW counts, commits/aborts
+- **concurrency stats**: max and avg concurrent RO transactions
 - **concurrency timeline**: concurrent RO transactions over time
-- **rw commit latency**: when and how long RW commits take
+- **rw commit latency timeline**: when and how long RW commits take
 - **thread distribution**: which threads do transaction work
 
 ## attribution accuracy
