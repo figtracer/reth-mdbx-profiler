@@ -131,6 +131,41 @@ pub fn generate_html(data: &ViewerData) -> String {
                         </div>
                     </div>
                 </div>
+
+                <!-- Direct Fault Attribution (when available) -->
+                <div id="direct-attribution-section" class="card full-width" style="display:none;">
+                    <div class="card-header">
+                        Page Faults by Operation Type
+                        <span class="card-badge direct-badge">Direct BPF Attribution</span>
+                    </div>
+                    <div class="card-body">
+                        <div class="attribution-summary" id="attribution-summary"></div>
+                        <div class="two-col">
+                            <div>
+                                <div class="section-title">By Operation Type</div>
+                                <div class="compact-table-container" style="max-height:200px;">
+                                    <table class="compact-table" id="faults-by-op-type-table">
+                                        <thead>
+                                            <tr><th>Operation</th><th>Faults</th><th>Major</th><th>%</th></tr>
+                                        </thead>
+                                        <tbody></tbody>
+                                    </table>
+                                </div>
+                            </div>
+                            <div>
+                                <div class="section-title">By Cursor Operation (GET only)</div>
+                                <div class="compact-table-container" style="max-height:200px;">
+                                    <table class="compact-table" id="faults-by-cursor-op-table">
+                                        <thead>
+                                            <tr><th>Cursor Op</th><th>Faults</th><th>Major</th><th>%</th></tr>
+                                        </thead>
+                                        <tbody></tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </section>
 
             <!-- CURSOR OPS TAB -->
@@ -521,6 +556,16 @@ body {
     background: #22c55e20;
     color: #22c55e;
     font-weight: 500;
+}
+
+.card-badge.direct-badge {
+    background: #3b82f620;
+    color: #3b82f6;
+}
+
+.attribution-summary {
+    font-size: 13px;
+    color: #d4d4d8;
 }
 
 .axis-hint {
@@ -1299,9 +1344,51 @@ function initOverview() {
         tbody.appendChild(tr);
     });
 
-    // Correlation badge
-    if (DATA.page_fault_attribution_warning) {
-        document.getElementById('correlation-badge').textContent = 'Correlated';
+    // Correlation badge - update based on attribution method
+    const dfa = DATA.direct_fault_attribution;
+    if (dfa && dfa.has_data) {
+        const badge = document.getElementById('correlation-badge');
+        badge.textContent = 'Direct BPF';
+        badge.classList.add('direct-badge');
+        badge.title = `${fmt(dfa.directly_attributed_count)} faults attributed with 100% accuracy`;
+    } else if (DATA.page_fault_attribution_warning) {
+        document.getElementById('correlation-badge').textContent = 'Timestamp Correlated';
+    }
+
+    // Direct fault attribution section
+    if (dfa && dfa.has_data) {
+        document.getElementById('direct-attribution-section').style.display = 'block';
+
+        // Attribution summary
+        const total = dfa.directly_attributed_count + dfa.timestamp_fallback_count + dfa.uncorrelated_count;
+        const directPct = (dfa.directly_attributed_count / total * 100).toFixed(1);
+        document.getElementById('attribution-summary').innerHTML = `
+            <div style="display:flex;gap:20px;margin-bottom:12px;">
+                <span><strong>${fmt(dfa.directly_attributed_count)}</strong> directly attributed (${directPct}%)</span>
+                <span style="color:#71717a;">${fmt(dfa.timestamp_fallback_count)} timestamp fallback</span>
+                <span style="color:#71717a;">${fmt(dfa.uncorrelated_count)} uncorrelated</span>
+            </div>
+        `;
+
+        // Faults by operation type
+        const opTypeTbody = document.querySelector('#faults-by-op-type-table tbody');
+        dfa.faults_by_op_type.forEach(t => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `<td>${t.op_type}</td><td>${fmt(t.total_faults)}</td><td>${fmt(t.major_faults)}</td><td>${t.percentage.toFixed(1)}%</td>`;
+            opTypeTbody.appendChild(tr);
+        });
+
+        // Faults by cursor operation
+        const cursorOpTbody = document.querySelector('#faults-by-cursor-op-table tbody');
+        if (dfa.faults_by_cursor_op && dfa.faults_by_cursor_op.length > 0) {
+            dfa.faults_by_cursor_op.forEach(t => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `<td>${t.cursor_op}</td><td>${fmt(t.total_faults)}</td><td>${fmt(t.major_faults)}</td><td>${t.percentage.toFixed(1)}%</td>`;
+                cursorOpTbody.appendChild(tr);
+            });
+        } else {
+            cursorOpTbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:#71717a;">No CURSOR_GET faults</td></tr>';
+        }
     }
 
     // Access patterns

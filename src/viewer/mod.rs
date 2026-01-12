@@ -5,7 +5,7 @@
 
 mod template;
 
-use crate::event::{CursorEvent, PageFaultEvent, TxnEvent, dbi_to_table_name, is_pre_trace_cursor};
+use crate::event::{dbi_to_table_name, is_pre_trace_cursor, CursorEvent, PageFaultEvent, TxnEvent};
 use crate::mdbx_metadata::{PageAttribution, RethTable};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -290,6 +290,43 @@ pub struct ViewerData {
     pub txn_data: TxnData,
     /// Warning about page fault attribution method
     pub page_fault_attribution_warning: Option<String>,
+    /// Direct fault attribution data (from BPF active_ops tracking)
+    pub direct_fault_attribution: DirectFaultAttribution,
+}
+
+/// Direct fault attribution data from BPF active_ops tracking.
+#[derive(Debug, Serialize, Default)]
+pub struct DirectFaultAttribution {
+    /// Whether direct attribution data is available
+    pub has_data: bool,
+    /// Number of faults with direct attribution
+    pub directly_attributed_count: u64,
+    /// Number of faults using timestamp fallback
+    pub timestamp_fallback_count: u64,
+    /// Number of uncorrelated faults
+    pub uncorrelated_count: u64,
+    /// Faults by operation type (CURSOR_GET, CURSOR_PUT, etc.)
+    pub faults_by_op_type: Vec<FaultsByOpType>,
+    /// Faults by cursor operation (SET_RANGE, NEXT, etc.) - only for CURSOR_GET
+    pub faults_by_cursor_op: Vec<FaultsByCursorOp>,
+}
+
+/// Fault counts grouped by operation type
+#[derive(Debug, Serialize)]
+pub struct FaultsByOpType {
+    pub op_type: String,
+    pub total_faults: u64,
+    pub major_faults: u64,
+    pub percentage: f64,
+}
+
+/// Fault counts grouped by cursor operation (for CURSOR_GET only)
+#[derive(Debug, Serialize)]
+pub struct FaultsByCursorOp {
+    pub cursor_op: String,
+    pub total_faults: u64,
+    pub major_faults: u64,
+    pub percentage: f64,
 }
 
 /// Cursor operation statistics
@@ -744,6 +781,9 @@ pub fn generate_viewer_data(
     // Heatmap
     let heatmap = generate_heatmap(&page_faults, min_ts, duration_ns, min_offset, max_offset);
 
+    // Generate direct fault attribution data from page faults with active_op info
+    let direct_fault_attribution = generate_direct_fault_attribution(&page_faults, &correlation);
+
     ViewerData {
         summary,
         timeline,
@@ -755,6 +795,108 @@ pub fn generate_viewer_data(
         cursor_data,
         txn_data,
         page_fault_attribution_warning,
+        direct_fault_attribution,
+    }
+}
+
+/// Generate direct fault attribution data from page faults with active_op info.
+/// This extracts per-operation-type and per-cursor-op fault counts from BPF-attributed faults.
+fn generate_direct_fault_attribution(
+    page_faults: &[&PageFaultEvent],
+    correlation: &FaultCorrelation,
+) -> DirectFaultAttribution {
+    use crate::event::CursorOp;
+
+    // Count faults by operation type
+    // Key: op_type (3=CURSOR_GET, 4=CURSOR_PUT, etc.), Value: (total, major)
+    let mut faults_by_op_type: HashMap<u32, (u64, u64)> = HashMap::new();
+
+    // Count faults by cursor operation (only for CURSOR_GET, op_type=3)
+    // Key: cursor_op, Value: (total, major)
+    let mut faults_by_cursor_op: HashMap<u32, (u64, u64)> = HashMap::new();
+
+    let mut directly_attributed = 0u64;
+
+    for fault in page_faults {
+        if fault.has_active_op() {
+            directly_attributed += 1;
+            let is_major = fault.is_major_fault();
+
+            // Count by operation type
+            let entry = faults_by_op_type
+                .entry(fault.active_op_type)
+                .or_insert((0, 0));
+            entry.0 += 1;
+            if is_major {
+                entry.1 += 1;
+            }
+
+            // For CURSOR_GET operations, also count by cursor op
+            if fault.active_op_type == 3 {
+                // EVENT_CURSOR_GET
+                let cursor_entry = faults_by_cursor_op
+                    .entry(fault.active_cursor_op)
+                    .or_insert((0, 0));
+                cursor_entry.0 += 1;
+                if is_major {
+                    cursor_entry.1 += 1;
+                }
+            }
+        }
+    }
+
+    // If no direct attribution data, return empty
+    if directly_attributed == 0 {
+        return DirectFaultAttribution::default();
+    }
+
+    // Convert to sorted vectors
+    let total_faults = page_faults.len() as u64;
+
+    let op_type_name = |op: u32| -> &'static str {
+        match op {
+            3 => "CURSOR_GET",
+            4 => "CURSOR_PUT",
+            5 => "DIRECT_GET",
+            6 => "CURSOR_DEL",
+            10 => "DIRECT_PUT",
+            11 => "DIRECT_DEL",
+            _ => "UNKNOWN",
+        }
+    };
+
+    let mut faults_by_op_type_vec: Vec<FaultsByOpType> = faults_by_op_type
+        .into_iter()
+        .map(|(op_type, (total, major))| FaultsByOpType {
+            op_type: op_type_name(op_type).to_string(),
+            total_faults: total,
+            major_faults: major,
+            percentage: total as f64 / directly_attributed as f64 * 100.0,
+        })
+        .collect();
+    faults_by_op_type_vec.sort_by(|a, b| b.total_faults.cmp(&a.total_faults));
+
+    let mut faults_by_cursor_op_vec: Vec<FaultsByCursorOp> = faults_by_cursor_op
+        .into_iter()
+        .map(|(cursor_op, (total, major))| {
+            let op = CursorOp::from_raw(cursor_op);
+            FaultsByCursorOp {
+                cursor_op: op.name().to_string(),
+                total_faults: total,
+                major_faults: major,
+                percentage: total as f64 / directly_attributed as f64 * 100.0,
+            }
+        })
+        .collect();
+    faults_by_cursor_op_vec.sort_by(|a, b| b.total_faults.cmp(&a.total_faults));
+
+    DirectFaultAttribution {
+        has_data: true,
+        directly_attributed_count: correlation.directly_attributed,
+        timestamp_fallback_count: correlation.timestamp_correlated,
+        uncorrelated_count: correlation.uncorrelated_faults,
+        faults_by_op_type: faults_by_op_type_vec,
+        faults_by_cursor_op: faults_by_cursor_op_vec,
     }
 }
 
