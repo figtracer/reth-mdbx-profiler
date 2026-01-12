@@ -175,17 +175,353 @@ echo "      metrics stress complete"
 echo ""
 
 # ============================================================================
-# generate html reports
+# generate html reports and compact exports
 # ============================================================================
-echo "generating html reports..."
+echo "generating reports..."
 
 for trace in baseline rpc_stress metrics_stress; do
     if [ -f "$SESSION_DIR/${trace}.jsonl" ]; then
         echo "  analyzing ${trace}..."
+        # generate individual html
         "$ANALYZER" --input "$SESSION_DIR/${trace}.jsonl" --mdbx-path "$MDBX_PATH" \
             --output "$SESSION_DIR/${trace}.html" 2>/dev/null || true
+        # generate compact json for comparison
+        "$ANALYZER" --input "$SESSION_DIR/${trace}.jsonl" --mdbx-path "$MDBX_PATH" \
+            --format compact --label "$trace" > "$SESSION_DIR/${trace}.json" 2>/dev/null || true
     fi
 done
+
+# ============================================================================
+# generate comparison html
+# ============================================================================
+echo "generating comparison report..."
+
+# collect all compact jsons into array
+COMPARISON_DATA="["
+first=true
+for json in "$SESSION_DIR"/*.json; do
+    if [ -f "$json" ]; then
+        if [ "$first" = true ]; then
+            first=false
+        else
+            COMPARISON_DATA+=","
+        fi
+        COMPARISON_DATA+=$(cat "$json")
+    fi
+done
+COMPARISON_DATA+="]"
+
+# generate comparison html
+cat > "$SESSION_DIR/comparison.html" << 'HTMLEOF'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MDBX Profile Comparison</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #000;
+            color: #e4e4e7;
+            padding: 24px;
+            line-height: 1.5;
+        }
+        .container { max-width: 1400px; margin: 0 auto; }
+        h1 { color: #3b82f6; margin-bottom: 8px; }
+        .subtitle { color: #71717a; margin-bottom: 24px; }
+
+        .comparison-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .profile-card {
+            background: #12121a;
+            border-radius: 10px;
+            border: 1px solid #1e1e2a;
+            overflow: hidden;
+        }
+        .profile-card.baseline { border-top: 3px solid #22c55e; }
+        .profile-card.rpc_stress { border-top: 3px solid #a855f7; }
+        .profile-card.metrics_stress { border-top: 3px solid #f87171; }
+
+        .card-header {
+            padding: 16px;
+            background: #0a0a0f;
+            border-bottom: 1px solid #1e1e2a;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .card-title { font-size: 16px; font-weight: 600; }
+        .card-badge {
+            font-size: 11px;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-weight: 500;
+        }
+        .badge-baseline { background: #22c55e20; color: #22c55e; }
+        .badge-rpc { background: #a855f720; color: #a855f7; }
+        .badge-metrics { background: #f8717120; color: #f87171; }
+
+        .card-body { padding: 16px; }
+
+        .metric-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
+        }
+        .metric {
+            background: #0a0a0f;
+            padding: 12px;
+            border-radius: 6px;
+        }
+        .metric-label {
+            font-size: 11px;
+            color: #71717a;
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }
+        .metric-value {
+            font-size: 20px;
+            font-weight: 700;
+            color: #3b82f6;
+        }
+        .metric-value.major { color: #f87171; }
+        .metric-value.good { color: #22c55e; }
+
+        .delta {
+            font-size: 12px;
+            margin-left: 8px;
+            padding: 2px 6px;
+            border-radius: 4px;
+        }
+        .delta.up { background: #f8717120; color: #f87171; }
+        .delta.down { background: #22c55e20; color: #22c55e; }
+
+        .section { margin-bottom: 24px; }
+        .section-title {
+            font-size: 14px;
+            color: #3b82f6;
+            text-transform: uppercase;
+            margin-bottom: 12px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid #1e1e2a;
+        }
+
+        .table-comparison {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+        .table-comparison th,
+        .table-comparison td {
+            padding: 10px 12px;
+            text-align: left;
+            border-bottom: 1px solid #1e1e2a;
+        }
+        .table-comparison th {
+            background: #0a0a0f;
+            color: #71717a;
+            font-weight: 500;
+            text-transform: uppercase;
+            font-size: 11px;
+        }
+        .table-comparison td {
+            font-variant-numeric: tabular-nums;
+        }
+        .table-comparison tr:hover { background: #1a1a24; }
+
+        .bar-container {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .bar {
+            height: 8px;
+            border-radius: 4px;
+            transition: width 0.3s;
+        }
+        .bar.baseline { background: #22c55e; }
+        .bar.rpc { background: #a855f7; }
+        .bar.metrics { background: #f87171; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>MDBX Profile Comparison</h1>
+        <p class="subtitle">baseline vs stressed workload analysis</p>
+
+        <div id="comparison-content"></div>
+    </div>
+
+    <script>
+HTMLEOF
+
+# inject the data
+echo "const DATA = $COMPARISON_DATA;" >> "$SESSION_DIR/comparison.html"
+
+cat >> "$SESSION_DIR/comparison.html" << 'HTMLEOF2'
+
+        const fmt = n => {
+            if (n === null || n === undefined) return '-';
+            if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+            if (n >= 1e3) return (n/1e3).toFixed(1) + 'K';
+            return n.toFixed ? n.toFixed(0) : n;
+        };
+
+        const fmtPct = n => (n * 100).toFixed(1) + '%';
+        const fmtDur = s => s < 60 ? s.toFixed(1) + 's' : (s/60).toFixed(1) + 'm';
+
+        function getDelta(current, baseline) {
+            if (!baseline || baseline === 0) return null;
+            const pct = ((current - baseline) / baseline * 100);
+            return pct;
+        }
+
+        function deltaHtml(current, baseline, inverse = false) {
+            const delta = getDelta(current, baseline);
+            if (delta === null) return '';
+            const isUp = delta > 0;
+            const cls = inverse ? (isUp ? 'down' : 'up') : (isUp ? 'up' : 'down');
+            const sign = isUp ? '+' : '';
+            return `<span class="delta ${cls}">${sign}${delta.toFixed(0)}%</span>`;
+        }
+
+        function getBadgeClass(label) {
+            if (label === 'baseline') return 'badge-baseline';
+            if (label === 'rpc_stress') return 'badge-rpc';
+            if (label === 'metrics_stress') return 'badge-metrics';
+            return '';
+        }
+
+        function getCardClass(label) {
+            return label.replace('_stress', '_stress');
+        }
+
+        // Find baseline for delta calculations
+        const baseline = DATA.find(d => d.label === 'baseline');
+
+        // Generate comparison cards
+        let html = '<div class="comparison-grid">';
+
+        for (const profile of DATA) {
+            const pf = profile.page_faults;
+            const base = baseline?.page_faults;
+            const isBaseline = profile.label === 'baseline';
+
+            html += `
+            <div class="profile-card ${profile.label}">
+                <div class="card-header">
+                    <span class="card-title">${profile.label.replace('_', ' ')}</span>
+                    <span class="card-badge ${getBadgeClass(profile.label)}">${fmtDur(profile.trace.duration_secs)}</span>
+                </div>
+                <div class="card-body">
+                    <div class="metric-grid">
+                        <div class="metric">
+                            <div class="metric-label">Page Faults</div>
+                            <div class="metric-value">${fmt(pf.total)}${isBaseline ? '' : deltaHtml(pf.total, base?.total)}</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-label">Major (Disk)</div>
+                            <div class="metric-value major">${fmt(pf.major)}${isBaseline ? '' : deltaHtml(pf.major, base?.major)}</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-label">Fault Rate</div>
+                            <div class="metric-value">${fmt(pf.rate_per_sec)}/s${isBaseline ? '' : deltaHtml(pf.rate_per_sec, base?.rate_per_sec)}</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-label">Major Ratio</div>
+                            <div class="metric-value ${pf.major_ratio > 0.5 ? 'major' : ''}">${fmtPct(pf.major_ratio)}</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-label">Sequential</div>
+                            <div class="metric-value good">${fmtPct(pf.sequential_ratio)}</div>
+                        </div>
+                        <div class="metric">
+                            <div class="metric-label">Unique Pages</div>
+                            <div class="metric-value">${fmt(pf.unique_pages)}</div>
+                        </div>
+                    </div>
+                </div>
+            </div>`;
+        }
+        html += '</div>';
+
+        // Table comparison
+        if (DATA.length > 0 && DATA[0].tables) {
+            html += `
+            <div class="section">
+                <div class="section-title">Top Tables by Faults</div>
+                <table class="table-comparison">
+                    <thead>
+                        <tr>
+                            <th>Table</th>`;
+
+            for (const profile of DATA) {
+                html += `<th>${profile.label.replace('_', ' ')}</th>`;
+            }
+            html += '</tr></thead><tbody>';
+
+            // Collect all table names
+            const allTables = new Set();
+            for (const profile of DATA) {
+                for (const t of profile.tables || []) {
+                    allTables.add(t.name);
+                }
+            }
+
+            // Find max for bar scaling
+            let maxFaults = 0;
+            for (const profile of DATA) {
+                for (const t of profile.tables || []) {
+                    if (t.faults > maxFaults) maxFaults = t.faults;
+                }
+            }
+
+            // Sort tables by total faults across all profiles
+            const tableOrder = [...allTables].map(name => {
+                let total = 0;
+                for (const profile of DATA) {
+                    const t = (profile.tables || []).find(x => x.name === name);
+                    if (t) total += t.faults;
+                }
+                return { name, total };
+            }).sort((a, b) => b.total - a.total).slice(0, 15);
+
+            for (const { name } of tableOrder) {
+                html += `<tr><td>${name}</td>`;
+                for (const profile of DATA) {
+                    const t = (profile.tables || []).find(x => x.name === name);
+                    const faults = t ? t.faults : 0;
+                    const major = t ? t.major_faults : 0;
+                    const barWidth = maxFaults > 0 ? (faults / maxFaults * 100) : 0;
+                    const barClass = profile.label === 'baseline' ? 'baseline' :
+                                    profile.label === 'rpc_stress' ? 'rpc' : 'metrics';
+                    html += `<td>
+                        <div class="bar-container">
+                            <div class="bar ${barClass}" style="width: ${barWidth}%; min-width: ${faults > 0 ? 4 : 0}px;"></div>
+                            <span>${fmt(faults)} (${fmt(major)} major)</span>
+                        </div>
+                    </td>`;
+                }
+                html += '</tr>';
+            }
+
+            html += '</tbody></table></div>';
+        }
+
+        document.getElementById('comparison-content').innerHTML = html;
+    </script>
+</body>
+</html>
+HTMLEOF2
+
+echo "      comparison.html generated"
 
 # ============================================================================
 # summary
@@ -195,18 +531,12 @@ echo "========================================"
 echo "complete"
 echo "========================================"
 echo ""
-echo "profiles:"
-ls -lh "$SESSION_DIR"/*.jsonl 2>/dev/null | awk '{print "  " $NF " (" $5 ")"}'
-echo ""
-echo "html reports:"
-ls -lh "$SESSION_DIR"/*.html 2>/dev/null | awk '{print "  " $NF " (" $5 ")"}'
-echo ""
-echo "open in browser:"
-for html in "$SESSION_DIR"/*.html; do
-    echo "  file://$html"
+echo "individual reports:"
+for html in "$SESSION_DIR"/baseline.html "$SESSION_DIR"/rpc_stress.html "$SESSION_DIR"/metrics_stress.html; do
+    if [ -f "$html" ]; then
+        echo "  file://$html"
+    fi
 done
 echo ""
-echo "compare the three reports to see I/O pattern differences:"
-echo "  - baseline: normal node operation"
-echo "  - rpc_stress: under RPC load (state reads, eth_call, traces)"
-echo "  - metrics_stress: under /metrics hammering (db.report_metrics blocking)"
+echo "comparison report:"
+echo "  file://$SESSION_DIR/comparison.html"

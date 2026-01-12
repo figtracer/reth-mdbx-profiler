@@ -27,9 +27,13 @@ struct Cli {
     #[arg(long)]
     mdbx_path: Option<PathBuf>,
 
-    /// Output format: html (default), json (raw data), csv
+    /// Output format: html (default), json (raw data), compact (for comparison), csv
     #[arg(short, long, default_value = "html")]
     format: String,
+
+    /// Label for this trace (used in compact export for comparison)
+    #[arg(long)]
+    label: Option<String>,
 
     /// Time bucket size in milliseconds (for pattern analysis)
     #[arg(long, default_value = "100")]
@@ -126,11 +130,24 @@ fn main() -> anyhow::Result<()> {
             );
             println!("{}", serde_json::to_string_pretty(&data)?);
         }
+        "compact" => {
+            let data = viewer::generate_viewer_data(
+                &events,
+                &cursor_events,
+                &txn_events,
+                attribution.as_ref(),
+            );
+            let compact = generate_compact_export(&data, cli.label.as_deref());
+            println!("{}", serde_json::to_string_pretty(&compact)?);
+        }
         "csv" => {
             print_csv(&events, attribution.as_ref());
         }
         _ => {
-            eprintln!("Unknown format: {}. Use: html, json, csv", cli.format);
+            eprintln!(
+                "Unknown format: {}. Use: html, json, compact, csv",
+                cli.format
+            );
             std::process::exit(1);
         }
     }
@@ -231,6 +248,89 @@ fn generate_html_viewer(
     eprintln!("\nViewer written to: {}", output_path.display());
 
     Ok(())
+}
+
+/// Generate compact export format (same as browser export button)
+fn generate_compact_export(data: &viewer::ViewerData, label: Option<&str>) -> serde_json::Value {
+    let mut compact = serde_json::json!({
+        "label": label.unwrap_or("trace"),
+        "trace": {
+            "duration_secs": data.summary.duration_secs,
+            "total_events": data.summary.total_events,
+            "file_size_gb": data.summary.file_size_gb,
+            "block_range": data.summary.block_range
+        },
+        "page_faults": {
+            "total": data.summary.page_faults,
+            "major": data.summary.major_faults,
+            "minor": data.summary.minor_faults,
+            "major_ratio": data.summary.major_fault_ratio,
+            "rate_per_sec": data.summary.fault_rate_per_sec,
+            "unique_pages": data.summary.unique_pages,
+            "sequential_ratio": data.patterns.sequential_ratio,
+            "random_ratio": data.patterns.random_ratio
+        },
+        "tables": data.unified_tables.iter().take(20).map(|t| {
+            serde_json::json!({
+                "name": t.name,
+                "faults": t.faults,
+                "major_faults": t.major_faults,
+                "fault_pct": t.fault_percentage,
+                "slow_ops": t.slow_ops,
+                "time_lost_ms": t.time_lost_ms,
+                "top_op": t.top_operation
+            })
+        }).collect::<Vec<_>>(),
+        "threads": data.threads.iter().take(10).collect::<Vec<_>>()
+    });
+
+    // Add cursor data if available
+    if data.cursor_data.has_data {
+        compact["cursor_ops"] = serde_json::json!({
+            "total": data.cursor_data.summary.total_ops,
+            "rate_per_sec": data.cursor_data.summary.op_rate_per_sec,
+            "seek_ratio": data.cursor_data.summary.seek_ratio,
+            "latency_avg_us": data.cursor_data.summary.avg_latency_us,
+            "latency_p95_us": data.cursor_data.summary.p95_latency_us,
+            "latency_p99_us": data.cursor_data.summary.p99_latency_us,
+            "by_table": data.cursor_data.table_stats.iter().take(15).map(|t| {
+                serde_json::json!({
+                    "name": t.name,
+                    "ops": t.ops,
+                    "pct": t.percentage,
+                    "avg_latency_us": t.avg_latency_us,
+                    "p95_latency_us": t.p95_latency_us
+                })
+            }).collect::<Vec<_>>()
+        });
+    }
+
+    // Add transaction data if available
+    if data.txn_data.has_data {
+        compact["transactions"] = serde_json::json!({
+            "total": data.txn_data.summary.begin_count,
+            "rate_per_sec": data.txn_data.summary.txn_rate_per_sec,
+            "ro_count": data.txn_data.summary.ro_count,
+            "rw_count": data.txn_data.summary.rw_count,
+            "commits": data.txn_data.summary.commit_count,
+            "aborts": data.txn_data.summary.abort_count,
+            "commit_latency_avg_us": data.txn_data.summary.avg_commit_latency_us,
+            "commit_latency_p99_us": data.txn_data.summary.p99_commit_latency_us,
+            "max_concurrent_ro": data.txn_data.concurrency.max_concurrent_ro,
+            "max_concurrent_rw": data.txn_data.concurrency.max_concurrent_rw
+        });
+    }
+
+    // Add direct attribution stats if available
+    if data.direct_fault_attribution.has_data {
+        compact["attribution"] = serde_json::json!({
+            "directly_attributed": data.direct_fault_attribution.directly_attributed_count,
+            "timestamp_fallback": data.direct_fault_attribution.timestamp_fallback_count,
+            "uncorrelated": data.direct_fault_attribution.uncorrelated_count
+        });
+    }
+
+    compact
 }
 
 fn print_csv(events: &[PageFaultEvent], attribution: Option<&PageAttribution>) {
