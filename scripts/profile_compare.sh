@@ -184,10 +184,17 @@ for trace in baseline rpc_stress metrics_stress; do
         echo "  analyzing ${trace}..."
         # generate individual html
         "$ANALYZER" --input "$SESSION_DIR/${trace}.jsonl" --mdbx-path "$MDBX_PATH" \
-            --output "$SESSION_DIR/${trace}.html" 2>/dev/null || true
+            --output "$SESSION_DIR/${trace}.html" 2>&1 || echo "    html generation failed"
         # generate compact json for comparison
         "$ANALYZER" --input "$SESSION_DIR/${trace}.jsonl" --mdbx-path "$MDBX_PATH" \
-            --format compact --label "$trace" > "$SESSION_DIR/${trace}.json" 2>/dev/null || true
+            --format compact --label "$trace" > "$SESSION_DIR/${trace}.json" 2>&1
+        if [ -s "$SESSION_DIR/${trace}.json" ]; then
+            echo "    ${trace}.json created ($(wc -c < "$SESSION_DIR/${trace}.json") bytes)"
+        else
+            echo "    ${trace}.json is empty or failed"
+        fi
+    else
+        echo "  ${trace}.jsonl not found, skipping"
     fi
 done
 
@@ -196,20 +203,25 @@ done
 # ============================================================================
 echo "generating comparison report..."
 
-# collect all compact jsons into array
-COMPARISON_DATA="["
+# collect all compact jsons into array file (safer than shell variable)
+COMPARISON_JSON="$SESSION_DIR/comparison_data.json"
+echo "[" > "$COMPARISON_JSON"
 first=true
-for json in "$SESSION_DIR"/*.json; do
-    if [ -f "$json" ]; then
+for trace in baseline rpc_stress metrics_stress; do
+    json="$SESSION_DIR/${trace}.json"
+    if [ -f "$json" ] && [ -s "$json" ]; then
         if [ "$first" = true ]; then
             first=false
         else
-            COMPARISON_DATA+=","
+            echo "," >> "$COMPARISON_JSON"
         fi
-        COMPARISON_DATA+=$(cat "$json")
+        cat "$json" >> "$COMPARISON_JSON"
     fi
 done
-COMPARISON_DATA+="]"
+echo "]" >> "$COMPARISON_JSON"
+
+# read comparison data
+COMPARISON_DATA=$(cat "$COMPARISON_JSON")
 
 # generate comparison html
 cat > "$SESSION_DIR/comparison.html" << 'HTMLEOF'
@@ -399,12 +411,15 @@ cat >> "$SESSION_DIR/comparison.html" << 'HTMLEOF2'
             return '';
         }
 
-        function getCardClass(label) {
-            return label.replace('_stress', '_stress');
-        }
+        // Check if data loaded
+        if (!DATA || !Array.isArray(DATA) || DATA.length === 0) {
+            document.getElementById('comparison-content').innerHTML =
+                '<p style="color: #f87171; margin-bottom: 16px;">No profile data found. Check that the traces were captured and analyzed correctly.</p>' +
+                '<p style="color: #71717a;">Make sure the .json files were generated in the session directory.</p>';
+        } else {
 
         // Find baseline for delta calculations
-        const baseline = DATA.find(d => d.label === 'baseline');
+        const baseline = DATA.find(d => d && d.label === 'baseline');
 
         // Generate comparison cards
         let html = '<div class="comparison-grid">';
@@ -516,6 +531,7 @@ cat >> "$SESSION_DIR/comparison.html" << 'HTMLEOF2'
         }
 
         document.getElementById('comparison-content').innerHTML = html;
+        } // end else (data exists)
     </script>
 </body>
 </html>
