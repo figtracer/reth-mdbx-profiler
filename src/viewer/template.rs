@@ -1201,27 +1201,31 @@ class Chart {
     }
 }
 
-// Horizontal bar chart for fault distribution
+// Horizontal bar chart for fault distribution (dynamically sized)
 function drawFaultDistChart(canvas, labels, totalFaults, majorFaults) {
     const ctx = canvas.getContext('2d');
     const rect = canvas.getBoundingClientRect();
     if (rect.width === 0) return;
 
+    // Dynamic height based on number of bars
+    const barHeight = 24;
+    const barGap = 8;
+    const pad = { t: 12, r: 80, b: 12, l: 160 };
+    const chartH = labels.length * (barHeight + barGap) - barGap;
+    const totalH = chartH + pad.t + pad.b;
+
+    // Set canvas size
+    canvas.style.height = totalH + 'px';
     canvas.width = rect.width * 2;
-    canvas.height = rect.height * 2;
+    canvas.height = totalH * 2;
     ctx.scale(2, 2);
 
     const w = rect.width;
-    const h = rect.height;
-    const pad = { t: 8, r: 80, b: 24, l: 140 };
     const chartW = w - pad.l - pad.r;
-    const chartH = h - pad.t - pad.b;
 
     const max = Math.max(...totalFaults) * 1.1 || 1;
-    const barH = Math.min(18, (chartH / labels.length) * 0.7);
-    const gap = (chartH / labels.length) - barH;
 
-    ctx.clearRect(0, 0, w, h);
+    ctx.clearRect(0, 0, w, totalH);
 
     labels.forEach((label, i) => {
         const total = totalFaults[i];
@@ -1229,45 +1233,29 @@ function drawFaultDistChart(canvas, labels, totalFaults, majorFaults) {
 
         const totalBarW = (total / max) * chartW;
         const minorBarW = ((total - major) / max) * chartW;
-        const y = pad.t + i * (barH + gap) + gap / 2;
+        const y = pad.t + i * (barHeight + barGap);
 
         // Draw minor faults (blue) first, then major (red) stacked after
-        ctx.fillStyle = '#3b82f6';
-        ctx.fillRect(pad.l, y, minorBarW, barH);
+        ctx.fillStyle = '#60a5fa';
+        ctx.fillRect(pad.l, y, minorBarW, barHeight);
 
         if (major > 0) {
             ctx.fillStyle = '#f87171';
-            ctx.fillRect(pad.l + minorBarW, y, totalBarW - minorBarW, barH);
+            ctx.fillRect(pad.l + minorBarW, y, totalBarW - minorBarW, barHeight);
         }
 
         // Label (left)
-        ctx.fillStyle = '#a1a1aa';
-        ctx.font = '11px sans-serif';
+        ctx.fillStyle = '#e4e4e7';
+        ctx.font = '12px -apple-system, BlinkMacSystemFont, sans-serif';
         ctx.textAlign = 'right';
-        const labelText = label.length > 18 ? label.substring(0, 16) + '...' : label;
-        ctx.fillText(labelText, pad.l - 8, y + barH / 2 + 4);
+        ctx.fillText(label, pad.l - 12, y + barHeight / 2 + 4);
 
         // Value (right of bar)
-        ctx.fillStyle = '#71717a';
+        ctx.fillStyle = '#a1a1aa';
         ctx.textAlign = 'left';
         const fmtVal = n => n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'K' : n.toFixed(0);
-        ctx.fillText(fmtVal(total), pad.l + totalBarW + 8, y + barH / 2 + 4);
+        ctx.fillText(fmtVal(total), pad.l + totalBarW + 10, y + barHeight / 2 + 4);
     });
-
-    // Legend at bottom right
-    ctx.font = '10px sans-serif';
-    const legendY = h - 10;
-
-    ctx.fillStyle = '#3b82f6';
-    ctx.fillRect(w - 140, legendY - 8, 10, 10);
-    ctx.fillStyle = '#71717a';
-    ctx.textAlign = 'left';
-    ctx.fillText('Minor', w - 126, legendY);
-
-    ctx.fillStyle = '#f87171';
-    ctx.fillRect(w - 70, legendY - 8, 10, 10);
-    ctx.fillStyle = '#71717a';
-    ctx.fillText('Major', w - 56, legendY);
 }
 
 // Utilities
