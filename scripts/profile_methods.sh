@@ -37,7 +37,7 @@
 set -euo pipefail
 
 # Defaults
-METHODS="eth_getBalance,eth_getStorageAt,eth_getCode,eth_getProof,eth_getBlockReceipts,eth_call,trace_transaction,trace_block,debug_traceTransaction,metrics"
+METHODS="eth_chainId,eth_blockNumber,eth_gasPrice,eth_syncing,net_version,net_peerCount,web3_clientVersion,eth_getBalance,eth_getStorageAt,eth_getCode,eth_getProof,eth_getBlockReceipts,eth_call,trace_transaction,trace_block,debug_traceTransaction,txpool_status,txpool_content,admin_peers,metrics"
 DURATION=2700
 CONCURRENCY=50
 QUICK=false
@@ -194,6 +194,84 @@ BLOCK_HASH=$(curl -s -X POST -H "Content-Type: application/json" \
 
 # ============================================================================
 # Method stress functions - each hammers a single method type
+# ============================================================================
+
+# ============================================================================
+# Lightweight methods (should have minimal MDBX access)
+# ============================================================================
+
+stress_eth_chainId() {
+    local end_time=$1
+    while [ $(date +%s) -lt $end_time ]; do
+        curl -s --max-time 5 -X POST -H "Content-Type: application/json" \
+            --data '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
+            "$RPC_URL" > /dev/null
+        sleep 0.001
+    done
+}
+
+stress_eth_blockNumber() {
+    local end_time=$1
+    while [ $(date +%s) -lt $end_time ]; do
+        curl -s --max-time 5 -X POST -H "Content-Type: application/json" \
+            --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
+            "$RPC_URL" > /dev/null
+        sleep 0.001
+    done
+}
+
+stress_eth_gasPrice() {
+    local end_time=$1
+    while [ $(date +%s) -lt $end_time ]; do
+        curl -s --max-time 5 -X POST -H "Content-Type: application/json" \
+            --data '{"jsonrpc":"2.0","method":"eth_gasPrice","params":[],"id":1}' \
+            "$RPC_URL" > /dev/null
+        sleep 0.001
+    done
+}
+
+stress_eth_syncing() {
+    local end_time=$1
+    while [ $(date +%s) -lt $end_time ]; do
+        curl -s --max-time 5 -X POST -H "Content-Type: application/json" \
+            --data '{"jsonrpc":"2.0","method":"eth_syncing","params":[],"id":1}' \
+            "$RPC_URL" > /dev/null
+        sleep 0.001
+    done
+}
+
+stress_net_version() {
+    local end_time=$1
+    while [ $(date +%s) -lt $end_time ]; do
+        curl -s --max-time 5 -X POST -H "Content-Type: application/json" \
+            --data '{"jsonrpc":"2.0","method":"net_version","params":[],"id":1}' \
+            "$RPC_URL" > /dev/null
+        sleep 0.001
+    done
+}
+
+stress_net_peerCount() {
+    local end_time=$1
+    while [ $(date +%s) -lt $end_time ]; do
+        curl -s --max-time 5 -X POST -H "Content-Type: application/json" \
+            --data '{"jsonrpc":"2.0","method":"net_peerCount","params":[],"id":1}' \
+            "$RPC_URL" > /dev/null
+        sleep 0.001
+    done
+}
+
+stress_web3_clientVersion() {
+    local end_time=$1
+    while [ $(date +%s) -lt $end_time ]; do
+        curl -s --max-time 5 -X POST -H "Content-Type: application/json" \
+            --data '{"jsonrpc":"2.0","method":"web3_clientVersion","params":[],"id":1}' \
+            "$RPC_URL" > /dev/null
+        sleep 0.001
+    done
+}
+
+# ============================================================================
+# State-reading methods
 # ============================================================================
 
 stress_eth_getBalance() {
@@ -364,6 +442,40 @@ stress_metrics() {
     done
 }
 
+# ============================================================================
+# TxPool and Admin methods (potentially expensive enumeration)
+# ============================================================================
+
+stress_txpool_status() {
+    local end_time=$1
+    while [ $(date +%s) -lt $end_time ]; do
+        curl -s --max-time 10 -X POST -H "Content-Type: application/json" \
+            --data '{"jsonrpc":"2.0","method":"txpool_status","params":[],"id":1}' \
+            "$RPC_URL" > /dev/null
+        sleep 0.01
+    done
+}
+
+stress_txpool_content() {
+    local end_time=$1
+    while [ $(date +%s) -lt $end_time ]; do
+        curl -s --max-time 30 -X POST -H "Content-Type: application/json" \
+            --data '{"jsonrpc":"2.0","method":"txpool_content","params":[],"id":1}' \
+            "$RPC_URL" > /dev/null
+        sleep 0.1
+    done
+}
+
+stress_admin_peers() {
+    local end_time=$1
+    while [ $(date +%s) -lt $end_time ]; do
+        curl -s --max-time 10 -X POST -H "Content-Type: application/json" \
+            --data '{"jsonrpc":"2.0","method":"admin_peers","params":[],"id":1}' \
+            "$RPC_URL" > /dev/null
+        sleep 0.05
+    done
+}
+
 # Counter for requests
 REQUEST_COUNTS=()
 
@@ -420,6 +532,15 @@ for method in "${METHOD_LIST[@]}"; do
 
     # Determine stress function
     case "$method" in
+        # Lightweight methods (should have minimal MDBX access)
+        eth_chainId) STRESS_FUNC="stress_eth_chainId" ;;
+        eth_blockNumber) STRESS_FUNC="stress_eth_blockNumber" ;;
+        eth_gasPrice) STRESS_FUNC="stress_eth_gasPrice" ;;
+        eth_syncing) STRESS_FUNC="stress_eth_syncing" ;;
+        net_version) STRESS_FUNC="stress_net_version" ;;
+        net_peerCount) STRESS_FUNC="stress_net_peerCount" ;;
+        web3_clientVersion) STRESS_FUNC="stress_web3_clientVersion" ;;
+        # State-reading methods
         eth_getBalance) STRESS_FUNC="stress_eth_getBalance" ;;
         eth_getStorageAt) STRESS_FUNC="stress_eth_getStorageAt" ;;
         eth_getCode) STRESS_FUNC="stress_eth_getCode" ;;
@@ -429,10 +550,16 @@ for method in "${METHOD_LIST[@]}"; do
         eth_getBlockReceipts) STRESS_FUNC="stress_eth_getBlockReceipts" ;;
         eth_call) STRESS_FUNC="stress_eth_call" ;;
         eth_estimateGas) STRESS_FUNC="stress_eth_estimateGas" ;;
+        # Trace/debug methods
         trace_transaction) STRESS_FUNC="stress_trace_transaction" ;;
         trace_block) STRESS_FUNC="stress_trace_block" ;;
         debug_traceTransaction) STRESS_FUNC="stress_debug_traceTransaction" ;;
         ots_searchTransactions) STRESS_FUNC="stress_ots_searchTransactions" ;;
+        # TxPool and Admin methods
+        txpool_status) STRESS_FUNC="stress_txpool_status" ;;
+        txpool_content) STRESS_FUNC="stress_txpool_content" ;;
+        admin_peers) STRESS_FUNC="stress_admin_peers" ;;
+        # Metrics
         metrics) STRESS_FUNC="stress_metrics" ;;
         *)
             echo "Unknown method: $method, skipping"
