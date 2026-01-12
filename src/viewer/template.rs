@@ -81,10 +81,10 @@ pub fn generate_html(data: &ViewerData) -> String {
                 </div>
 
                 <!-- Access Patterns -->
-                <div class="card full-width">
-                    <div class="card-header">Access Patterns</div>
-                    <div class="card-body">
-                        <div class="three-col">
+                <div class="two-col">
+                    <div class="card">
+                        <div class="card-header">Access Pattern</div>
+                        <div class="card-body">
                             <div class="pattern-section">
                                 <div class="pattern-bar">
                                     <span class="pattern-label">Sequential</span>
@@ -101,12 +101,16 @@ pub fn generate_html(data: &ViewerData) -> String {
                                     <span class="pattern-value" id="rand-ratio"></span>
                                 </div>
                             </div>
-                            <div class="stride-section" id="stride-section">
+                            <div class="stride-section" id="stride-section" style="margin-top: 16px;">
                                 <div class="section-title">Top Stride Patterns</div>
                                 <div id="stride-list"></div>
                             </div>
+                        </div>
+                    </div>
+                    <div class="card">
+                        <div class="card-header">Top Threads by Page Faults</div>
+                        <div class="card-body">
                             <div class="threads-section">
-                                <div class="section-title">Top Threads</div>
                                 <div id="threads-summary"></div>
                             </div>
                         </div>
@@ -132,7 +136,7 @@ pub fn generate_html(data: &ViewerData) -> String {
                         I/O Impact by Table
                         <span class="card-hint">Click row to expand details</span>
                     </div>
-                    <div class="card-body compact-table-container" style="max-height: none;">
+                    <div class="card-body compact-table-container" style="max-height: none; padding: 0;">
                         <table class="compact-table expandable-table" id="unified-tables">
                             <thead>
                                 <tr>
@@ -239,7 +243,7 @@ pub fn generate_html(data: &ViewerData) -> String {
 
                     <div class="card full-width">
                         <div class="card-header">Thread Distribution</div>
-                        <div class="card-body compact-table-container" style="max-height: 300px;">
+                        <div class="card-body compact-table-container" style="max-height: 300px; padding: 0;">
                             <table class="compact-table" id="txn-threads-table">
                                 <thead>
                                     <tr>
@@ -440,12 +444,6 @@ body {
     margin-left: auto;
 }
 
-.three-col {
-    display: grid;
-    grid-template-columns: 1fr 1fr 1fr;
-    gap: 24px;
-}
-
 /* Expandable table rows */
 .expandable-table tbody tr.table-row {
     cursor: pointer;
@@ -616,6 +614,11 @@ body {
     max-height: 450px;
 }
 
+/* Remove padding from card-body when it contains a table, let table cells handle padding */
+.card-body.compact-table-container {
+    padding: 0;
+}
+
 .compact-table {
     width: 100%;
     border-collapse: separate;
@@ -625,21 +628,30 @@ body {
 
 .compact-table th,
 .compact-table td {
-    padding: 10px 12px;
+    padding: 10px 16px;
     text-align: left;
     border-bottom: 1px solid #1e1e2a;
     white-space: nowrap;
+}
+
+.compact-table th:first-child,
+.compact-table td:first-child {
+    padding-left: 20px;
+}
+
+.compact-table th:last-child,
+.compact-table td:last-child {
+    padding-right: 20px;
 }
 
 .compact-table thead th {
     position: sticky;
     top: 0;
     z-index: 10;
-    background: #0f0f17;
+    background: #12121a;
     font-weight: 600;
     color: #3b82f6;
     border-bottom: 2px solid #2a2a3a;
-    box-shadow: 0 1px 0 #2a2a3a;
 }
 
 .compact-table tbody tr:hover { background: #1a1a24; }
