@@ -130,17 +130,25 @@ pub fn generate_html(data: &ViewerData) -> String {
                     <span class="attribution-summary" id="tables-attribution-summary"></span>
                 </div>
 
-                <!-- Fault distribution bar chart -->
-                <div class="card full-width" id="fault-dist-card" style="display:none;">
-                    <div class="card-header">
-                        Fault Distribution by Table
-                        <span class="chart-legend">
-                            <span class="legend-item"><span class="legend-swatch minor-swatch"></span>Minor</span>
-                            <span class="legend-item"><span class="legend-swatch major-swatch"></span>Major</span>
-                        </span>
+                <!-- Fault distribution and I/O breakdown side by side -->
+                <div class="two-col" id="fault-dist-row" style="display:none;">
+                    <div class="card" id="fault-dist-card">
+                        <div class="card-header">
+                            Fault Distribution
+                            <span class="chart-legend">
+                                <span class="legend-item"><span class="legend-swatch minor-swatch"></span>Minor</span>
+                                <span class="legend-item"><span class="legend-swatch major-swatch"></span>Major</span>
+                            </span>
+                        </div>
+                        <div class="card-body" style="padding: 12px 16px;">
+                            <canvas id="fault-dist-chart"></canvas>
+                        </div>
                     </div>
-                    <div class="card-body" style="padding: 8px 16px;">
-                        <canvas id="fault-dist-chart"></canvas>
+                    <div class="card" id="io-breakdown-card">
+                        <div class="card-header">I/O Time Breakdown</div>
+                        <div class="card-body" style="padding: 12px 16px;">
+                            <canvas id="io-time-chart"></canvas>
+                        </div>
                     </div>
                 </div>
 
@@ -1208,8 +1216,8 @@ function drawFaultDistChart(canvas, labels, totalFaults, majorFaults) {
     if (rect.width === 0) return;
 
     // Dynamic height based on number of bars
-    const barHeight = 24;
-    const barGap = 8;
+    const barHeight = 22;
+    const barGap = 12;
     const pad = { t: 12, r: 80, b: 12, l: 160 };
     const chartH = labels.length * (barHeight + barGap) - barGap;
     const totalH = chartH + pad.t + pad.b;
@@ -1255,6 +1263,61 @@ function drawFaultDistChart(canvas, labels, totalFaults, majorFaults) {
         ctx.textAlign = 'left';
         const fmtVal = n => n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'K' : n.toFixed(0);
         ctx.fillText(fmtVal(total), pad.l + totalBarW + 10, y + barHeight / 2 + 4);
+    });
+}
+
+// Horizontal bar chart for I/O time breakdown (dynamically sized)
+function drawIOTimeChart(canvas, labels, timeMs, slowOps) {
+    const ctx = canvas.getContext('2d');
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width === 0) return;
+
+    // Dynamic height based on number of bars
+    const barHeight = 22;
+    const barGap = 12;
+    const pad = { t: 12, r: 70, b: 12, l: 160 };
+    const chartH = labels.length * (barHeight + barGap) - barGap;
+    const totalH = chartH + pad.t + pad.b;
+
+    // Set canvas size
+    canvas.style.height = totalH + 'px';
+    canvas.width = rect.width * 2;
+    canvas.height = totalH * 2;
+    ctx.scale(2, 2);
+
+    const w = rect.width;
+    const chartW = w - pad.l - pad.r;
+
+    const max = Math.max(...timeMs) * 1.1 || 1;
+
+    ctx.clearRect(0, 0, w, totalH);
+
+    labels.forEach((label, i) => {
+        const time = timeMs[i];
+        const ops = slowOps[i];
+
+        const barW = (time / max) * chartW;
+        const y = pad.t + i * (barHeight + barGap);
+
+        // Gradient from orange to red based on severity
+        const intensity = time / max;
+        const r = Math.floor(251 - intensity * 50);
+        const g = Math.floor(146 - intensity * 80);
+        const b = Math.floor(60 - intensity * 40);
+        ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+        ctx.fillRect(pad.l, y, barW, barHeight);
+
+        // Label (left)
+        ctx.fillStyle = '#e4e4e7';
+        ctx.font = '12px -apple-system, BlinkMacSystemFont, sans-serif';
+        ctx.textAlign = 'right';
+        ctx.fillText(label, pad.l - 12, y + barHeight / 2 + 4);
+
+        // Value (right of bar) - show time in readable format
+        ctx.fillStyle = '#a1a1aa';
+        ctx.textAlign = 'left';
+        const timeStr = time >= 1000 ? (time / 1000).toFixed(1) + 's' : time.toFixed(0) + 'ms';
+        ctx.fillText(timeStr, pad.l + barW + 10, y + barHeight / 2 + 4);
     });
 }
 
@@ -1531,15 +1594,31 @@ function initTables() {
             `${fmt(dfa.uncorrelated_count)} uncorrelated`;
     }
 
-    // Draw fault distribution bar chart
+    // Draw fault distribution and I/O time charts
     if (unified.length > 0) {
-        document.getElementById('fault-dist-card').style.display = 'block';
-        const chartCanvas = document.getElementById('fault-dist-chart');
-        const topTables = unified.slice(0, 8); // Top 8 tables by faults
-        const labels = topTables.map(t => t.name);
-        const faults = topTables.map(t => t.faults);
-        const majorFaults = topTables.map(t => t.major_faults);
-        drawFaultDistChart(chartCanvas, labels, faults, majorFaults);
+        document.getElementById('fault-dist-row').style.display = 'grid';
+
+        // Fault distribution chart (top 8 by faults)
+        const faultCanvas = document.getElementById('fault-dist-chart');
+        const topByFaults = unified.slice(0, 8);
+        drawFaultDistChart(faultCanvas,
+            topByFaults.map(t => t.name),
+            topByFaults.map(t => t.faults),
+            topByFaults.map(t => t.major_faults)
+        );
+
+        // I/O time chart (top 8 by time lost, filtered to those with actual I/O time)
+        const ioCanvas = document.getElementById('io-time-chart');
+        const topByIO = unified.filter(t => t.time_lost_ms > 0)
+            .sort((a, b) => b.time_lost_ms - a.time_lost_ms)
+            .slice(0, 8);
+        if (topByIO.length > 0) {
+            drawIOTimeChart(ioCanvas,
+                topByIO.map(t => t.name),
+                topByIO.map(t => t.time_lost_ms),
+                topByIO.map(t => t.slow_ops)
+            );
+        }
     }
 
     // Build unified table with expandable rows
