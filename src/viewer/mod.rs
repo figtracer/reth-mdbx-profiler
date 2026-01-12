@@ -713,6 +713,7 @@ pub fn generate_viewer_data(
             cursor_data,
             txn_data,
             page_fault_attribution_warning: None,
+            direct_fault_attribution: DirectFaultAttribution::default(),
         };
     }
 
@@ -851,7 +852,7 @@ fn generate_direct_fault_attribution(
     }
 
     // Convert to sorted vectors
-    let total_faults = page_faults.len() as u64;
+    let _total_faults = page_faults.len() as u64;
 
     let op_type_name = |op: u32| -> &'static str {
         match op {
