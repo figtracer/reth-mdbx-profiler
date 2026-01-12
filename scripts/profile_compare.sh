@@ -187,7 +187,7 @@ for trace in baseline rpc_stress metrics_stress; do
             --output "$SESSION_DIR/${trace}.html" 2>&1 || echo "    html generation failed"
         # generate compact json for comparison
         "$ANALYZER" --input "$SESSION_DIR/${trace}.jsonl" --mdbx-path "$MDBX_PATH" \
-            --format compact --label "$trace" > "$SESSION_DIR/${trace}.json" 2>&1
+            --format compact --label "$trace" 2>/dev/null > "$SESSION_DIR/${trace}.json"
         if [ -s "$SESSION_DIR/${trace}.json" ]; then
             echo "    ${trace}.json created ($(wc -c < "$SESSION_DIR/${trace}.json") bytes)"
         else
