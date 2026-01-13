@@ -74,6 +74,58 @@ pub const ACTIVE_OP_KEY_PREFIX_SIZE: usize = 16;
 /// (must match BPF NO_ACTIVE_OP_DBI)
 pub const NO_ACTIVE_OP_DBI: u32 = 0xFFFFFFFF;
 
+/// MDBX page types detected from page headers
+/// (must match BPF PAGE_TYPE_* defines)
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum MdbxPageType {
+    /// Page type could not be determined
+    #[default]
+    Unknown = 0,
+    /// Meta page (database metadata at page 0 and 1)
+    Meta = 1,
+    /// Branch page (internal B+ tree node for tree traversal)
+    Branch = 2,
+    /// Leaf page (contains actual key/value data)
+    Leaf = 3,
+    /// Overflow page (for large values that don't fit in leaf)
+    Overflow = 4,
+}
+
+impl MdbxPageType {
+    /// Convert from raw u8 value
+    pub fn from_raw(value: u8) -> Self {
+        match value {
+            1 => Self::Meta,
+            2 => Self::Branch,
+            3 => Self::Leaf,
+            4 => Self::Overflow,
+            _ => Self::Unknown,
+        }
+    }
+
+    /// Returns the display name of this page type
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Unknown => "Unknown",
+            Self::Meta => "Meta",
+            Self::Branch => "Branch",
+            Self::Leaf => "Leaf",
+            Self::Overflow => "Overflow",
+        }
+    }
+
+    /// Returns true if this is an internal tree traversal page
+    pub fn is_traversal(&self) -> bool {
+        matches!(self, Self::Branch | Self::Meta)
+    }
+
+    /// Returns true if this is a data-carrying page
+    pub fn is_data(&self) -> bool {
+        matches!(self, Self::Leaf | Self::Overflow)
+    }
+}
+
 /// Event types matching the BPF definitions
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -322,7 +374,8 @@ impl std::fmt::Display for CursorOp {
 ///   - fault_flags: offset 52, size 4
 ///   - latency_ns: offset 56, size 8
 ///   - is_major: offset 64, size 1
-///   - _pad1: offset 65, size 3 (alignment)
+///   - page_type: offset 65, size 1
+///   - _pad1: offset 66, size 2 (alignment)
 ///   - active_dbi: offset 68, size 4
 ///   - active_op_type: offset 72, size 4
 ///   - active_cursor_op: offset 76, size 4
@@ -352,8 +405,10 @@ pub struct PageFaultEvent {
     pub latency_ns: u64,
     /// Major fault (disk I/O) vs minor (in page cache)
     pub is_major: u8,
+    /// MDBX page type (Branch, Leaf, Overflow, Meta, or Unknown)
+    pub page_type: u8,
     /// Padding for alignment
-    pub _pad1: [u8; 3],
+    pub _pad1: [u8; 2],
     /// DBI of active MDBX operation (NO_ACTIVE_OP_DBI if none)
     pub active_dbi: u32,
     /// Operation type of active operation (EVENT_CURSOR_GET, etc.)
@@ -446,12 +501,17 @@ impl PageFaultEvent {
         }
         Some(dbi_to_table_name(self.active_dbi))
     }
+
+    /// Returns the MDBX page type that was faulted
+    pub fn page_type(&self) -> MdbxPageType {
+        MdbxPageType::from_raw(self.page_type)
+    }
 }
 
 /// MDBX cursor operation event from BPF
 ///
 /// This struct must match the layout of cursor_event in mdbx_tracer.bpf.c exactly.
-/// Layout on x86_64 Linux (128 bytes total):
+/// Layout on x86_64 Linux (132 bytes total):
 ///   - timestamp_ns: offset 0, size 8
 ///   - pid: offset 8, size 4
 ///   - tid: offset 12, size 4
@@ -464,7 +524,10 @@ impl PageFaultEvent {
 ///   - value_size: offset 100, size 4
 ///   - latency_ns: offset 104, size 8
 ///   - write_flags: offset 112, size 4
-///   - _pad2: offset 116, size 4
+///   - faults_during_op: offset 116, size 4
+///   - major_faults_during_op: offset 120, size 4
+///   - branch_faults: offset 124, size 4
+///   - leaf_faults: offset 128, size 4
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct CursorEvent {
@@ -492,8 +555,14 @@ pub struct CursorEvent {
     pub latency_ns: u64,
     /// Write flags (for put/del operations): UPSERT, APPEND, etc.
     pub write_flags: u32,
-    /// Padding for alignment
-    pub _pad2: u32,
+    /// Total page faults that occurred during this operation
+    pub faults_during_op: u32,
+    /// Major faults (disk I/O required) during this operation
+    pub major_faults_during_op: u32,
+    /// Faults on branch pages (B+ tree traversal) during this operation
+    pub branch_faults: u32,
+    /// Faults on leaf pages (actual data access) during this operation
+    pub leaf_faults: u32,
 }
 
 // Custom Serialize implementation for CursorEvent since [u8; 64] doesn't impl Serialize
@@ -503,7 +572,7 @@ impl Serialize for CursorEvent {
         S: serde::Serializer,
     {
         use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("CursorEvent", 12)?;
+        let mut state = serializer.serialize_struct("CursorEvent", 16)?;
         state.serialize_field("timestamp_ns", &self.timestamp_ns)?;
         state.serialize_field("pid", &self.pid)?;
         state.serialize_field("tid", &self.tid)?;
@@ -517,6 +586,11 @@ impl Serialize for CursorEvent {
         state.serialize_field("value_size", &self.value_size)?;
         state.serialize_field("latency_ns", &self.latency_ns)?;
         state.serialize_field("write_flags", &self.write_flags)?;
+        // Per-operation fault statistics
+        state.serialize_field("faults_during_op", &self.faults_during_op)?;
+        state.serialize_field("major_faults_during_op", &self.major_faults_during_op)?;
+        state.serialize_field("branch_faults", &self.branch_faults)?;
+        state.serialize_field("leaf_faults", &self.leaf_faults)?;
         state.end()
     }
 }
@@ -543,6 +617,14 @@ impl<'de> Deserialize<'de> for CursorEvent {
             latency_ns: u64,
             #[serde(default)]
             write_flags: u32,
+            #[serde(default)]
+            faults_during_op: u32,
+            #[serde(default)]
+            major_faults_during_op: u32,
+            #[serde(default)]
+            branch_faults: u32,
+            #[serde(default)]
+            leaf_faults: u32,
         }
 
         let helper = CursorEventHelper::deserialize(deserializer)?;
@@ -566,7 +648,10 @@ impl<'de> Deserialize<'de> for CursorEvent {
             value_size: helper.value_size,
             latency_ns: helper.latency_ns,
             write_flags: helper.write_flags,
-            _pad2: 0,
+            faults_during_op: helper.faults_during_op,
+            major_faults_during_op: helper.major_faults_during_op,
+            branch_faults: helper.branch_faults,
+            leaf_faults: helper.leaf_faults,
         })
     }
 }

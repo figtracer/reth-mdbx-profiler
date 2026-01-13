@@ -294,6 +294,14 @@ pub struct ViewerData {
     pub page_fault_attribution_warning: Option<String>,
     /// Direct fault attribution data (from BPF active_ops tracking)
     pub direct_fault_attribution: DirectFaultAttribution,
+
+    // === NEW: Phase 2-3 Page Type and Tree Traversal Data ===
+    /// Page type distribution (Branch, Leaf, Overflow, Meta)
+    pub page_type_stats: PageTypeStats,
+    /// Histogram of faults per operation
+    pub operation_histogram: OperationFaultHistogram,
+    /// B+ tree traversal visualization data
+    pub tree_traversal: TreeTraversalViz,
 }
 
 /// Direct fault attribution data from BPF active_ops tracking.
@@ -329,6 +337,99 @@ pub struct FaultsByCursorOp {
     pub total_faults: u64,
     pub major_faults: u64,
     pub percentage: f64,
+}
+
+/// Page type distribution statistics - shows breakdown of faults by MDBX page type
+/// (Branch pages for B+ tree traversal, Leaf pages for actual data, etc.)
+#[derive(Debug, Serialize, Default)]
+pub struct PageTypeStats {
+    /// Whether page type data is available (requires BPF page type detection)
+    pub has_data: bool,
+    /// Total faults analyzed
+    pub total_faults: u64,
+    /// Breakdown by page type
+    pub by_type: Vec<PageTypeFaultCount>,
+    /// Ratio of traversal (branch/meta) to data (leaf/overflow) faults
+    /// Higher values indicate more tree traversal overhead
+    pub traversal_to_data_ratio: f64,
+}
+
+/// Fault count for a specific page type
+#[derive(Debug, Serialize)]
+pub struct PageTypeFaultCount {
+    pub page_type: String,
+    pub total_faults: u64,
+    pub major_faults: u64,
+    pub percentage: f64,
+}
+
+/// Histogram of page faults per operation
+/// Shows how many faults occur during typical operations
+#[derive(Debug, Serialize, Default)]
+pub struct OperationFaultHistogram {
+    /// Whether histogram data is available
+    pub has_data: bool,
+    /// Distribution buckets [0, 1-2, 3-5, 6-10, 11-20, 21+]
+    pub distribution: Vec<HistogramBucket>,
+    /// Average faults per operation
+    pub avg_faults_per_op: f64,
+    /// Maximum faults seen in any single operation
+    pub max_faults_per_op: u32,
+    /// P50 faults per operation
+    pub p50_faults: u32,
+    /// P95 faults per operation
+    pub p95_faults: u32,
+    /// P99 faults per operation
+    pub p99_faults: u32,
+}
+
+/// Histogram bucket for fault distribution
+#[derive(Debug, Serialize)]
+pub struct HistogramBucket {
+    pub label: String,
+    pub count: u64,
+    pub percentage: f64,
+}
+
+/// B+ tree traversal visualization data - shows how operations traverse the tree
+#[derive(Debug, Serialize, Default)]
+pub struct TreeTraversalViz {
+    /// Whether tree traversal data is available
+    pub has_data: bool,
+    /// Per-table tree statistics
+    pub tables: Vec<TableTreeStats>,
+}
+
+/// Tree traversal statistics for a specific table
+#[derive(Debug, Serialize)]
+pub struct TableTreeStats {
+    pub name: String,
+    pub dbi: u32,
+    /// Total faults on this table
+    pub total_faults: u64,
+    /// Faults on branch pages (B+ tree traversal)
+    pub branch_faults: u64,
+    /// Faults on leaf pages (actual data)
+    pub leaf_faults: u64,
+    /// Faults on overflow pages (large values)
+    pub overflow_faults: u64,
+    /// Branch to leaf ratio (higher = deeper traversal overhead)
+    pub branch_leaf_ratio: f64,
+}
+
+/// Link to reth source code for a table
+#[derive(Debug, Serialize, Clone)]
+pub struct TableSourceLink {
+    /// GitHub URL to the table definition
+    pub github_url: String,
+    /// Documentation URL
+    pub docs_url: String,
+    /// Brief description of the table
+    pub description: String,
+    /// Key type (e.g., "B256", "BlockNumber")
+    pub key_type: String,
+    /// Value type (e.g., "Account", "StorageValue")
+    pub value_type: String,
 }
 
 /// Cursor operation statistics
@@ -621,6 +722,18 @@ pub struct UnifiedTableStats {
     pub top_operation: String,
     // Drill-down details
     pub details: TableDrillDown,
+
+    // === NEW: Page type breakdown ===
+    /// Faults on branch pages (B+ tree traversal)
+    pub branch_faults: u64,
+    /// Faults on leaf pages (actual data)
+    pub leaf_faults: u64,
+    /// Faults on overflow pages (large values)
+    pub overflow_faults: u64,
+    /// Severity level for visual color coding (critical, high, medium, low)
+    pub severity: String,
+    /// Link to reth source code
+    pub reth_source: Option<TableSourceLink>,
 }
 
 /// Drill-down details for a table
@@ -770,6 +883,9 @@ pub fn generate_viewer_data(
             txn_data,
             page_fault_attribution_warning: None,
             direct_fault_attribution: DirectFaultAttribution::default(),
+            page_type_stats: PageTypeStats::default(),
+            operation_histogram: OperationFaultHistogram::default(),
+            tree_traversal: TreeTraversalViz::default(),
         };
     }
 
@@ -844,6 +960,15 @@ pub fn generate_viewer_data(
     // Generate unified table stats combining faults + slow ops
     let unified_tables = generate_unified_table_stats(&page_faults, &correlation, &cursor_data);
 
+    // Generate page type statistics (Phase 2)
+    let page_type_stats = generate_page_type_stats(&page_faults);
+
+    // Generate operation fault histogram (Phase 3)
+    let operation_histogram = generate_operation_histogram(cursor_events);
+
+    // Generate tree traversal visualization data
+    let tree_traversal = generate_tree_traversal_viz(&page_faults);
+
     ViewerData {
         summary,
         timeline,
@@ -857,6 +982,9 @@ pub fn generate_viewer_data(
         txn_data,
         page_fault_attribution_warning,
         direct_fault_attribution,
+        page_type_stats,
+        operation_histogram,
+        tree_traversal,
     }
 }
 
@@ -2676,4 +2804,307 @@ pub fn write_compact_export(data: &ViewerData, path: impl AsRef<Path>) -> std::i
     let json = serde_json::to_string_pretty(&export)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     std::fs::write(path, json)
+}
+
+// =============================================================================
+// Phase 2-3: Page Type Statistics and Tree Traversal Visualization
+// =============================================================================
+
+/// Generate page type statistics from page faults.
+/// This analyzes the distribution of faults by MDBX page type (Branch, Leaf, Overflow, Meta).
+fn generate_page_type_stats(page_faults: &[&PageFaultEvent]) -> PageTypeStats {
+    use crate::event::MdbxPageType;
+
+    let mut branch_total = 0u64;
+    let mut branch_major = 0u64;
+    let mut leaf_total = 0u64;
+    let mut leaf_major = 0u64;
+    let mut overflow_total = 0u64;
+    let mut overflow_major = 0u64;
+    let mut meta_total = 0u64;
+    let mut meta_major = 0u64;
+    let mut unknown_total = 0u64;
+    let mut unknown_major = 0u64;
+
+    let mut has_page_type_data = false;
+
+    for fault in page_faults {
+        let is_major = fault.is_major_fault();
+        let page_type = fault.page_type();
+
+        // Check if we have actual page type data (not all Unknown)
+        if page_type != MdbxPageType::Unknown {
+            has_page_type_data = true;
+        }
+
+        match page_type {
+            MdbxPageType::Branch => {
+                branch_total += 1;
+                if is_major {
+                    branch_major += 1;
+                }
+            }
+            MdbxPageType::Leaf => {
+                leaf_total += 1;
+                if is_major {
+                    leaf_major += 1;
+                }
+            }
+            MdbxPageType::Overflow => {
+                overflow_total += 1;
+                if is_major {
+                    overflow_major += 1;
+                }
+            }
+            MdbxPageType::Meta => {
+                meta_total += 1;
+                if is_major {
+                    meta_major += 1;
+                }
+            }
+            MdbxPageType::Unknown => {
+                unknown_total += 1;
+                if is_major {
+                    unknown_major += 1;
+                }
+            }
+        }
+    }
+
+    let total = page_faults.len() as u64;
+    if total == 0 || !has_page_type_data {
+        return PageTypeStats::default();
+    }
+
+    // Calculate percentages
+    let pct = |n: u64| (n as f64 / total as f64) * 100.0;
+
+    let mut by_type = vec![];
+
+    if branch_total > 0 {
+        by_type.push(PageTypeFaultCount {
+            page_type: "Branch".to_string(),
+            total_faults: branch_total,
+            major_faults: branch_major,
+            percentage: pct(branch_total),
+        });
+    }
+    if leaf_total > 0 {
+        by_type.push(PageTypeFaultCount {
+            page_type: "Leaf".to_string(),
+            total_faults: leaf_total,
+            major_faults: leaf_major,
+            percentage: pct(leaf_total),
+        });
+    }
+    if overflow_total > 0 {
+        by_type.push(PageTypeFaultCount {
+            page_type: "Overflow".to_string(),
+            total_faults: overflow_total,
+            major_faults: overflow_major,
+            percentage: pct(overflow_total),
+        });
+    }
+    if meta_total > 0 {
+        by_type.push(PageTypeFaultCount {
+            page_type: "Meta".to_string(),
+            total_faults: meta_total,
+            major_faults: meta_major,
+            percentage: pct(meta_total),
+        });
+    }
+    if unknown_total > 0 {
+        by_type.push(PageTypeFaultCount {
+            page_type: "Unknown".to_string(),
+            total_faults: unknown_total,
+            major_faults: unknown_major,
+            percentage: pct(unknown_total),
+        });
+    }
+
+    // Sort by total faults descending
+    by_type.sort_by(|a, b| b.total_faults.cmp(&a.total_faults));
+
+    // Calculate traversal to data ratio
+    // Traversal = Branch + Meta (overhead)
+    // Data = Leaf + Overflow (actual data access)
+    let traversal = (branch_total + meta_total) as f64;
+    let data = (leaf_total + overflow_total) as f64;
+    let traversal_to_data_ratio = if data > 0.0 { traversal / data } else { 0.0 };
+
+    PageTypeStats {
+        has_data: true,
+        total_faults: total,
+        by_type,
+        traversal_to_data_ratio,
+    }
+}
+
+/// Generate histogram of page faults per operation from cursor events.
+/// This shows how many faults typically occur during database operations.
+fn generate_operation_histogram(cursor_events: &[CursorEvent]) -> OperationFaultHistogram {
+    // Extract fault counts from cursor events that have fault tracking
+    let fault_counts: Vec<u32> = cursor_events
+        .iter()
+        .filter(|e| e.faults_during_op > 0 || e.latency_ns > 0) // Include events that were tracked
+        .map(|e| e.faults_during_op)
+        .collect();
+
+    if fault_counts.is_empty() {
+        return OperationFaultHistogram::default();
+    }
+
+    // Create histogram buckets: [0, 1-2, 3-5, 6-10, 11-20, 21+]
+    let mut bucket_0 = 0u64;
+    let mut bucket_1_2 = 0u64;
+    let mut bucket_3_5 = 0u64;
+    let mut bucket_6_10 = 0u64;
+    let mut bucket_11_20 = 0u64;
+    let mut bucket_21_plus = 0u64;
+
+    let mut max_faults = 0u32;
+    let mut total_faults = 0u64;
+    let mut sorted_counts = fault_counts.clone();
+    sorted_counts.sort();
+
+    for &count in &fault_counts {
+        total_faults += count as u64;
+        if count > max_faults {
+            max_faults = count;
+        }
+
+        match count {
+            0 => bucket_0 += 1,
+            1..=2 => bucket_1_2 += 1,
+            3..=5 => bucket_3_5 += 1,
+            6..=10 => bucket_6_10 += 1,
+            11..=20 => bucket_11_20 += 1,
+            _ => bucket_21_plus += 1,
+        }
+    }
+
+    let total_ops = fault_counts.len() as f64;
+    let pct = |n: u64| (n as f64 / total_ops) * 100.0;
+
+    let distribution = vec![
+        HistogramBucket {
+            label: "0".to_string(),
+            count: bucket_0,
+            percentage: pct(bucket_0),
+        },
+        HistogramBucket {
+            label: "1-2".to_string(),
+            count: bucket_1_2,
+            percentage: pct(bucket_1_2),
+        },
+        HistogramBucket {
+            label: "3-5".to_string(),
+            count: bucket_3_5,
+            percentage: pct(bucket_3_5),
+        },
+        HistogramBucket {
+            label: "6-10".to_string(),
+            count: bucket_6_10,
+            percentage: pct(bucket_6_10),
+        },
+        HistogramBucket {
+            label: "11-20".to_string(),
+            count: bucket_11_20,
+            percentage: pct(bucket_11_20),
+        },
+        HistogramBucket {
+            label: "21+".to_string(),
+            count: bucket_21_plus,
+            percentage: pct(bucket_21_plus),
+        },
+    ];
+
+    // Calculate percentiles
+    let len = sorted_counts.len();
+    let p50_idx = len / 2;
+    let p95_idx = (len * 95) / 100;
+    let p99_idx = (len * 99) / 100;
+
+    let p50_faults = sorted_counts.get(p50_idx).copied().unwrap_or(0);
+    let p95_faults = sorted_counts.get(p95_idx).copied().unwrap_or(0);
+    let p99_faults = sorted_counts.get(p99_idx).copied().unwrap_or(0);
+
+    OperationFaultHistogram {
+        has_data: true,
+        distribution,
+        avg_faults_per_op: total_faults as f64 / total_ops,
+        max_faults_per_op: max_faults,
+        p50_faults,
+        p95_faults,
+        p99_faults,
+    }
+}
+
+/// Generate tree traversal visualization data.
+/// This groups page type statistics by table for per-table tree analysis.
+fn generate_tree_traversal_viz(page_faults: &[&PageFaultEvent]) -> TreeTraversalViz {
+    use crate::event::MdbxPageType;
+
+    // Group faults by table (using active_dbi from BPF)
+    // Key: dbi, Value: (branch, leaf, overflow, total)
+    let mut table_stats: HashMap<u32, (u64, u64, u64, u64)> = HashMap::new();
+    let mut has_page_type_data = false;
+
+    for fault in page_faults {
+        // Only include faults with known table attribution
+        if !fault.has_active_op() {
+            continue;
+        }
+
+        let dbi = fault.active_dbi;
+        let page_type = fault.page_type();
+
+        if page_type != MdbxPageType::Unknown {
+            has_page_type_data = true;
+        }
+
+        let entry = table_stats.entry(dbi).or_insert((0, 0, 0, 0));
+        entry.3 += 1; // total
+
+        match page_type {
+            MdbxPageType::Branch => entry.0 += 1,
+            MdbxPageType::Leaf => entry.1 += 1,
+            MdbxPageType::Overflow => entry.2 += 1,
+            _ => {} // Meta and Unknown don't contribute to table-level analysis
+        }
+    }
+
+    if table_stats.is_empty() || !has_page_type_data {
+        return TreeTraversalViz::default();
+    }
+
+    // Convert to sorted list
+    let mut tables: Vec<TableTreeStats> = table_stats
+        .into_iter()
+        .map(|(dbi, (branch, leaf, overflow, total))| {
+            let branch_leaf_ratio = if leaf > 0 {
+                branch as f64 / leaf as f64
+            } else {
+                0.0
+            };
+
+            TableTreeStats {
+                name: crate::event::dbi_to_table_name(dbi),
+                dbi,
+                total_faults: total,
+                branch_faults: branch,
+                leaf_faults: leaf,
+                overflow_faults: overflow,
+                branch_leaf_ratio,
+            }
+        })
+        .collect();
+
+    // Sort by total faults descending
+    tables.sort_by(|a, b| b.total_faults.cmp(&a.total_faults));
+
+    TreeTraversalViz {
+        has_data: true,
+        tables,
+    }
 }
