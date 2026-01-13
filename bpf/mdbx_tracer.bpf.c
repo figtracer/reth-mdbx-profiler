@@ -108,7 +108,7 @@ struct page_fault_event {
 };
 
 // MDBX cursor operation event sent to userspace
-// This captures mdbx_cursor_get/put/del calls with key information
+// This captures mdbx_cursor_get/put/del calls with key information and B+ tree traversal stats
 struct cursor_event {
     __u64 timestamp_ns;      // Kernel timestamp
     __u32 pid;               // Process ID
@@ -122,7 +122,14 @@ struct cursor_event {
     __u32 value_size;        // Size of value (for put operations)
     __u64 latency_ns;        // Time spent in the operation
     __u32 write_flags;       // Write flags (UPSERT, APPEND, etc.) for put operations
-    __u32 _pad2;             // Padding for alignment
+    // Per-operation page fault statistics (populated from op_fault_stats_map)
+    __u32 faults_during_op;       // Total page faults during this operation
+    __u32 major_faults_during_op; // Major faults (disk I/O) during this operation
+    __u32 branch_faults;          // Faults on branch pages (B+ tree traversal)
+    __u32 leaf_faults;            // Faults on leaf pages (actual data)
+    __u32 overflow_faults;        // Faults on overflow pages (large values)
+    __u32 max_tree_depth;         // Maximum B+ tree depth observed (branch faults before first leaf)
+    __u64 fault_latency_ns;       // Cumulative time spent in fault handlers
 };
 
 // Transaction event sent to userspace
@@ -416,12 +423,15 @@ struct {
 
 // Per-operation fault statistics - accumulated during each MDBX operation
 // This tracks how many page faults (and what types) occur during each operation
+// Also tracks B+ tree traversal depth by counting consecutive branch page faults
 struct op_fault_stats {
     __u32 fault_count;         // Total page faults during this operation
     __u32 major_fault_count;   // Major faults (required disk I/O)
     __u32 branch_faults;       // Faults on branch pages (B+ tree traversal)
     __u32 leaf_faults;         // Faults on leaf pages (actual data access)
     __u32 overflow_faults;     // Faults on overflow pages (large values)
+    __u32 current_depth;       // Current depth in tree traversal (reset on leaf hit)
+    __u32 max_depth;           // Maximum tree depth observed during this operation
     __u32 _pad;                // Padding for alignment
     __u64 total_fault_latency_ns;  // Cumulative time spent in fault handlers
 };
@@ -652,13 +662,29 @@ int BPF_KRETPROBE(trace_page_fault_ret, vm_fault_t ret)
             if (is_major) {
                 __sync_fetch_and_add(&stats->major_fault_count, 1);
             }
-            // Update page type specific counters
+            // Update page type specific counters and track B+ tree depth
+            // Depth tracking: branch faults increment depth, leaf/overflow reset it
+            // This measures how deep we traverse the B+ tree before hitting data
             if (page_type == PAGE_TYPE_BRANCH) {
                 __sync_fetch_and_add(&stats->branch_faults, 1);
+                // Increment current depth for each branch page traversed
+                __u32 new_depth = __sync_fetch_and_add(&stats->current_depth, 1) + 1;
+                // Update max_depth if this is deeper than we've seen
+                __u32 old_max = stats->max_depth;
+                while (new_depth > old_max) {
+                    if (__sync_bool_compare_and_swap(&stats->max_depth, old_max, new_depth)) {
+                        break;
+                    }
+                    old_max = stats->max_depth;
+                }
             } else if (page_type == PAGE_TYPE_LEAF) {
                 __sync_fetch_and_add(&stats->leaf_faults, 1);
+                // Reset current_depth when we hit a leaf (end of tree traversal)
+                stats->current_depth = 0;
             } else if (page_type == PAGE_TYPE_OVERFLOW) {
                 __sync_fetch_and_add(&stats->overflow_faults, 1);
+                // Overflow pages are extensions of leaf data, also reset depth
+                stats->current_depth = 0;
             }
             __sync_fetch_and_add(&stats->total_fault_latency_ns, latency);
         }
@@ -941,7 +967,6 @@ int BPF_URETPROBE(trace_cursor_get_ret, int ret)
     e->value_size = 0;  // Not applicable for get
     e->latency_ns = latency;
     e->write_flags = 0;
-    e->_pad2 = 0;
 
     // Copy key data
     // Use a loop that the verifier can understand
@@ -950,10 +975,32 @@ int BPF_URETPROBE(trace_cursor_get_ret, int ret)
         e->key_data[i] = cctx->key_data[i];
     }
 
+    // Copy per-operation fault statistics including tree depth
+    struct op_fault_stats *stats = bpf_map_lookup_elem(&op_fault_stats_map, &pid_tgid);
+    if (stats) {
+        e->faults_during_op = stats->fault_count;
+        e->major_faults_during_op = stats->major_fault_count;
+        e->branch_faults = stats->branch_faults;
+        e->leaf_faults = stats->leaf_faults;
+        e->overflow_faults = stats->overflow_faults;
+        e->max_tree_depth = stats->max_depth;
+        e->fault_latency_ns = stats->total_fault_latency_ns;
+    } else {
+        e->faults_during_op = 0;
+        e->major_faults_during_op = 0;
+        e->branch_faults = 0;
+        e->leaf_faults = 0;
+        e->overflow_faults = 0;
+        e->max_tree_depth = 0;
+        e->fault_latency_ns = 0;
+    }
+
     bpf_ringbuf_submit(e, 0);
 
     // Clean up
     bpf_map_delete_elem(&pending_cursors, &pid_tgid);
+    bpf_map_delete_elem(&op_fault_stats_map, &pid_tgid);
+    bpf_map_delete_elem(&active_ops, &pid_tgid);
 
     return 0;
 }
@@ -1156,7 +1203,6 @@ int BPF_URETPROBE(trace_direct_get_ret, int ret)
     e->value_size = 0;  // Not tracked for direct get
     e->latency_ns = latency;
     e->write_flags = 0;
-    e->_pad2 = 0;
 
     // Copy key data
     #pragma unroll
@@ -1164,12 +1210,31 @@ int BPF_URETPROBE(trace_direct_get_ret, int ret)
         e->key_data[i] = dctx->key_data[i];
     }
 
+    // Copy per-operation fault statistics including tree depth
+    struct op_fault_stats *stats = bpf_map_lookup_elem(&op_fault_stats_map, &pid_tgid);
+    if (stats) {
+        e->faults_during_op = stats->fault_count;
+        e->major_faults_during_op = stats->major_fault_count;
+        e->branch_faults = stats->branch_faults;
+        e->leaf_faults = stats->leaf_faults;
+        e->overflow_faults = stats->overflow_faults;
+        e->max_tree_depth = stats->max_depth;
+        e->fault_latency_ns = stats->total_fault_latency_ns;
+    } else {
+        e->faults_during_op = 0;
+        e->major_faults_during_op = 0;
+        e->branch_faults = 0;
+        e->leaf_faults = 0;
+        e->overflow_faults = 0;
+        e->max_tree_depth = 0;
+        e->fault_latency_ns = 0;
+    }
+
     bpf_ringbuf_submit(e, 0);
 
     // Clean up
     bpf_map_delete_elem(&pending_direct_gets, &pid_tgid);
-
-    // Clear active operation
+    bpf_map_delete_elem(&op_fault_stats_map, &pid_tgid);
     bpf_map_delete_elem(&active_ops, &pid_tgid);
 
     return 0;
@@ -1311,17 +1376,35 @@ int BPF_URETPROBE(trace_cursor_put_ret, int ret)
     e->value_size = pctx->value_size;
     e->latency_ns = latency;
     e->write_flags = pctx->write_flags;
-    e->_pad2 = 0;
 
     #pragma unroll
     for (int i = 0; i < MAX_KEY_SIZE; i++) {
         e->key_data[i] = pctx->key_data[i];
     }
 
+    // Copy per-operation fault statistics including tree depth
+    struct op_fault_stats *fstats = bpf_map_lookup_elem(&op_fault_stats_map, &pid_tgid);
+    if (fstats) {
+        e->faults_during_op = fstats->fault_count;
+        e->major_faults_during_op = fstats->major_fault_count;
+        e->branch_faults = fstats->branch_faults;
+        e->leaf_faults = fstats->leaf_faults;
+        e->overflow_faults = fstats->overflow_faults;
+        e->max_tree_depth = fstats->max_depth;
+        e->fault_latency_ns = fstats->total_fault_latency_ns;
+    } else {
+        e->faults_during_op = 0;
+        e->major_faults_during_op = 0;
+        e->branch_faults = 0;
+        e->leaf_faults = 0;
+        e->overflow_faults = 0;
+        e->max_tree_depth = 0;
+        e->fault_latency_ns = 0;
+    }
+
     bpf_ringbuf_submit(e, 0);
     bpf_map_delete_elem(&pending_cursor_puts, &pid_tgid);
-
-    // Clear active operation
+    bpf_map_delete_elem(&op_fault_stats_map, &pid_tgid);
     bpf_map_delete_elem(&active_ops, &pid_tgid);
 
     return 0;
@@ -1428,7 +1511,6 @@ int BPF_URETPROBE(trace_cursor_del_ret, int ret)
     e->value_size = 0;
     e->latency_ns = latency;
     e->write_flags = dctx->write_flags;
-    e->_pad2 = 0;
 
     // Zero out key_data
     #pragma unroll
@@ -1436,10 +1518,29 @@ int BPF_URETPROBE(trace_cursor_del_ret, int ret)
         e->key_data[i] = 0;
     }
 
+    // Copy per-operation fault statistics including tree depth
+    struct op_fault_stats *fstats = bpf_map_lookup_elem(&op_fault_stats_map, &pid_tgid);
+    if (fstats) {
+        e->faults_during_op = fstats->fault_count;
+        e->major_faults_during_op = fstats->major_fault_count;
+        e->branch_faults = fstats->branch_faults;
+        e->leaf_faults = fstats->leaf_faults;
+        e->overflow_faults = fstats->overflow_faults;
+        e->max_tree_depth = fstats->max_depth;
+        e->fault_latency_ns = fstats->total_fault_latency_ns;
+    } else {
+        e->faults_during_op = 0;
+        e->major_faults_during_op = 0;
+        e->branch_faults = 0;
+        e->leaf_faults = 0;
+        e->overflow_faults = 0;
+        e->max_tree_depth = 0;
+        e->fault_latency_ns = 0;
+    }
+
     bpf_ringbuf_submit(e, 0);
     bpf_map_delete_elem(&pending_cursor_dels, &pid_tgid);
-
-    // Clear active operation
+    bpf_map_delete_elem(&op_fault_stats_map, &pid_tgid);
     bpf_map_delete_elem(&active_ops, &pid_tgid);
 
     return 0;
@@ -1767,17 +1868,35 @@ int BPF_URETPROBE(trace_direct_put_ret, int ret)
     e->value_size = pctx->value_size;
     e->latency_ns = latency;
     e->write_flags = pctx->write_flags;
-    e->_pad2 = 0;
 
     #pragma unroll
     for (int i = 0; i < MAX_KEY_SIZE; i++) {
         e->key_data[i] = pctx->key_data[i];
     }
 
+    // Copy per-operation fault statistics including tree depth
+    struct op_fault_stats *fstats = bpf_map_lookup_elem(&op_fault_stats_map, &pid_tgid);
+    if (fstats) {
+        e->faults_during_op = fstats->fault_count;
+        e->major_faults_during_op = fstats->major_fault_count;
+        e->branch_faults = fstats->branch_faults;
+        e->leaf_faults = fstats->leaf_faults;
+        e->overflow_faults = fstats->overflow_faults;
+        e->max_tree_depth = fstats->max_depth;
+        e->fault_latency_ns = fstats->total_fault_latency_ns;
+    } else {
+        e->faults_during_op = 0;
+        e->major_faults_during_op = 0;
+        e->branch_faults = 0;
+        e->leaf_faults = 0;
+        e->overflow_faults = 0;
+        e->max_tree_depth = 0;
+        e->fault_latency_ns = 0;
+    }
+
     bpf_ringbuf_submit(e, 0);
     bpf_map_delete_elem(&pending_direct_puts, &pid_tgid);
-
-    // Clear active operation
+    bpf_map_delete_elem(&op_fault_stats_map, &pid_tgid);
     bpf_map_delete_elem(&active_ops, &pid_tgid);
 
     return 0;
@@ -1889,17 +2008,35 @@ int BPF_URETPROBE(trace_direct_del_ret, int ret)
     e->value_size = 0;
     e->latency_ns = latency;
     e->write_flags = 0;
-    e->_pad2 = 0;
 
     #pragma unroll
     for (int i = 0; i < MAX_KEY_SIZE; i++) {
         e->key_data[i] = dctx->key_data[i];
     }
 
+    // Copy per-operation fault statistics including tree depth
+    struct op_fault_stats *fstats = bpf_map_lookup_elem(&op_fault_stats_map, &pid_tgid);
+    if (fstats) {
+        e->faults_during_op = fstats->fault_count;
+        e->major_faults_during_op = fstats->major_fault_count;
+        e->branch_faults = fstats->branch_faults;
+        e->leaf_faults = fstats->leaf_faults;
+        e->overflow_faults = fstats->overflow_faults;
+        e->max_tree_depth = fstats->max_depth;
+        e->fault_latency_ns = fstats->total_fault_latency_ns;
+    } else {
+        e->faults_during_op = 0;
+        e->major_faults_during_op = 0;
+        e->branch_faults = 0;
+        e->leaf_faults = 0;
+        e->overflow_faults = 0;
+        e->max_tree_depth = 0;
+        e->fault_latency_ns = 0;
+    }
+
     bpf_ringbuf_submit(e, 0);
     bpf_map_delete_elem(&pending_direct_dels, &pid_tgid);
-
-    // Clear active operation
+    bpf_map_delete_elem(&op_fault_stats_map, &pid_tgid);
     bpf_map_delete_elem(&active_ops, &pid_tgid);
 
     return 0;

@@ -5,7 +5,7 @@
 
 mod template;
 
-use crate::event::{CursorEvent, PageFaultEvent, TxnEvent, dbi_to_table_name, is_pre_trace_cursor};
+use crate::event::{dbi_to_table_name, is_pre_trace_cursor, CursorEvent, PageFaultEvent, TxnEvent};
 use crate::mdbx_metadata::{PageAttribution, RethTable};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -647,6 +647,33 @@ pub struct CursorSummary {
     pub direct_get_count: u64,
     /// Percentage of operations that are direct gets
     pub direct_get_ratio: f64,
+    /// B+ tree depth statistics from per-operation tracking
+    pub tree_depth_stats: TreeDepthStats,
+}
+
+/// Statistics about B+ tree traversal depth during operations
+#[derive(Debug, Default, Serialize)]
+pub struct TreeDepthStats {
+    /// Total operations with depth tracking data
+    pub ops_with_depth_data: u64,
+    /// Maximum tree depth observed across all operations
+    pub max_depth_observed: u32,
+    /// Average tree depth across operations that had faults
+    pub avg_depth: f64,
+    /// Distribution of max depths: depth -> count
+    pub depth_distribution: Vec<(u32, u64)>,
+    /// Operations by depth bucket for histogram
+    pub depth_histogram: Vec<DepthBucket>,
+}
+
+/// Bucket for depth histogram
+#[derive(Debug, Serialize)]
+pub struct DepthBucket {
+    pub depth: u32,
+    pub count: u64,
+    pub percentage: f64,
+    pub avg_faults: f64,
+    pub avg_latency_us: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -1484,6 +1511,76 @@ fn table_name_to_dbi(name: &str) -> u32 {
 }
 
 /// Generate cursor operation statistics
+/// Compute B+ tree depth statistics from cursor events
+fn compute_tree_depth_stats(events: &[CursorEvent]) -> TreeDepthStats {
+    // Filter to events that have depth tracking data (max_tree_depth > 0 means at least one branch was hit)
+    let events_with_depth: Vec<_> = events
+        .iter()
+        .filter(|e| e.max_tree_depth > 0 || e.branch_faults > 0)
+        .collect();
+
+    if events_with_depth.is_empty() {
+        return TreeDepthStats::default();
+    }
+
+    let ops_with_depth_data = events_with_depth.len() as u64;
+
+    // Find maximum depth observed
+    let max_depth_observed = events_with_depth
+        .iter()
+        .map(|e| e.max_tree_depth)
+        .max()
+        .unwrap_or(0);
+
+    // Calculate average depth
+    let total_depth: u64 = events_with_depth
+        .iter()
+        .map(|e| e.max_tree_depth as u64)
+        .sum();
+    let avg_depth = total_depth as f64 / ops_with_depth_data as f64;
+
+    // Build depth distribution: depth -> count
+    let mut depth_counts: HashMap<u32, u64> = HashMap::new();
+    for event in &events_with_depth {
+        *depth_counts.entry(event.max_tree_depth).or_insert(0) += 1;
+    }
+    let mut depth_distribution: Vec<_> = depth_counts.into_iter().collect();
+    depth_distribution.sort_by_key(|(d, _)| *d);
+
+    // Build histogram buckets with more detail
+    let mut depth_buckets: HashMap<u32, (u64, u64, u64)> = HashMap::new(); // depth -> (count, total_faults, total_latency)
+    for event in &events_with_depth {
+        let entry = depth_buckets
+            .entry(event.max_tree_depth)
+            .or_insert((0, 0, 0));
+        entry.0 += 1;
+        entry.1 += event.faults_during_op as u64;
+        entry.2 += event.latency_ns / 1000; // Convert to us
+    }
+
+    let mut depth_histogram: Vec<DepthBucket> = depth_buckets
+        .into_iter()
+        .map(
+            |(depth, (count, total_faults, total_latency_us))| DepthBucket {
+                depth,
+                count,
+                percentage: count as f64 / ops_with_depth_data as f64 * 100.0,
+                avg_faults: total_faults as f64 / count as f64,
+                avg_latency_us: total_latency_us as f64 / count as f64,
+            },
+        )
+        .collect();
+    depth_histogram.sort_by_key(|b| b.depth);
+
+    TreeDepthStats {
+        ops_with_depth_data,
+        max_depth_observed,
+        avg_depth,
+        depth_distribution,
+        depth_histogram,
+    }
+}
+
 fn generate_cursor_data(events: &[CursorEvent]) -> CursorData {
     if events.is_empty() {
         return CursorData::default();
@@ -1927,6 +2024,7 @@ fn generate_cursor_data(events: &[CursorEvent]) -> CursorData {
             duration_secs,
             direct_get_count,
             direct_get_ratio: direct_get_count as f64 / total as f64 * 100.0,
+            tree_depth_stats: compute_tree_depth_stats(events),
         },
         operations,
         table_stats,

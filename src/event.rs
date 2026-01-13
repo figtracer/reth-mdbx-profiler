@@ -511,7 +511,7 @@ impl PageFaultEvent {
 /// MDBX cursor operation event from BPF
 ///
 /// This struct must match the layout of cursor_event in mdbx_tracer.bpf.c exactly.
-/// Layout on x86_64 Linux (132 bytes total):
+/// Layout on x86_64 Linux (152 bytes total):
 ///   - timestamp_ns: offset 0, size 8
 ///   - pid: offset 8, size 4
 ///   - tid: offset 12, size 4
@@ -528,6 +528,9 @@ impl PageFaultEvent {
 ///   - major_faults_during_op: offset 120, size 4
 ///   - branch_faults: offset 124, size 4
 ///   - leaf_faults: offset 128, size 4
+///   - overflow_faults: offset 132, size 4
+///   - max_tree_depth: offset 136, size 4
+///   - fault_latency_ns: offset 140, size 8 (aligned to 8)
 #[repr(C)]
 #[derive(Debug, Clone)]
 pub struct CursorEvent {
@@ -563,6 +566,12 @@ pub struct CursorEvent {
     pub branch_faults: u32,
     /// Faults on leaf pages (actual data access) during this operation
     pub leaf_faults: u32,
+    /// Faults on overflow pages (large values) during this operation
+    pub overflow_faults: u32,
+    /// Maximum B+ tree depth observed (consecutive branch pages before leaf)
+    pub max_tree_depth: u32,
+    /// Cumulative time spent in fault handlers during this operation (nanoseconds)
+    pub fault_latency_ns: u64,
 }
 
 // Custom Serialize implementation for CursorEvent since [u8; 64] doesn't impl Serialize
@@ -572,7 +581,7 @@ impl Serialize for CursorEvent {
         S: serde::Serializer,
     {
         use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("CursorEvent", 16)?;
+        let mut state = serializer.serialize_struct("CursorEvent", 19)?;
         state.serialize_field("timestamp_ns", &self.timestamp_ns)?;
         state.serialize_field("pid", &self.pid)?;
         state.serialize_field("tid", &self.tid)?;
@@ -591,6 +600,10 @@ impl Serialize for CursorEvent {
         state.serialize_field("major_faults_during_op", &self.major_faults_during_op)?;
         state.serialize_field("branch_faults", &self.branch_faults)?;
         state.serialize_field("leaf_faults", &self.leaf_faults)?;
+        state.serialize_field("overflow_faults", &self.overflow_faults)?;
+        // B+ tree depth tracking
+        state.serialize_field("max_tree_depth", &self.max_tree_depth)?;
+        state.serialize_field("fault_latency_ns", &self.fault_latency_ns)?;
         state.end()
     }
 }
@@ -625,6 +638,12 @@ impl<'de> Deserialize<'de> for CursorEvent {
             branch_faults: u32,
             #[serde(default)]
             leaf_faults: u32,
+            #[serde(default)]
+            overflow_faults: u32,
+            #[serde(default)]
+            max_tree_depth: u32,
+            #[serde(default)]
+            fault_latency_ns: u64,
         }
 
         let helper = CursorEventHelper::deserialize(deserializer)?;
@@ -652,6 +671,9 @@ impl<'de> Deserialize<'de> for CursorEvent {
             major_faults_during_op: helper.major_faults_during_op,
             branch_faults: helper.branch_faults,
             leaf_faults: helper.leaf_faults,
+            overflow_faults: helper.overflow_faults,
+            max_tree_depth: helper.max_tree_depth,
+            fault_latency_ns: helper.fault_latency_ns,
         })
     }
 }
