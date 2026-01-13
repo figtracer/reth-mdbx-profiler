@@ -5,7 +5,7 @@
 
 mod template;
 
-use crate::event::{dbi_to_table_name, is_pre_trace_cursor, CursorEvent, PageFaultEvent, TxnEvent};
+use crate::event::{CursorEvent, PageFaultEvent, TxnEvent, dbi_to_table_name, is_pre_trace_cursor};
 use crate::mdbx_metadata::{PageAttribution, RethTable};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -3297,44 +3297,109 @@ fn generate_block_analysis(
         return Vec::new();
     }
 
-    // Step 2: Create sorted list of (first_write_timestamp, block_number)
-    let mut block_boundaries: Vec<(u64, u64)> = first_write_per_block
-        .into_iter()
-        .map(|(block, ts)| (ts, block))
-        .collect();
-    block_boundaries.sort_by_key(|(ts, _)| *ts);
-
-    // Step 3: Determine trace time bounds
+    // Step 2: Determine block range and trace time bounds
+    let min_block = *first_write_per_block.keys().min().unwrap();
+    let max_block = *first_write_per_block.keys().max().unwrap();
     let trace_start = page_faults.iter().map(|f| f.timestamp_ns).min().unwrap();
     let trace_end = page_faults.iter().map(|f| f.timestamp_ns).max().unwrap();
 
-    // Step 4: Build attribution windows using inter-block gaps
-    // Window for block N = [first_write(N-1), first_write(N))
-    // - Faults before first block's write → attributed to first block (execution phase)
-    // - Faults in [first_write(N), first_write(N+1)) → attributed to block N+1
-    // - Faults after last block's write → attributed to last block (write phase + tail)
+    // Step 3: Create sorted list of known (timestamp, block_number) pairs
+    let mut known_boundaries: Vec<(u64, u64)> = first_write_per_block
+        .iter()
+        .map(|(&block, &ts)| (ts, block))
+        .collect();
+    known_boundaries.sort_by_key(|(ts, _)| *ts);
+
+    // Step 4: Build attribution windows for ALL blocks in the range
+    // Strategy: Divide the trace time evenly across all blocks, respecting known timestamps
+    // as anchor points for more accurate attribution.
     //
+    // We use a hybrid approach:
+    // 1. Blocks with known timestamps anchor the time divisions
+    // 2. Blocks without timestamps get proportional time slices between anchors
+    let total_blocks = max_block - min_block + 1;
+    let trace_duration = trace_end.saturating_sub(trace_start);
+
+    // Build sorted list of all blocks with their estimated timestamps
+    // For known blocks, use their actual timestamp
+    // For unknown blocks, interpolate based on position between known neighbors
+    let mut block_timestamps: Vec<(u64, u64)> = Vec::new(); // (block, timestamp)
+
+    // First pass: collect all known timestamps sorted by block number
+    let mut known_by_block: Vec<(u64, u64)> = first_write_per_block
+        .iter()
+        .map(|(&block, &ts)| (block, ts))
+        .collect();
+    known_by_block.sort_by_key(|(block, _)| *block);
+
+    // Second pass: interpolate timestamps for all blocks
+    for block in min_block..=max_block {
+        let timestamp = if let Some(&ts) = first_write_per_block.get(&block) {
+            ts
+        } else {
+            // Find enclosing known blocks
+            let prev = known_by_block.iter().filter(|(b, _)| *b < block).last();
+            let next = known_by_block.iter().filter(|(b, _)| *b > block).next();
+
+            match (prev, next) {
+                (Some(&(prev_block, prev_ts)), Some(&(next_block, next_ts))) => {
+                    // Linear interpolation
+                    let block_span = next_block - prev_block;
+                    let time_span = next_ts.saturating_sub(prev_ts);
+                    let offset = block - prev_block;
+                    prev_ts + (time_span * offset / block_span)
+                }
+                (Some(&(prev_block, prev_ts)), None) => {
+                    // After last known - extrapolate using average pace
+                    let offset = block - prev_block;
+                    let avg_time_per_block = trace_duration / total_blocks;
+                    prev_ts + avg_time_per_block * offset
+                }
+                (None, Some(&(next_block, next_ts))) => {
+                    // Before first known - extrapolate backwards
+                    let offset = next_block - block;
+                    let avg_time_per_block = trace_duration / total_blocks;
+                    next_ts.saturating_sub(avg_time_per_block * offset)
+                }
+                (None, None) => {
+                    // No known blocks at all - uniform distribution
+                    let offset = block - min_block;
+                    let avg_time_per_block = trace_duration / total_blocks;
+                    trace_start + avg_time_per_block * offset
+                }
+            }
+        };
+        block_timestamps.push((block, timestamp));
+    }
+
+    // Sort by timestamp (blocks should mostly be in order, but batching might shuffle slightly)
+    block_timestamps.sort_by_key(|(_, ts)| *ts);
+
+    // Step 5: Build attribution windows
+    // Each block gets a window from its timestamp to the next block's timestamp
     // Format: (start_ts, end_ts, block_number)
     let mut attribution_windows: Vec<(u64, u64, u64)> = Vec::new();
 
-    if !block_boundaries.is_empty() {
-        // First window: trace_start to first block's write → first block execution
-        let (first_write_ts, first_block) = block_boundaries[0];
-        if trace_start < first_write_ts {
-            attribution_windows.push((trace_start, first_write_ts, first_block));
-        }
+    for i in 0..block_timestamps.len() {
+        let (block_num, block_ts) = block_timestamps[i];
 
-        // Middle windows: [first_write(N), first_write(N+1)) → block N+1 execution
-        for i in 0..block_boundaries.len() - 1 {
-            let (current_write_ts, _current_block) = block_boundaries[i];
-            let (next_write_ts, next_block) = block_boundaries[i + 1];
-            attribution_windows.push((current_write_ts, next_write_ts, next_block));
-        }
+        // Window starts at trace_start for first block, otherwise at block's timestamp
+        let window_start = if i == 0 {
+            trace_start.min(block_ts)
+        } else {
+            block_ts
+        };
 
-        // Last window: last block's write to trace_end → last block (write phase + any tail)
-        let (last_write_ts, last_block) = block_boundaries[block_boundaries.len() - 1];
-        if last_write_ts < trace_end {
-            attribution_windows.push((last_write_ts, trace_end + 1, last_block));
+        // Window ends at next block's timestamp, or trace_end for last block
+        let window_end = if i + 1 < block_timestamps.len() {
+            block_timestamps[i + 1].1
+        } else {
+            trace_end + 1
+        };
+
+        // Create window if it has positive duration
+        if window_start < window_end {
+            attribution_windows.push((window_start, window_end, block_num));
         }
     }
 
