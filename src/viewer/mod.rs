@@ -423,6 +423,41 @@ pub struct BlockAnalysis {
     pub total_faults: u32,
 }
 
+/// Per-batch analysis showing page faults for each RW transaction batch.
+/// Reth batches multiple blocks into single MDBX transactions, so this gives
+/// more accurate attribution than per-block analysis.
+#[derive(Debug, Serialize, Default, Clone)]
+pub struct BatchAnalysis {
+    /// Batch index (0-based, chronological order)
+    pub batch_index: u32,
+    /// First block number in this batch
+    pub first_block: u64,
+    /// Last block number in this batch
+    pub last_block: u64,
+    /// Number of blocks in this batch
+    pub block_count: u32,
+    /// Faults on branch pages (B+ tree traversal)
+    pub branch_faults: u32,
+    /// Faults on leaf pages (data access)
+    pub leaf_faults: u32,
+    /// Faults on overflow pages (large values)
+    pub overflow_faults: u32,
+    /// Total major faults (disk I/O)
+    pub major_faults: u32,
+    /// Total I/O time in microseconds (estimated from major faults)
+    pub io_time_us: u64,
+    /// Tables touched while processing this batch
+    pub tables_touched: Vec<String>,
+    /// Total faults for this batch
+    pub total_faults: u32,
+    /// Batch start timestamp (ns from trace start)
+    pub start_time_ns: u64,
+    /// Batch end timestamp (ns from trace start)
+    pub end_time_ns: u64,
+    /// Commit latency in microseconds
+    pub commit_latency_us: u64,
+}
+
 /// Operation-to-page-type breakdown showing which cursor operations
 /// cause which types of page faults (branch vs leaf).
 #[derive(Debug, Serialize, Clone)]
@@ -450,7 +485,9 @@ pub struct OperationPageTypeBreakdown {
 pub struct BTreeVisualization {
     /// Whether B+ tree visualization data is available
     pub has_data: bool,
-    /// Per-block analysis (sorted by total_faults descending)
+    /// Per-batch analysis (sorted by batch_index) - more accurate than block analysis
+    pub batch_analysis: Vec<BatchAnalysis>,
+    /// Per-block analysis (sorted by total_faults descending) - kept for compatibility
     pub block_analysis: Vec<BlockAnalysis>,
     /// Operation-to-page-type breakdown
     pub operation_page_types: Vec<OperationPageTypeBreakdown>,
@@ -1049,6 +1086,7 @@ pub fn generate_viewer_data(
     let btree_viz = generate_btree_visualization(
         &page_faults,
         cursor_events,
+        txn_events,
         &tree_traversal,
         &summary.block_range,
     );
@@ -3212,11 +3250,12 @@ fn generate_tree_traversal_viz(page_faults: &[&PageFaultEvent]) -> TreeTraversal
     }
 }
 /// Generate comprehensive B+ tree visualization data.
-/// This includes per-block analysis, operation-to-page-type breakdown,
+/// This includes per-batch analysis, per-block analysis, operation-to-page-type breakdown,
 /// tree depth estimates, and traversal efficiency scoring.
 fn generate_btree_visualization(
     page_faults: &[&PageFaultEvent],
     cursor_events: &[CursorEvent],
+    txn_events: &[TxnEvent],
     tree_traversal: &TreeTraversalViz,
     block_range: &Option<BlockRange>,
 ) -> BTreeVisualization {
@@ -3231,7 +3270,10 @@ fn generate_btree_visualization(
         return BTreeVisualization::default();
     }
 
-    // Generate per-block analysis
+    // Generate per-batch analysis (more accurate - uses RW transaction boundaries)
+    let batch_analysis = generate_batch_analysis(page_faults, cursor_events, txn_events);
+
+    // Generate per-block analysis (kept for compatibility, less accurate due to batching)
     let block_analysis = generate_block_analysis(page_faults, cursor_events);
 
     // Generate operation-to-page-type breakdown
@@ -3245,12 +3287,175 @@ fn generate_btree_visualization(
 
     BTreeVisualization {
         has_data: true,
+        batch_analysis,
         block_analysis,
         operation_page_types,
         block_range: block_range.clone(),
         tree_depth_estimates,
         traversal_efficiency_score,
     }
+}
+
+/// Generate per-batch analysis by correlating page faults with RW transaction boundaries.
+///
+/// Reth batches multiple blocks into single MDBX RW transactions before committing.
+/// This function uses RW transaction commit timestamps to define accurate batch boundaries,
+/// then attributes page faults to each batch based on when they occurred.
+///
+/// This is more accurate than per-block analysis because:
+/// - We have precise transaction boundaries (begin/commit timestamps)
+/// - We know exactly which blocks were written in each transaction
+/// - Page faults can be accurately attributed to the batch that was active
+fn generate_batch_analysis(
+    page_faults: &[&PageFaultEvent],
+    cursor_events: &[CursorEvent],
+    txn_events: &[TxnEvent],
+) -> Vec<BatchAnalysis> {
+    use crate::event::MdbxPageType;
+
+    if page_faults.is_empty() || txn_events.is_empty() {
+        return Vec::new();
+    }
+
+    let trace_start = page_faults.iter().map(|f| f.timestamp_ns).min().unwrap();
+
+    // Step 1: Find all RW transaction lifecycles (begin -> commit)
+    // Key: txn_ptr, Value: (begin_ts, commit_ts, commit_latency_ns)
+    let mut rw_txn_lifecycles: HashMap<u64, (u64, u64, u64)> = HashMap::new();
+    let mut rw_begins: HashMap<u64, u64> = HashMap::new();
+
+    for event in txn_events {
+        // RW transactions have txn_flags == 0
+        if event.txn_flags != 0 {
+            continue;
+        }
+
+        match event.event_type {
+            7 => {
+                // TXN_BEGIN
+                rw_begins.insert(event.txn_ptr, event.timestamp_ns);
+            }
+            8 => {
+                // TXN_COMMIT
+                if let Some(begin_ts) = rw_begins.remove(&event.txn_ptr) {
+                    rw_txn_lifecycles.insert(
+                        event.txn_ptr,
+                        (begin_ts, event.timestamp_ns, event.latency_ns),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if rw_txn_lifecycles.is_empty() {
+        return Vec::new();
+    }
+
+    // Step 2: Sort RW transactions by commit timestamp
+    let mut sorted_txns: Vec<(u64, u64, u64, u64)> = rw_txn_lifecycles
+        .into_iter()
+        .map(|(ptr, (begin, commit, latency))| (begin, commit, latency, ptr))
+        .collect();
+    sorted_txns.sort_by_key(|(_, commit, _, _)| *commit);
+
+    // Step 3: Find which blocks were written in each transaction
+    // We associate cursor writes with the RW transaction that was active at that time
+    let mut blocks_per_txn: HashMap<u64, Vec<u64>> = HashMap::new();
+
+    for event in cursor_events {
+        if !event.is_write_op() {
+            continue;
+        }
+
+        if let Some(block) = extract_block_from_key(event.dbi, &event.key_data, event.key_size) {
+            // Find which RW transaction this write belongs to
+            for &(begin, commit, _, ptr) in &sorted_txns {
+                if event.timestamp_ns >= begin && event.timestamp_ns <= commit {
+                    blocks_per_txn.entry(ptr).or_default().push(block);
+                    break;
+                }
+            }
+        }
+    }
+
+    // Step 4: Build batch windows and attribute faults
+    // Window for batch N = [commit(N-1), commit(N)]
+    // First batch starts at trace_start
+    let mut batches: Vec<BatchAnalysis> = Vec::new();
+
+    let mut prev_commit_ts = trace_start;
+
+    for (batch_idx, &(begin_ts, commit_ts, latency_ns, txn_ptr)) in sorted_txns.iter().enumerate() {
+        // Get blocks for this transaction
+        let mut blocks: Vec<u64> = blocks_per_txn.get(&txn_ptr).cloned().unwrap_or_default();
+        blocks.sort();
+        blocks.dedup();
+
+        let (first_block, last_block, block_count) = if blocks.is_empty() {
+            (0, 0, 0)
+        } else {
+            (
+                *blocks.first().unwrap(),
+                *blocks.last().unwrap(),
+                blocks.len() as u32,
+            )
+        };
+
+        // Attribution window: from previous commit to this commit
+        let window_start = prev_commit_ts;
+        let window_end = commit_ts;
+
+        // Count faults in this window
+        let mut branch_faults = 0u32;
+        let mut leaf_faults = 0u32;
+        let mut overflow_faults = 0u32;
+        let mut major_faults = 0u32;
+        let mut tables_touched: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
+        for fault in page_faults {
+            if fault.timestamp_ns >= window_start && fault.timestamp_ns < window_end {
+                let page_type = fault.page_type();
+                match page_type {
+                    MdbxPageType::Branch => branch_faults += 1,
+                    MdbxPageType::Leaf => leaf_faults += 1,
+                    MdbxPageType::Overflow => overflow_faults += 1,
+                    _ => {}
+                }
+                if fault.is_major_fault() {
+                    major_faults += 1;
+                }
+                if fault.has_active_op() && fault.active_dbi < 100 {
+                    tables_touched.insert(dbi_to_table_name(fault.active_dbi).to_string());
+                }
+            }
+        }
+
+        let total_faults = branch_faults + leaf_faults + overflow_faults;
+        const ESTIMATED_IO_TIME_PER_MAJOR_FAULT_US: u64 = 200;
+
+        batches.push(BatchAnalysis {
+            batch_index: batch_idx as u32,
+            first_block,
+            last_block,
+            block_count,
+            branch_faults,
+            leaf_faults,
+            overflow_faults,
+            major_faults,
+            io_time_us: major_faults as u64 * ESTIMATED_IO_TIME_PER_MAJOR_FAULT_US,
+            tables_touched: tables_touched.into_iter().collect(),
+            total_faults,
+            start_time_ns: window_start.saturating_sub(trace_start),
+            end_time_ns: window_end.saturating_sub(trace_start),
+            commit_latency_us: latency_ns / 1000,
+        });
+
+        prev_commit_ts = commit_ts;
+    }
+
+    batches
 }
 
 /// Generate per-block analysis by correlating page faults with block numbers
@@ -3372,35 +3577,35 @@ fn generate_block_analysis(
         block_timestamps.push((block, timestamp));
     }
 
-    // Sort by timestamp (blocks should mostly be in order, but batching might shuffle slightly)
-    block_timestamps.sort_by_key(|(_, ts)| *ts);
+    // Sort by timestamp, then by block number for stable ordering
+    // This ensures blocks with identical timestamps are processed in block order
+    block_timestamps.sort_by(|(block_a, ts_a), (block_b, ts_b)| {
+        ts_a.cmp(ts_b).then_with(|| block_a.cmp(block_b))
+    });
 
-    // Step 5: Build attribution windows
-    // Each block gets a window from its timestamp to the next block's timestamp
+    // Step 5: Build attribution windows for ALL blocks
+    // We divide the trace time proportionally among all blocks.
+    // For blocks with identical timestamps, we subdivide their shared time window.
+    let num_blocks = block_timestamps.len() as u64;
+    let total_duration = trace_end.saturating_sub(trace_start);
+    let time_per_block = total_duration / num_blocks.max(1);
+
     // Format: (start_ts, end_ts, block_number)
     let mut attribution_windows: Vec<(u64, u64, u64)> = Vec::new();
 
     for i in 0..block_timestamps.len() {
-        let (block_num, block_ts) = block_timestamps[i];
+        let (block_num, _block_ts) = block_timestamps[i];
 
-        // Window starts at trace_start for first block, otherwise at block's timestamp
-        let window_start = if i == 0 {
-            trace_start.min(block_ts)
-        } else {
-            block_ts
-        };
-
-        // Window ends at next block's timestamp, or trace_end for last block
+        // Simple approach: divide trace time evenly among all blocks
+        // This is more robust than trying to use interpolated timestamps
+        let window_start = trace_start + (i as u64) * time_per_block;
         let window_end = if i + 1 < block_timestamps.len() {
-            block_timestamps[i + 1].1
+            trace_start + ((i + 1) as u64) * time_per_block
         } else {
             trace_end + 1
         };
 
-        // Create window if it has positive duration
-        if window_start < window_end {
-            attribution_windows.push((window_start, window_end, block_num));
-        }
+        attribution_windows.push((window_start, window_end, block_num));
     }
 
     // Sort windows by start time for binary search

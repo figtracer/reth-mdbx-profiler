@@ -260,27 +260,28 @@ pub fn generate_html(data: &ViewerData) -> String {
                         </div>
                     </div>
 
-                    <!-- Per-Block Analysis (Phase 4) -->
+                    <!-- Per-Batch Analysis (Phase 4) -->
                     <div class="card full-width" id="block-analysis-section" style="display:none;">
                         <div class="card-header">
-                            Page Faults by Block
-                            <span class="card-hint">Click block for table breakdown</span>
+                            Page Faults by Batch
+                            <span class="card-hint">Each batch = 1 RW transaction (multiple blocks)</span>
                         </div>
                         <div class="card-body" style="padding: 16px;">
                             <div id="block-histogram-container" style="height: 200px; position: relative;">
                                 <canvas id="block-histogram-canvas"></canvas>
                             </div>
-                            <div class="compact-table-container" style="max-height: 300px; margin-top: 16px;">
+                            <div class="compact-table-container" style="max-height: 400px; margin-top: 16px;">
                                 <table class="compact-table" id="block-analysis-table">
                                     <thead>
                                         <tr>
-                                            <th>Block</th>
+                                            <th>Batch</th>
+                                            <th>Blocks</th>
                                             <th>Total Faults</th>
                                             <th>Branch</th>
                                             <th>Leaf</th>
                                             <th>Major %</th>
                                             <th>I/O Time</th>
-                                            <th>Tables</th>
+                                            <th>Commit</th>
                                         </tr>
                                     </thead>
                                     <tbody></tbody>
@@ -1907,6 +1908,21 @@ document.getElementById('export-compact-btn').addEventListener('click', () => {
             traversal_efficiency_score: DATA.btree_viz.traversal_efficiency_score,
             tree_depth_estimates: DATA.btree_viz.tree_depth_estimates,
             operation_page_types: DATA.btree_viz.operation_page_types.slice(0, 10),
+            batch_analysis: DATA.btree_viz.batch_analysis ? DATA.btree_viz.batch_analysis.map(b => ({
+                batch_index: b.batch_index,
+                first_block: b.first_block,
+                last_block: b.last_block,
+                block_count: b.block_count,
+                total_faults: b.total_faults,
+                branch_faults: b.branch_faults,
+                leaf_faults: b.leaf_faults,
+                major_faults: b.major_faults,
+                io_time_us: b.io_time_us,
+                tables_touched: b.tables_touched,
+                start_time_ns: b.start_time_ns,
+                end_time_ns: b.end_time_ns,
+                commit_latency_us: b.commit_latency_us
+            })) : [],
             block_analysis: DATA.btree_viz.block_analysis.slice(0, 20).map(b => ({
                 block: b.block_number,
                 total: b.total_faults,
@@ -2318,8 +2334,12 @@ function initBTree() {
         drawOperationPageTypeChart(bv.operation_page_types);
     }
 
-    // Phase 4: Per-block analysis
-    if (bv && bv.has_data && bv.block_analysis.length) {
+    // Phase 4: Per-batch analysis (more accurate than per-block)
+    if (bv && bv.has_data && bv.batch_analysis && bv.batch_analysis.length) {
+        document.getElementById('block-analysis-section').style.display = 'block';
+        drawBatchAnalysis(bv.batch_analysis);
+    } else if (bv && bv.has_data && bv.block_analysis.length) {
+        // Fallback to block analysis if no batch data
         document.getElementById('block-analysis-section').style.display = 'block';
         drawBlockAnalysis(bv.block_analysis);
     }
@@ -2601,7 +2621,110 @@ function drawOperationPageTypeChart(opPageTypes) {
     ctx.fillText('Overflow', labelWidth + 156, legendY + 9);
 }
 
-// Phase 4: Draw block analysis section
+// Phase 4: Draw batch analysis section (more accurate than block analysis)
+function drawBatchAnalysis(batchAnalysis) {
+    // Sort by batch index (chronological order)
+    const sorted = [...batchAnalysis].sort((a, b) => a.batch_index - b.batch_index);
+
+    // Draw histogram
+    drawBatchHistogram(sorted);
+
+    // Populate table
+    const tbody = document.querySelector('#block-analysis-table tbody');
+    if (!tbody) return;
+
+    tbody.innerHTML = sorted.map(batch => {
+        const majorPct = batch.total_faults > 0 ? ((batch.major_faults / batch.total_faults) * 100).toFixed(0) : '0';
+        const blockRange = batch.block_count > 0
+            ? (batch.first_block === batch.last_block
+                ? batch.first_block.toLocaleString()
+                : `${batch.first_block.toLocaleString()} - ${batch.last_block.toLocaleString()}`)
+            : '-';
+        const commitMs = (batch.commit_latency_us / 1000).toFixed(1);
+
+        return `
+            <tr>
+                <td>#${batch.batch_index + 1}</td>
+                <td title="${batch.block_count} blocks">${blockRange}</td>
+                <td>${fmt(batch.total_faults)}</td>
+                <td style="color: #f59e0b">${fmt(batch.branch_faults)}</td>
+                <td style="color: #22c55e">${fmt(batch.leaf_faults)}</td>
+                <td>${majorPct}%</td>
+                <td>${(batch.io_time_us / 1000).toFixed(1)}ms</td>
+                <td>${commitMs}ms</td>
+            </tr>
+        `;
+    }).join('');
+}
+
+function drawBatchHistogram(batches) {
+    const canvas = document.getElementById('block-histogram-canvas');
+    if (!canvas || batches.length === 0) return;
+
+    const ctx = canvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+    const container = canvas.parentElement;
+    const w = container.offsetWidth;
+    const h = 180;
+
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
+    ctx.scale(dpr, dpr);
+
+    ctx.clearRect(0, 0, w, h);
+
+    const padding = { top: 20, right: 20, bottom: 30, left: 50 };
+    const chartW = w - padding.left - padding.right;
+    const chartH = h - padding.top - padding.bottom;
+
+    // Find max faults for y-axis
+    const maxFaults = Math.max(...batches.map(b => b.total_faults), 1);
+
+    // Draw axes
+    ctx.strokeStyle = '#3f3f46';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(padding.left, padding.top);
+    ctx.lineTo(padding.left, h - padding.bottom);
+    ctx.lineTo(w - padding.right, h - padding.bottom);
+    ctx.stroke();
+
+    // Draw bars
+    const barWidth = Math.max(4, (chartW / batches.length) - 2);
+
+    batches.forEach((batch, i) => {
+        const x = padding.left + (i / batches.length) * chartW + 1;
+        const barH = (batch.total_faults / maxFaults) * chartH;
+        const y = h - padding.bottom - barH;
+
+        // Color by major fault ratio (red = more major/disk, green = more minor/cache)
+        const majorRatio = batch.total_faults > 0 ? batch.major_faults / batch.total_faults : 0;
+        const r = Math.round(34 + majorRatio * (239 - 34));
+        const g = Math.round(197 - majorRatio * (197 - 68));
+        const b_color = Math.round(94 - majorRatio * (94 - 68));
+        ctx.fillStyle = `rgb(${r}, ${g}, ${b_color})`;
+
+        ctx.fillRect(x, y, barWidth, barH);
+    });
+
+    // Y-axis labels
+    ctx.fillStyle = '#71717a';
+    ctx.font = '10px -apple-system, BlinkMacSystemFont, sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText(fmtK(maxFaults), padding.left - 5, padding.top + 5);
+    ctx.fillText('0', padding.left - 5, h - padding.bottom + 5);
+
+    // X-axis labels (batch numbers)
+    ctx.textAlign = 'center';
+    if (batches.length > 0) {
+        ctx.fillText('Batch #1', padding.left + 30, h - 10);
+        ctx.fillText('Batch #' + batches.length, w - padding.right - 30, h - 10);
+    }
+}
+
+// Phase 4: Draw block analysis section (fallback)
 function drawBlockAnalysis(blockAnalysis) {
     // Sort by block number for both histogram and table
     const sorted = [...blockAnalysis].sort((a, b) => a.block_number - b.block_number);
