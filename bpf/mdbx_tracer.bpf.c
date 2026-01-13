@@ -668,12 +668,12 @@ int BPF_KRETPROBE(trace_page_fault_ret, vm_fault_t ret)
             if (page_type == PAGE_TYPE_BRANCH) {
                 __sync_fetch_and_add(&stats->branch_faults, 1);
                 // Increment current depth for each branch page traversed
-                __u32 new_depth = __sync_fetch_and_add(&stats->current_depth, 1) + 1;
-                // Update max_depth if this is deeper than we've seen
-                // Note: Using simple comparison instead of CAS because BPF only supports
-                // 64-bit atomic CAS, and this is safe since stats are per-thread (pid_tgid key)
-                if (new_depth > stats->max_depth) {
-                    stats->max_depth = new_depth;
+                // Note: Using non-atomic ops for depth tracking because:
+                // 1. BPF XADD doesn't allow using return value
+                // 2. Stats are per-thread (pid_tgid key) so no contention
+                stats->current_depth += 1;
+                if (stats->current_depth > stats->max_depth) {
+                    stats->max_depth = stats->current_depth;
                 }
             } else if (page_type == PAGE_TYPE_LEAF) {
                 __sync_fetch_and_add(&stats->leaf_faults, 1);
