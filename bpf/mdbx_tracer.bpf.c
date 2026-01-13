@@ -65,6 +65,21 @@
 // Sentinel value for "no active operation" on this thread
 #define NO_ACTIVE_OP_DBI 0xFFFFFFFF
 
+// MDBX page flags (from libmdbx internals - mp_flags field in page header)
+// The page header is at offset 0 of each MDBX page:
+//   pgno (8 bytes) | flags (2 bytes) | num_keys (2 bytes) | lower (2 bytes) | upper (2 bytes)
+#define MDBX_P_BRANCH   0x01   // Branch page (internal B+ tree node)
+#define MDBX_P_LEAF     0x02   // Leaf page (contains actual key/value data)
+#define MDBX_P_OVERFLOW 0x04   // Overflow page (for large values that don't fit in leaf)
+#define MDBX_P_META     0x08   // Meta page (database metadata at page 0 and 1)
+
+// Page type enum for simplified reporting
+#define PAGE_TYPE_UNKNOWN  0
+#define PAGE_TYPE_META     1
+#define PAGE_TYPE_BRANCH   2
+#define PAGE_TYPE_LEAF     3
+#define PAGE_TYPE_OVERFLOW 4
+
 // Page fault event sent to userspace
 struct page_fault_event {
     __u64 timestamp_ns;      // Kernel timestamp
@@ -78,7 +93,8 @@ struct page_fault_event {
     __u32 fault_flags;       // Page fault flags (read/write/etc)
     __u64 latency_ns;        // Time spent in fault handler (if available)
     __u8  is_major;          // Major fault (disk I/O) vs minor (in page cache)
-    __u8  _pad1[3];          // Padding for alignment
+    __u8  page_type;         // MDBX page type: PAGE_TYPE_BRANCH, PAGE_TYPE_LEAF, etc.
+    __u8  _pad1[2];          // Padding for alignment
     // Active operation context (filled if page fault occurred during MDBX operation)
     __u32 active_dbi;        // DBI of active operation (NO_ACTIVE_OP_DBI if none)
     __u32 active_op_type;    // Operation type: EVENT_CURSOR_GET, EVENT_CURSOR_PUT, etc.
@@ -266,7 +282,7 @@ struct {
 } pending_cursor_opens SEC(".maps");
 
 // Context for correlating uprobe entry with uretprobe return for direct get ops
-// mdbx_get signature: int mdbx_get(const MDBX_txn *txn, MDBX_dbi dbi, 
+// mdbx_get signature: int mdbx_get(const MDBX_txn *txn, MDBX_dbi dbi,
 //                                   const MDBX_val *key, MDBX_val *data)
 struct direct_get_context {
     __u64 timestamp_ns;      // Entry timestamp for latency calculation
@@ -393,6 +409,28 @@ struct {
     __type(value, struct active_op);
 } active_ops SEC(".maps");
 
+// Per-operation fault statistics - accumulated during each MDBX operation
+// This tracks how many page faults (and what types) occur during each operation
+struct op_fault_stats {
+    __u32 fault_count;         // Total page faults during this operation
+    __u32 major_fault_count;   // Major faults (required disk I/O)
+    __u32 branch_faults;       // Faults on branch pages (B+ tree traversal)
+    __u32 leaf_faults;         // Faults on leaf pages (actual data access)
+    __u32 overflow_faults;     // Faults on overflow pages (large values)
+    __u32 _pad;                // Padding for alignment
+    __u64 total_fault_latency_ns;  // Cumulative time spent in fault handlers
+};
+
+// Per-operation fault stats map: accumulates fault statistics for each active operation
+// Key: pid_tgid (thread ID)
+// Value: accumulated fault statistics for the current operation
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 4096);
+    __type(key, __u64);
+    __type(value, struct op_fault_stats);
+} op_fault_stats_map SEC(".maps");
+
 #define STAT_TOTAL_FAULTS     0
 #define STAT_MDBX_FAULTS      1
 #define STAT_MAJOR_FAULTS     2
@@ -430,49 +468,49 @@ static __always_inline bool should_trace_pid(__u32 pid) {
 // Get inode from file struct
 static __always_inline __u64 get_file_inode(struct file *file) {
     if (!file) return 0;
-    
+
     struct inode *inode = BPF_CORE_READ(file, f_inode);
     if (!inode) return 0;
-    
+
     return BPF_CORE_READ(inode, i_ino);
 }
 
 // Trace page faults entry - save context for kretprobe
 SEC("kprobe/handle_mm_fault")
-int BPF_KPROBE(trace_page_fault, 
+int BPF_KPROBE(trace_page_fault,
                struct vm_area_struct *vma,
                unsigned long address,
                unsigned int flags)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = pid_tgid >> 32;
-    
+
     // Filter by PID first (fast path)
     if (!should_trace_pid(pid)) {
         return 0;
     }
-    
+
     inc_stat(STAT_TOTAL_FAULTS);
-    
+
     // Read VMA bounds
     __u64 vm_start = BPF_CORE_READ(vma, vm_start);
     __u64 vm_end = BPF_CORE_READ(vma, vm_end);
-    
+
     // Check if this is a VMA we're tracking
     __u64 *file_offset_base = bpf_map_lookup_elem(&vma_to_offset, &vm_start);
     __u64 offset_base_val = 0;
-    
+
     if (!file_offset_base) {
         // Not a tracked VMA - check if it's a new MDBX mmap
         struct file *file = BPF_CORE_READ(vma, vm_file);
         if (!file) return 0;
-        
+
         __u64 inode = get_file_inode(file);
         __u8 *tracked = bpf_map_lookup_elem(&tracked_inodes, &inode);
         if (!tracked) {
             return 0;  // Not an MDBX file
         }
-        
+
         // New VMA for tracked inode - register it
         __u64 pgoff = BPF_CORE_READ(vma, vm_pgoff);
         offset_base_val = pgoff * 4096;  // PAGE_SIZE
@@ -480,12 +518,12 @@ int BPF_KPROBE(trace_page_fault,
     } else {
         offset_base_val = *file_offset_base;
     }
-    
+
     inc_stat(STAT_MDBX_FAULTS);
-    
+
     // Calculate file offset from virtual address
     __u64 file_offset = offset_base_val + (address - vm_start);
-    
+
     // Save context for kretprobe to emit event with major fault info
     struct fault_context fctx = {
         .timestamp_ns = bpf_ktime_get_ns(),
@@ -499,7 +537,7 @@ int BPF_KPROBE(trace_page_fault,
         .should_trace = 1,
     };
     bpf_map_update_elem(&pending_faults, &pid_tgid, &fctx, BPF_ANY);
-    
+
     return 0;
 }
 
@@ -508,24 +546,24 @@ SEC("kretprobe/handle_mm_fault")
 int BPF_KRETPROBE(trace_page_fault_ret, vm_fault_t ret)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
-    
+
     // Look up the saved context
     struct fault_context *fctx = bpf_map_lookup_elem(&pending_faults, &pid_tgid);
     if (!fctx || !fctx->should_trace) {
         return 0;
     }
-    
+
     // Determine if this was a major fault from return value
     __u8 is_major = (ret & VM_FAULT_MAJOR) ? 1 : 0;
-    
+
     if (is_major) {
         inc_stat(STAT_MAJOR_FAULTS);
     }
-    
+
     // Calculate latency
     __u64 now = bpf_ktime_get_ns();
     __u64 latency = now - fctx->timestamp_ns;
-    
+
     // Reserve space in ring buffer
     struct page_fault_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
     if (!e) {
@@ -533,7 +571,7 @@ int BPF_KRETPROBE(trace_page_fault_ret, vm_fault_t ret)
         bpf_map_delete_elem(&pending_faults, &pid_tgid);
         return 0;
     }
-    
+
     // Fill event with saved context and return info
     e->timestamp_ns = fctx->timestamp_ns;
     e->address = fctx->address;
@@ -546,10 +584,44 @@ int BPF_KRETPROBE(trace_page_fault_ret, vm_fault_t ret)
     e->fault_flags = fctx->fault_flags;
     e->latency_ns = latency;
     e->is_major = is_major;
+
+    // Detect MDBX page type by reading the page header
+    // After the fault completes, the page is mapped and we can safely read it.
+    // MDBX page header layout: pgno(8 bytes) | flags(2 bytes) | ...
+    // The flags are at offset 8 from the page start
+    __u8 page_type = PAGE_TYPE_UNKNOWN;
+    __u64 page_num = fctx->file_offset >> 12;  // Divide by 4096 (page size)
+
+    // Meta pages are at page 0 and 1
+    if (page_num <= 1) {
+        page_type = PAGE_TYPE_META;
+    } else {
+        // Try to read the page flags from the mapped page
+        __u64 page_start = fctx->address & ~0xFFFULL;  // Align to 4KB page boundary
+        __u16 flags = 0;
+
+        // Use bpf_probe_read_user to safely read from user space
+        // The page should be mapped now since the fault handler completed
+        if (bpf_probe_read_user(&flags, sizeof(flags), (void *)(page_start + 8)) == 0) {
+            // Determine page type from flags
+            if (flags & MDBX_P_META) {
+                page_type = PAGE_TYPE_META;
+            } else if (flags & MDBX_P_BRANCH) {
+                page_type = PAGE_TYPE_BRANCH;
+            } else if (flags & MDBX_P_LEAF) {
+                page_type = PAGE_TYPE_LEAF;
+            } else if (flags & MDBX_P_OVERFLOW) {
+                page_type = PAGE_TYPE_OVERFLOW;
+            }
+            // If flags is 0 or doesn't match any known type, stays as UNKNOWN
+        }
+        // If read fails, page_type stays as PAGE_TYPE_UNKNOWN
+    }
+
+    e->page_type = page_type;
     e->_pad1[0] = 0;
     e->_pad1[1] = 0;
-    e->_pad1[2] = 0;
-    
+
     struct active_op *op = bpf_map_lookup_elem(&active_ops, &pid_tgid);
     if (op) {
         // Page fault occurred during an MDBX operation - we know exactly what caused it!
@@ -560,6 +632,24 @@ int BPF_KRETPROBE(trace_page_fault_ret, vm_fault_t ret)
         #pragma unroll
         for (int i = 0; i < ACTIVE_OP_KEY_PREFIX_SIZE; i++) {
             e->active_key_prefix[i] = op->key_prefix[i];
+        }
+
+        // Update per-operation fault statistics
+        struct op_fault_stats *stats = bpf_map_lookup_elem(&op_fault_stats_map, &pid_tgid);
+        if (stats) {
+            __sync_fetch_and_add(&stats->fault_count, 1);
+            if (is_major) {
+                __sync_fetch_and_add(&stats->major_fault_count, 1);
+            }
+            // Update page type specific counters
+            if (page_type == PAGE_TYPE_BRANCH) {
+                __sync_fetch_and_add(&stats->branch_faults, 1);
+            } else if (page_type == PAGE_TYPE_LEAF) {
+                __sync_fetch_and_add(&stats->leaf_faults, 1);
+            } else if (page_type == PAGE_TYPE_OVERFLOW) {
+                __sync_fetch_and_add(&stats->overflow_faults, 1);
+            }
+            __sync_fetch_and_add(&stats->total_fault_latency_ns, latency);
         }
     } else {
         // No active MDBX operation - fault happened between operations
@@ -572,12 +662,12 @@ int BPF_KRETPROBE(trace_page_fault_ret, vm_fault_t ret)
             e->active_key_prefix[i] = 0;
         }
     }
-    
+
     bpf_ringbuf_submit(e, 0);
-    
+
     // Clean up
     bpf_map_delete_elem(&pending_faults, &pid_tgid);
-    
+
     return 0;
 }
 
@@ -592,18 +682,18 @@ int BPF_KPROBE(trace_mmap,
                unsigned long pgoff)
 {
     if (!file) return 0;
-    
+
     __u32 pid = bpf_get_current_pid_tgid() >> 32;
     if (!should_trace_pid(pid)) return 0;
-    
+
     __u64 inode = get_file_inode(file);
     __u8 *tracked = bpf_map_lookup_elem(&tracked_inodes, &inode);
     if (!tracked) return 0;
-    
+
     // Log the mmap event
     struct page_fault_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
     if (!e) return 0;
-    
+
     e->timestamp_ns = bpf_ktime_get_ns();
     e->address = addr;
     e->file_offset = pgoff * 4096;
@@ -615,9 +705,9 @@ int BPF_KPROBE(trace_mmap,
     e->fault_flags = flags;
     e->latency_ns = len;  // Repurpose for mmap length
     e->is_major = 0;
-    
+
     bpf_ringbuf_submit(e, 0);
-    
+
     return 0;
 }
 
@@ -628,7 +718,7 @@ int BPF_KPROBE(trace_mmap,
 // These uprobes attach to libmdbx functions to trace database operations.
 // The main function we trace is mdbx_cursor_get which has this signature:
 //
-//   int mdbx_cursor_get(MDBX_cursor *cursor, MDBX_val *key, MDBX_val *data, 
+//   int mdbx_cursor_get(MDBX_cursor *cursor, MDBX_val *key, MDBX_val *data,
 //                       MDBX_cursor_op op);
 //
 // MDBX_val is a struct with:
@@ -650,22 +740,22 @@ struct mdbx_val {
 };
 
 // Uprobe on mdbx_cursor_get entry
-// Signature: int mdbx_cursor_get(MDBX_cursor *cursor, MDBX_val *key, 
+// Signature: int mdbx_cursor_get(MDBX_cursor *cursor, MDBX_val *key,
 //                                 MDBX_val *data, MDBX_cursor_op op)
 SEC("uprobe/mdbx_cursor_get")
-int BPF_UPROBE(trace_cursor_get, void *cursor, struct mdbx_val *key, 
+int BPF_UPROBE(trace_cursor_get, void *cursor, struct mdbx_val *key,
                void *data, int op)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = pid_tgid >> 32;
-    
+
     // Filter by PID
     if (!should_trace_pid(pid)) {
         return 0;
     }
-    
+
     inc_stat(STAT_CURSOR_OPS);
-    
+
     // Track specific operation types
     if (op == MDBX_SET_RANGE || op == MDBX_SET || op == MDBX_SET_KEY ||
         op == MDBX_SET_LOWERBOUND || op == MDBX_SET_UPPERBOUND) {
@@ -673,9 +763,9 @@ int BPF_UPROBE(trace_cursor_get, void *cursor, struct mdbx_val *key,
     } else if (op == MDBX_NEXT || op == MDBX_NEXT_DUP || op == MDBX_NEXT_NODUP) {
         inc_stat(STAT_CURSOR_NEXTS);
     }
-    
+
     __u64 now = bpf_ktime_get_ns();
-    
+
     // Build cursor context (named cctx to avoid conflict with BPF_UPROBE's ctx)
     struct cursor_context cctx = {
         .timestamp_ns = now,
@@ -685,7 +775,7 @@ int BPF_UPROBE(trace_cursor_get, void *cursor, struct mdbx_val *key,
         .dbi = 0,  // Will try to read from cursor struct
         .key_size = 0,
     };
-    
+
     // Look up the DBI from cursor_to_dbi map (populated by mdbx_cursor_open uprobe)
     if (cursor) {
         __u64 cursor_addr = (__u64)cursor;
@@ -696,12 +786,12 @@ int BPF_UPROBE(trace_cursor_get, void *cursor, struct mdbx_val *key,
             // Cursor was opened before tracing started - try to read DBI from struct
             // MDBX_cursor layout (libmdbx 0.12+):
             //   offset 0:  int32_t signature
-            //   offset 4:  int16_t top_and_flags  
+            //   offset 4:  int16_t top_and_flags
             //   offset 6:  uint8_t checking
             //   offset 7:  uint8_t pad
             //   offset 8:  uint8_t* dbi_state
             //   offset 16: MDBX_txn* txn
-            // 
+            //
             // MDBX_txn layout:
             //   offset 0:  int32_t signature
             //   offset 4:  uint32_t flags
@@ -711,13 +801,13 @@ int BPF_UPROBE(trace_cursor_get, void *cursor, struct mdbx_val *key,
             //
             // DBI = cursor->dbi_state - cursor->txn->dbi_state
             // This is fragile, so we try it but fall back to a sentinel value
-            
+
             __u64 cursor_dbi_state = 0;
             __u64 txn_ptr = 0;
             __u64 txn_dbi_state = 0;
-            
+
             // Read cursor->dbi_state (offset 8)
-            if (bpf_probe_read_user(&cursor_dbi_state, sizeof(cursor_dbi_state), 
+            if (bpf_probe_read_user(&cursor_dbi_state, sizeof(cursor_dbi_state),
                                     (void *)(cursor_addr + 8)) == 0 && cursor_dbi_state != 0) {
                 // Read cursor->txn (offset 16)
                 if (bpf_probe_read_user(&txn_ptr, sizeof(txn_ptr),
@@ -726,8 +816,8 @@ int BPF_UPROBE(trace_cursor_get, void *cursor, struct mdbx_val *key,
                     // These vary based on libmdbx build options (MDBX_ENABLE_DBI_SPARSE, etc.)
                     #pragma unroll
                     for (int offset_idx = 0; offset_idx < 4; offset_idx++) {
-                        __u64 try_offset = (offset_idx == 0) ? 104 : 
-                                           (offset_idx == 1) ? 112 : 
+                        __u64 try_offset = (offset_idx == 0) ? 104 :
+                                           (offset_idx == 1) ? 112 :
                                            (offset_idx == 2) ? 120 : 88;
                         if (bpf_probe_read_user(&txn_dbi_state, sizeof(txn_dbi_state),
                                                 (void *)(txn_ptr + try_offset)) == 0) {
@@ -744,14 +834,14 @@ int BPF_UPROBE(trace_cursor_get, void *cursor, struct mdbx_val *key,
                     }
                 }
             }
-            
+
             // Could not determine DBI - use sentinel value 0xFFFFFFFE
             // This will show up as "Unknown" in the analyzer
             cctx.dbi = 0xFFFFFFFE;
             dbi_found:;
         }
     }
-    
+
     // Read key data if available (for seek operations)
     if (key) {
         struct mdbx_val key_val = {};
@@ -765,10 +855,10 @@ int BPF_UPROBE(trace_cursor_get, void *cursor, struct mdbx_val *key,
             }
         }
     }
-    
+
     // Save context for uretprobe
     bpf_map_update_elem(&pending_cursors, &pid_tgid, &cctx, BPF_ANY);
-    
+
     // Register this operation as active on this thread for page fault attribution
     struct active_op aop = {
         .start_ns = now,
@@ -791,7 +881,11 @@ int BPF_UPROBE(trace_cursor_get, void *cursor, struct mdbx_val *key,
         }
     }
     bpf_map_update_elem(&active_ops, &pid_tgid, &aop, BPF_ANY);
-    
+
+    // Initialize per-operation fault statistics for this operation
+    struct op_fault_stats stats = {};
+    bpf_map_update_elem(&op_fault_stats_map, &pid_tgid, &stats, BPF_ANY);
+
     return 0;
 }
 
@@ -800,22 +894,22 @@ SEC("uretprobe/mdbx_cursor_get")
 int BPF_URETPROBE(trace_cursor_get_ret, int ret)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
-    
+
     // Look up the saved context (named cctx to avoid conflict with BPF_URETPROBE's ctx)
     struct cursor_context *cctx = bpf_map_lookup_elem(&pending_cursors, &pid_tgid);
     if (!cctx) {
         return 0;
     }
-    
+
     // Track errors
     if (ret != 0) {
         inc_stat(STAT_CURSOR_ERRORS);
     }
-    
+
     // Calculate latency
     __u64 now = bpf_ktime_get_ns();
     __u64 latency = now - cctx->timestamp_ns;
-    
+
     // Reserve space in ring buffer for cursor event
     struct cursor_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
     if (!e) {
@@ -823,7 +917,7 @@ int BPF_URETPROBE(trace_cursor_get_ret, int ret)
         bpf_map_delete_elem(&pending_cursors, &pid_tgid);
         return 0;
     }
-    
+
     // Fill event
     e->timestamp_ns = cctx->timestamp_ns;
     e->pid = cctx->pid;
@@ -837,19 +931,19 @@ int BPF_URETPROBE(trace_cursor_get_ret, int ret)
     e->latency_ns = latency;
     e->write_flags = 0;
     e->_pad2 = 0;
-    
+
     // Copy key data
     // Use a loop that the verifier can understand
     #pragma unroll
     for (int i = 0; i < MAX_KEY_SIZE; i++) {
         e->key_data[i] = cctx->key_data[i];
     }
-    
+
     bpf_ringbuf_submit(e, 0);
-    
+
     // Clean up
     bpf_map_delete_elem(&pending_cursors, &pid_tgid);
-    
+
     return 0;
 }
 
@@ -867,18 +961,18 @@ int BPF_UPROBE(trace_cursor_open, void *txn, __u32 dbi, void **cursor_ptr)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = pid_tgid >> 32;
-    
+
     if (!should_trace_pid(pid)) {
         return 0;
     }
-    
+
     // Save context for uretprobe
     struct cursor_open_context octx = {
         .cursor_ptr_ptr = (__u64)cursor_ptr,
         .dbi = dbi,
     };
     bpf_map_update_elem(&pending_cursor_opens, &pid_tgid, &octx, BPF_ANY);
-    
+
     return 0;
 }
 
@@ -886,12 +980,12 @@ SEC("uretprobe/mdbx_cursor_open")
 int BPF_URETPROBE(trace_cursor_open_ret, int ret)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
-    
+
     struct cursor_open_context *octx = bpf_map_lookup_elem(&pending_cursor_opens, &pid_tgid);
     if (!octx) {
         return 0;
     }
-    
+
     // Only record if open succeeded
     if (ret == 0 && octx->cursor_ptr_ptr) {
         // Read the cursor pointer from the output parameter
@@ -901,7 +995,7 @@ int BPF_URETPROBE(trace_cursor_open_ret, int ret)
             bpf_map_update_elem(&cursor_to_dbi, &cursor_addr, &octx->dbi, BPF_ANY);
         }
     }
-    
+
     bpf_map_delete_elem(&pending_cursor_opens, &pid_tgid);
     return 0;
 }
@@ -913,16 +1007,16 @@ int BPF_UPROBE(trace_cursor_close, void *cursor)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = pid_tgid >> 32;
-    
+
     if (!should_trace_pid(pid)) {
         return 0;
     }
-    
+
     if (cursor) {
         __u64 cursor_addr = (__u64)cursor;
         bpf_map_delete_elem(&cursor_to_dbi, &cursor_addr);
     }
-    
+
     return 0;
 }
 
@@ -933,7 +1027,7 @@ int BPF_UPROBE(trace_cursor_close, void *cursor)
 // These uprobes attach to mdbx_get to trace direct key lookups.
 // This is separate from cursor operations - it's used for single key lookups.
 //
-// Signature: int mdbx_get(const MDBX_txn *txn, MDBX_dbi dbi, 
+// Signature: int mdbx_get(const MDBX_txn *txn, MDBX_dbi dbi,
 //                          const MDBX_val *key, MDBX_val *data)
 //
 // Unlike cursor operations, the DBI is passed directly as a parameter,
@@ -944,16 +1038,16 @@ int BPF_UPROBE(trace_direct_get, void *txn, __u32 dbi, struct mdbx_val *key, voi
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = pid_tgid >> 32;
-    
+
     // Filter by PID
     if (!should_trace_pid(pid)) {
         return 0;
     }
-    
+
     inc_stat(STAT_DIRECT_GETS);
-    
+
     __u64 now = bpf_ktime_get_ns();
-    
+
     // Build direct get context
     struct direct_get_context dctx = {
         .timestamp_ns = now,
@@ -962,7 +1056,7 @@ int BPF_UPROBE(trace_direct_get, void *txn, __u32 dbi, struct mdbx_val *key, voi
         .dbi = dbi,
         .key_size = 0,
     };
-    
+
     // Read key data if available
     if (key) {
         struct mdbx_val key_val = {};
@@ -976,10 +1070,10 @@ int BPF_UPROBE(trace_direct_get, void *txn, __u32 dbi, struct mdbx_val *key, voi
             }
         }
     }
-    
+
     // Save context for uretprobe
     bpf_map_update_elem(&pending_direct_gets, &pid_tgid, &dctx, BPF_ANY);
-    
+
     // Register this operation as active on this thread for page fault attribution
     struct active_op aop = {
         .start_ns = now,
@@ -1002,7 +1096,11 @@ int BPF_UPROBE(trace_direct_get, void *txn, __u32 dbi, struct mdbx_val *key, voi
         }
     }
     bpf_map_update_elem(&active_ops, &pid_tgid, &aop, BPF_ANY);
-    
+
+    // Initialize per-operation fault statistics for this operation
+    struct op_fault_stats stats = {};
+    bpf_map_update_elem(&op_fault_stats_map, &pid_tgid, &stats, BPF_ANY);
+
     return 0;
 }
 
@@ -1010,22 +1108,22 @@ SEC("uretprobe/mdbx_get")
 int BPF_URETPROBE(trace_direct_get_ret, int ret)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
-    
+
     // Look up the saved context
     struct direct_get_context *dctx = bpf_map_lookup_elem(&pending_direct_gets, &pid_tgid);
     if (!dctx) {
         return 0;
     }
-    
+
     // Track errors
     if (ret != 0) {
         inc_stat(STAT_CURSOR_ERRORS);  // Reuse error counter
     }
-    
+
     // Calculate latency
     __u64 now = bpf_ktime_get_ns();
     __u64 latency = now - dctx->timestamp_ns;
-    
+
     // Reserve space in ring buffer for cursor event (reuse same struct)
     struct cursor_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
     if (!e) {
@@ -1034,7 +1132,7 @@ int BPF_URETPROBE(trace_direct_get_ret, int ret)
         bpf_map_delete_elem(&active_ops, &pid_tgid);
         return 0;
     }
-    
+
     // Fill event - use EVENT_DIRECT_GET type
     e->timestamp_ns = dctx->timestamp_ns;
     e->pid = dctx->pid;
@@ -1048,21 +1146,21 @@ int BPF_URETPROBE(trace_direct_get_ret, int ret)
     e->latency_ns = latency;
     e->write_flags = 0;
     e->_pad2 = 0;
-    
+
     // Copy key data
     #pragma unroll
     for (int i = 0; i < MAX_KEY_SIZE; i++) {
         e->key_data[i] = dctx->key_data[i];
     }
-    
+
     bpf_ringbuf_submit(e, 0);
-    
+
     // Clean up
     bpf_map_delete_elem(&pending_direct_gets, &pid_tgid);
-    
+
     // Clear active operation
     bpf_map_delete_elem(&active_ops, &pid_tgid);
-    
+
     return 0;
 }
 
@@ -1159,6 +1257,10 @@ int BPF_UPROBE(trace_cursor_put, void *cursor, struct mdbx_val *key,
     }
     bpf_map_update_elem(&active_ops, &pid_tgid, &aop, BPF_ANY);
 
+    // Initialize per-operation fault statistics for this operation
+    struct op_fault_stats stats = {};
+    bpf_map_update_elem(&op_fault_stats_map, &pid_tgid, &stats, BPF_ANY);
+
     return 0;
 }
 
@@ -1207,10 +1309,10 @@ int BPF_URETPROBE(trace_cursor_put_ret, int ret)
 
     bpf_ringbuf_submit(e, 0);
     bpf_map_delete_elem(&pending_cursor_puts, &pid_tgid);
-    
+
     // Clear active operation
     bpf_map_delete_elem(&active_ops, &pid_tgid);
-    
+
     return 0;
 }
 
@@ -1272,6 +1374,10 @@ int BPF_UPROBE(trace_cursor_del, void *cursor, __u32 flags)
     }
     bpf_map_update_elem(&active_ops, &pid_tgid, &aop, BPF_ANY);
 
+    // Initialize per-operation fault statistics for this operation
+    struct op_fault_stats stats = {};
+    bpf_map_update_elem(&op_fault_stats_map, &pid_tgid, &stats, BPF_ANY);
+
     return 0;
 }
 
@@ -1321,10 +1427,10 @@ int BPF_URETPROBE(trace_cursor_del_ret, int ret)
 
     bpf_ringbuf_submit(e, 0);
     bpf_map_delete_elem(&pending_cursor_dels, &pid_tgid);
-    
+
     // Clear active operation
     bpf_map_delete_elem(&active_ops, &pid_tgid);
-    
+
     return 0;
 }
 
@@ -1609,6 +1715,10 @@ int BPF_UPROBE(trace_direct_put, void *txn, __u32 dbi,
     }
     bpf_map_update_elem(&active_ops, &pid_tgid, &aop, BPF_ANY);
 
+    // Initialize per-operation fault statistics for this operation
+    struct op_fault_stats stats = {};
+    bpf_map_update_elem(&op_fault_stats_map, &pid_tgid, &stats, BPF_ANY);
+
     return 0;
 }
 
@@ -1655,10 +1765,10 @@ int BPF_URETPROBE(trace_direct_put_ret, int ret)
 
     bpf_ringbuf_submit(e, 0);
     bpf_map_delete_elem(&pending_direct_puts, &pid_tgid);
-    
+
     // Clear active operation
     bpf_map_delete_elem(&active_ops, &pid_tgid);
-    
+
     return 0;
 }
 
@@ -1727,6 +1837,10 @@ int BPF_UPROBE(trace_direct_del, void *txn, __u32 dbi,
     }
     bpf_map_update_elem(&active_ops, &pid_tgid, &aop, BPF_ANY);
 
+    // Initialize per-operation fault statistics for this operation
+    struct op_fault_stats stats = {};
+    bpf_map_update_elem(&op_fault_stats_map, &pid_tgid, &stats, BPF_ANY);
+
     return 0;
 }
 
@@ -1773,10 +1887,10 @@ int BPF_URETPROBE(trace_direct_del_ret, int ret)
 
     bpf_ringbuf_submit(e, 0);
     bpf_map_delete_elem(&pending_direct_dels, &pid_tgid);
-    
-    // NEW: Clear active operation
+
+    // Clear active operation
     bpf_map_delete_elem(&active_ops, &pid_tgid);
-    
+
     return 0;
 }
 
