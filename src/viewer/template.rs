@@ -231,6 +231,48 @@ pub fn generate_html(data: &ViewerData) -> String {
                         </div>
                     </div>
 
+                    <!-- Measured Tree Depth Stats (from BPF per-operation tracking) -->
+                    <div class="card full-width" id="measured-depth-section" style="display:none;">
+                        <div class="card-header">Measured B+ Tree Depth <span class="card-hint">Actual depth from BPF per-operation tracking</span></div>
+                        <div class="card-body" style="padding: 16px;">
+                            <div class="metrics-row" style="margin-bottom: 16px;">
+                                <div class="metric">
+                                    <span class="metric-value" id="measured-max-depth">-</span>
+                                    <span class="metric-label">Max Depth Observed</span>
+                                </div>
+                                <div class="metric">
+                                    <span class="metric-value" id="measured-avg-depth">-</span>
+                                    <span class="metric-label">Avg Depth</span>
+                                </div>
+                                <div class="metric">
+                                    <span class="metric-value" id="measured-ops-count">-</span>
+                                    <span class="metric-label">Ops with Depth Data</span>
+                                </div>
+                            </div>
+                            <div class="two-col">
+                                <div>
+                                    <h4 style="color: #e4e4e7; margin-bottom: 12px; font-size: 13px;">Depth Distribution</h4>
+                                    <canvas id="depth-histogram-chart" height="180"></canvas>
+                                </div>
+                                <div>
+                                    <h4 style="color: #e4e4e7; margin-bottom: 12px; font-size: 13px;">Operations by Depth</h4>
+                                    <table class="compact-table" id="depth-distribution-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Depth</th>
+                                                <th>Operations</th>
+                                                <th>%</th>
+                                                <th>Avg Faults</th>
+                                                <th>Avg Latency</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody></tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     <!-- Tree Structure Visualization (Phase 2) -->
                     <div class="card full-width">
                         <div class="card-header">B+ Tree Structure by Table <span class="card-hint">Hover for details</span></div>
@@ -1838,10 +1880,35 @@ document.querySelectorAll('.tab').forEach(tab => {
     });
 });
 
-// Export - generates compact JSON optimized for analysis
 document.getElementById('export-compact-btn').addEventListener('click', () => {
     // Build compact export (removes large arrays, keeps key metrics)
+    // Helper to get measured depth for a table from cursor stats
+    const getTableDepthStats = (tableName) => {
+        const tableStats = DATA.cursor_data?.table_stats?.find(t => t.name === tableName);
+        if (!tableStats) return null;
+        // If we have per-table depth tracking in the future, add it here
+        return null;
+    };
+
     const compact = {
+        _meta: {
+            export_version: 2,
+            description: "MDBX profiler trace - optimized for LLM analysis",
+            generated_at: new Date().toISOString()
+        },
+        analysis_summary: {
+            top_bottleneck_tables: DATA.unified_tables.slice(0, 5).map(t => t.name),
+            total_page_faults: DATA.summary.page_faults,
+            major_fault_pct: DATA.summary.major_fault_ratio,
+            tree_depth: DATA.cursor_data?.summary?.tree_depth_stats?.ops_with_depth_data > 0 ? {
+                max_observed: DATA.cursor_data.summary.tree_depth_stats.max_depth_observed,
+                avg: DATA.cursor_data.summary.tree_depth_stats.avg_depth,
+                ops_measured: DATA.cursor_data.summary.tree_depth_stats.ops_with_depth_data
+            } : null,
+            branch_leaf_ratio: DATA.page_type_stats?.traversal_to_data_ratio || null,
+            io_bound: DATA.summary.major_fault_ratio > 50,
+            high_traversal_overhead: (DATA.page_type_stats?.traversal_to_data_ratio || 0) > 1.0
+        },
         trace: {
             duration_secs: DATA.summary.duration_secs,
             total_events: DATA.summary.total_events,
@@ -1859,16 +1926,24 @@ document.getElementById('export-compact-btn').addEventListener('click', () => {
             random_ratio: DATA.patterns.random_ratio,
             top_strides: DATA.patterns.top_strides
         },
-        tables: DATA.unified_tables.map(t => ({
-            name: t.name,
-            faults: t.faults,
-            major_faults: t.major_faults,
-            fault_pct: t.fault_percentage,
-            slow_ops: t.slow_ops,
-            time_lost_ms: t.time_lost_ms,
-            top_op: t.top_operation,
-            faults_by_op: t.details.faults_by_op
-        })),
+        tables: DATA.unified_tables.map(t => {
+            // Find tree traversal stats for this table
+            const treeStats = DATA.tree_traversal?.tables?.find(tt => tt.name === t.name);
+            return {
+                name: t.name,
+                faults: t.faults,
+                major_faults: t.major_faults,
+                fault_pct: t.fault_percentage,
+                slow_ops: t.slow_ops,
+                time_lost_ms: t.time_lost_ms,
+                top_op: t.top_operation,
+                faults_by_op: t.details.faults_by_op,
+                // B+ tree traversal stats
+                branch_faults: treeStats?.branch_faults || 0,
+                leaf_faults: treeStats?.leaf_faults || 0,
+                branch_leaf_ratio: treeStats?.branch_leaf_ratio || null
+            };
+        }),
         threads: DATA.threads.slice(0, 10),
         cursor_ops: DATA.cursor_data.has_data ? {
             total: DATA.cursor_data.summary.total_ops,
@@ -1891,7 +1966,13 @@ document.getElementById('export-compact-btn').addEventListener('click', () => {
                 time_lost_ms: s.total_slow_time_ms,
                 by_op: s.by_operation.slice(0, 5)
             })),
-            slow_keys: DATA.cursor_data.slow_keys.slice(0, 20)
+            slow_keys: DATA.cursor_data.slow_keys.slice(0, 20),
+            tree_depth_stats: DATA.cursor_data.summary.tree_depth_stats ? {
+                ops_with_depth_data: DATA.cursor_data.summary.tree_depth_stats.ops_with_depth_data,
+                max_depth_observed: DATA.cursor_data.summary.tree_depth_stats.max_depth_observed,
+                avg_depth: DATA.cursor_data.summary.tree_depth_stats.avg_depth,
+                depth_histogram: DATA.cursor_data.summary.tree_depth_stats.depth_histogram
+            } : null
         } : null,
         transactions: DATA.txn_data.has_data ? {
             total: DATA.txn_data.summary.begin_count,
@@ -2330,6 +2411,21 @@ function initBTree() {
         const eff = bv.traversal_efficiency_score;
         effEl.textContent = eff.toFixed(0) + '%';
         effEl.className = 'metric-value ' + (eff >= 70 ? 'efficiency-high' : eff >= 40 ? 'efficiency-medium' : 'efficiency-low');
+    }
+
+    // Measured tree depth stats (from BPF per-operation tracking)
+    const depthStats = window.PROCESSED?.cursor_ops?.tree_depth_stats;
+    if (depthStats && depthStats.ops_with_depth_data > 0) {
+        document.getElementById('measured-depth-section').style.display = 'block';
+        document.getElementById('measured-max-depth').textContent = depthStats.max_depth_observed;
+        document.getElementById('measured-avg-depth').textContent = depthStats.avg_depth.toFixed(2);
+        document.getElementById('measured-ops-count').textContent = fmt(depthStats.ops_with_depth_data);
+
+        // Draw depth histogram chart
+        if (depthStats.depth_histogram && depthStats.depth_histogram.length > 0) {
+            drawDepthHistogram(depthStats.depth_histogram);
+            fillDepthTable(depthStats.depth_histogram);
+        }
     }
 
     // Page type donut chart
@@ -2995,6 +3091,82 @@ function drawPageTypeDonut(pt) {
 
         startAngle = endAngle;
     });
+}
+
+// Draw depth histogram bar chart
+function drawDepthHistogram(histogram) {
+    const canvas = document.getElementById('depth-histogram-chart');
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+
+    const width = canvas.parentElement.clientWidth || 400;
+    const height = 180;
+
+    canvas.width = width * dpr;
+    canvas.height = height * dpr;
+    canvas.style.width = width + 'px';
+    canvas.style.height = height + 'px';
+    ctx.scale(dpr, dpr);
+
+    // Clear
+    ctx.fillStyle = '#18181b';
+    ctx.fillRect(0, 0, width, height);
+
+    if (!histogram.length) return;
+
+    const padding = { top: 20, right: 20, bottom: 30, left: 50 };
+    const chartWidth = width - padding.left - padding.right;
+    const chartHeight = height - padding.top - padding.bottom;
+
+    const maxCount = Math.max(...histogram.map(h => h.count));
+    const barWidth = Math.min(40, (chartWidth / histogram.length) - 4);
+
+    // Draw bars
+    histogram.forEach((bucket, i) => {
+        const barHeight = (bucket.count / maxCount) * chartHeight;
+        const x = padding.left + (i * (chartWidth / histogram.length)) + (chartWidth / histogram.length - barWidth) / 2;
+        const y = padding.top + chartHeight - barHeight;
+
+        // Bar gradient based on depth
+        const hue = Math.max(0, 120 - bucket.depth * 20); // Green to red as depth increases
+        ctx.fillStyle = `hsl(${hue}, 70%, 50%)`;
+        ctx.fillRect(x, y, barWidth, barHeight);
+
+        // Depth label below bar
+        ctx.fillStyle = '#a1a1aa';
+        ctx.font = '11px system-ui';
+        ctx.textAlign = 'center';
+        ctx.fillText(bucket.depth.toString(), x + barWidth / 2, height - 10);
+    });
+
+    // Y-axis labels
+    ctx.fillStyle = '#71717a';
+    ctx.font = '10px system-ui';
+    ctx.textAlign = 'right';
+    ctx.fillText(fmtK(maxCount), padding.left - 5, padding.top + 10);
+    ctx.fillText('0', padding.left - 5, height - padding.bottom);
+
+    // X-axis label
+    ctx.textAlign = 'center';
+    ctx.fillText('Tree Depth (levels)', width / 2, height - 2);
+}
+
+// Fill depth distribution table
+function fillDepthTable(histogram) {
+    const tbody = document.querySelector('#depth-distribution-table tbody');
+    if (!tbody) return;
+
+    tbody.innerHTML = histogram.map(bucket => `
+        <tr>
+            <td><strong>${bucket.depth}</strong></td>
+            <td>${fmt(bucket.count)}</td>
+            <td>${bucket.percentage.toFixed(1)}%</td>
+            <td>${bucket.avg_faults.toFixed(1)}</td>
+            <td>${bucket.avg_latency_us.toFixed(0)}us</td>
+        </tr>
+    `).join('');
 }
 
 // Helper: format large numbers with K suffix
