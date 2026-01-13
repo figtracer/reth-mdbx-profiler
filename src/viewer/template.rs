@@ -2603,17 +2603,17 @@ function drawOperationPageTypeChart(opPageTypes) {
 
 // Phase 4: Draw block analysis section
 function drawBlockAnalysis(blockAnalysis) {
-    // Sort by block number for histogram
+    // Sort by block number for both histogram and table
     const sorted = [...blockAnalysis].sort((a, b) => a.block_number - b.block_number);
 
     // Draw histogram
     drawBlockHistogram(sorted);
 
-    // Populate table (already sorted by total_faults from backend)
+    // Populate table (sorted by block number for chronological view)
     const tbody = document.querySelector('#block-analysis-table tbody');
     if (!tbody) return;
 
-    tbody.innerHTML = blockAnalysis.slice(0, 20).map(block => {
+    tbody.innerHTML = sorted.slice(0, 20).map(block => {
         const majorPct = block.total_faults > 0 ? ((block.major_faults / block.total_faults) * 100).toFixed(0) : '0';
         const tables = block.tables_touched.slice(0, 3).join(', ') + (block.tables_touched.length > 3 ? '...' : '');
 
