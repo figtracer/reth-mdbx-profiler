@@ -23,9 +23,9 @@ struct Cli {
     #[arg(short, long)]
     output: Option<PathBuf>,
 
-    /// Path to MDBX database file for table attribution (optional)
+    /// Path to MDBX database file for table attribution
     #[arg(long)]
-    mdbx_path: Option<PathBuf>,
+    mdbx_path: PathBuf,
 
     /// Output format: html (default), json (raw data), compact (for comparison), csv
     #[arg(short, long, default_value = "html")]
@@ -95,20 +95,16 @@ fn main() -> anyhow::Result<()> {
     cursor_events.sort_by_key(|e| e.timestamp_ns);
     txn_events.sort_by_key(|e| e.timestamp_ns);
 
-    // Load MDBX metadata if path provided
-    let attribution = if let Some(mdbx_path) = &cli.mdbx_path {
-        match mdbx_metadata::extract_table_stats(mdbx_path) {
-            Ok(attr) => {
-                eprintln!("Loaded MDBX metadata from {:?}", mdbx_path);
-                Some(attr)
-            }
-            Err(e) => {
-                eprintln!("Warning: Could not load MDBX metadata: {}", e);
-                None
-            }
+    // Load MDBX metadata
+    let attribution = match mdbx_metadata::extract_table_stats(&cli.mdbx_path) {
+        Ok(attr) => {
+            eprintln!("Loaded MDBX metadata from {:?}", cli.mdbx_path);
+            Some(attr)
         }
-    } else {
-        None
+        Err(e) => {
+            eprintln!("Warning: Could not load MDBX metadata: {}", e);
+            None
+        }
     };
 
     match cli.format.as_str() {

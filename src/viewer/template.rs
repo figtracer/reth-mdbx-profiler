@@ -23,9 +23,9 @@ pub fn generate_html(data: &ViewerData) -> String {
 <body>
     <div id="app">
         <nav class="tabs">
-            <button class="tab active" data-tab="physical">Physical</button>
+            <button class="tab active" data-tab="physical">Overview</button>
             <button class="tab" data-tab="tables">Tables</button>
-            <button class="tab" data-tab="btree">B+ Tree</button>
+            <button class="tab" data-tab="btree">Page Types</button>
             <button class="tab" data-tab="transactions">MDBX Txns</button>
             <button class="export-btn" id="export-compact-btn" title="Download JSON for analysis">Export</button>
         </nav>
@@ -126,35 +126,23 @@ pub fn generate_html(data: &ViewerData) -> String {
                 </div>
 
                 <div id="tables-content">
-                    <!-- Summary cards row -->
-                    <div class="tables-summary-row">
-                        <div class="tables-summary-card">
-                            <div class="tables-summary-icon">&#x26A1;</div>
-                            <div class="tables-summary-content">
-                                <span class="tables-summary-value" id="tables-total-faults">0</span>
-                                <span class="tables-summary-label">Total Faults</span>
-                            </div>
+                    <!-- Summary metrics row -->
+                    <div class="metrics-row">
+                        <div class="metric">
+                            <span class="metric-value" id="tables-total-faults">0</span>
+                            <span class="metric-label">Total Faults</span>
                         </div>
-                        <div class="tables-summary-card">
-                            <div class="tables-summary-icon">&#x23F1;</div>
-                            <div class="tables-summary-content">
-                                <span class="tables-summary-value" id="tables-io-time">0ms</span>
-                                <span class="tables-summary-label">I/O Time Lost</span>
-                            </div>
+                        <div class="metric">
+                            <span class="metric-value" id="tables-io-time">0ms</span>
+                            <span class="metric-label">I/O Time Lost</span>
                         </div>
-                        <div class="tables-summary-card hottest">
-                            <div class="tables-summary-icon">&#x1F525;</div>
-                            <div class="tables-summary-content">
-                                <span class="tables-summary-value" id="tables-hottest">-</span>
-                                <span class="tables-summary-label">Hottest Table</span>
-                            </div>
+                        <div class="metric">
+                            <span class="metric-value" id="tables-hottest">-</span>
+                            <span class="metric-label">Hottest Table</span>
                         </div>
-                        <div class="tables-summary-card">
-                            <div class="tables-summary-icon">&#x1F4CA;</div>
-                            <div class="tables-summary-content">
-                                <span class="tables-summary-value" id="tables-count">0</span>
-                                <span class="tables-summary-label">Tables Traced</span>
-                            </div>
+                        <div class="metric">
+                            <span class="metric-value" id="tables-count">0</span>
+                            <span class="metric-label">Tables Traced</span>
                         </div>
                     </div>
 
@@ -186,23 +174,11 @@ pub fn generate_html(data: &ViewerData) -> String {
                         </div>
                     </div>
 
-                    <!-- Table cards grid -->
-                    <div class="table-cards-header">
-                        <h3>I/O Impact by Table</h3>
-                        <div class="severity-legend">
-                            <span class="severity-dot critical"></span><span>Critical (&gt;30%)</span>
-                            <span class="severity-dot high"></span><span>High (&gt;15%)</span>
-                            <span class="severity-dot medium"></span><span>Medium (&gt;5%)</span>
-                            <span class="severity-dot low"></span><span>Low</span>
-                        </div>
-                    </div>
-                    <div id="table-cards-grid" class="table-cards-grid"></div>
-
-                    <!-- Legacy table (hidden by default, toggle-able) -->
-                    <div class="card full-width" id="legacy-table-card" style="display:none;">
+                    <!-- Detailed table with expandable rows showing top 5 operations -->
+                    <div class="card full-width">
                         <div class="card-header">
-                            I/O Impact by Table (Table View)
-                            <span class="card-hint">Click row to expand details</span>
+                            I/O Impact by Table
+                            <span class="card-hint">Click row to expand and see top operations</span>
                         </div>
                         <div class="card-body compact-table-container" style="max-height: none; padding: 0;">
                             <table class="compact-table expandable-table" id="unified-tables">
@@ -211,10 +187,10 @@ pub fn generate_html(data: &ViewerData) -> String {
                                         <th style="width:30px;"></th>
                                         <th>Table</th>
                                         <th>Faults</th>
+                                        <th>% of Total</th>
                                         <th>Major</th>
                                         <th>Slow Ops</th>
                                         <th>I/O Time</th>
-                                        <th>Top Operation</th>
                                     </tr>
                                 </thead>
                                 <tbody></tbody>
@@ -224,127 +200,49 @@ pub fn generate_html(data: &ViewerData) -> String {
                 </div>
             </section>
 
-            <!-- B+ TREE TAB -->
+            <!-- PAGE TYPES TAB -->
             <section id="btree" class="panel">
                 <div id="btree-no-data" class="no-data" style="display:none;">
-                    No page type data available. This feature requires the BPF page type detection to be enabled.
+                    No page type data available. Page type detection requires BPF to read MDBX page headers after faults.
                 </div>
 
                 <div id="btree-content">
-                    <!-- Page Type Distribution - Hero Section -->
-                    <div class="btree-hero">
-                        <div class="btree-hero-chart">
-                            <div class="donut-container">
-                                <canvas id="page-type-donut" width="220" height="220"></canvas>
-                                <div class="donut-center">
-                                    <span class="donut-total" id="page-type-total">0</span>
-                                    <span class="donut-label">Total Faults</span>
-                                </div>
-                            </div>
-                            <div class="donut-legend" id="page-type-legend"></div>
+                    <!-- Page Type Distribution -->
+                    <div class="metrics-row">
+                        <div class="metric">
+                            <span class="metric-value" id="page-type-total">0</span>
+                            <span class="metric-label">Total Faults</span>
                         </div>
-                        <div class="btree-hero-stats">
-                            <div class="btree-stat-card btree-branch">
-                                <div class="btree-stat-icon">&#x1F333;</div>
-                                <div class="btree-stat-content">
-                                    <span class="btree-stat-value" id="branch-faults">0</span>
-                                    <span class="btree-stat-label">Branch Faults</span>
-                                    <span class="btree-stat-hint">Tree traversal overhead</span>
-                                </div>
-                            </div>
-                            <div class="btree-stat-card btree-leaf">
-                                <div class="btree-stat-icon">&#x1F343;</div>
-                                <div class="btree-stat-content">
-                                    <span class="btree-stat-value" id="leaf-faults">0</span>
-                                    <span class="btree-stat-label">Leaf Faults</span>
-                                    <span class="btree-stat-hint">Actual data access</span>
-                                </div>
-                            </div>
-                            <div class="btree-stat-card btree-ratio">
-                                <div class="btree-stat-icon">&#x2696;</div>
-                                <div class="btree-stat-content">
-                                    <span class="btree-stat-value" id="traversal-ratio">0.0</span>
-                                    <span class="btree-stat-label">Traversal Ratio</span>
-                                    <span class="btree-stat-hint">Branch:Leaf (lower is better)</span>
-                                </div>
-                            </div>
+                        <div class="metric">
+                            <span class="metric-value" id="branch-faults">0</span>
+                            <span class="metric-label">Branch Faults</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-value" id="leaf-faults">0</span>
+                            <span class="metric-label">Leaf Faults</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-value" id="traversal-ratio">0.0</span>
+                            <span class="metric-label">Branch:Leaf Ratio</span>
                         </div>
                     </div>
 
-                    <!-- Faults per Operation Histogram -->
+                    <!-- Page Type Breakdown -->
                     <div class="two-col">
                         <div class="card">
-                            <div class="card-header">
-                                Faults per Operation
-                                <span class="card-hint">How many pages are touched per DB operation</span>
-                            </div>
-                            <div class="card-body">
-                                <div class="histogram-stats">
-                                    <div class="hist-stat">
-                                        <span class="hist-label">AVG</span>
-                                        <span class="hist-value" id="hist-avg">0.0</span>
-                                    </div>
-                                    <div class="hist-stat">
-                                        <span class="hist-label">P50</span>
-                                        <span class="hist-value" id="hist-p50">0</span>
-                                    </div>
-                                    <div class="hist-stat">
-                                        <span class="hist-label">P95</span>
-                                        <span class="hist-value" id="hist-p95">0</span>
-                                    </div>
-                                    <div class="hist-stat">
-                                        <span class="hist-label">P99</span>
-                                        <span class="hist-value major" id="hist-p99">0</span>
-                                    </div>
-                                    <div class="hist-stat">
-                                        <span class="hist-label">MAX</span>
-                                        <span class="hist-value major" id="hist-max">0</span>
-                                    </div>
-                                </div>
-                                <div class="histogram-chart" id="histogram-container">
-                                    <canvas id="faults-histogram" height="180"></canvas>
+                            <div class="card-header">Page Type Distribution</div>
+                            <div class="card-body" style="padding: 16px;">
+                                <div class="donut-container" style="display: flex; align-items: center; gap: 24px;">
+                                    <canvas id="page-type-donut" width="200" height="200"></canvas>
+                                    <div class="donut-legend" id="page-type-legend"></div>
                                 </div>
                             </div>
                         </div>
                         <div class="card">
-                            <div class="card-header">
-                                Understanding B+ Tree I/O
+                            <div class="card-header">Page Type by Table</div>
+                            <div class="card-body" style="padding: 16px; max-height: 300px; overflow-y: auto;">
+                                <div id="table-tree-bars"></div>
                             </div>
-                            <div class="card-body btree-explainer">
-                                <div class="explainer-visual">
-                                    <div class="tree-diagram">
-                                        <div class="tree-level">
-                                            <div class="tree-node branch-node">Root</div>
-                                        </div>
-                                        <div class="tree-level">
-                                            <div class="tree-node branch-node">Branch</div>
-                                            <div class="tree-node branch-node">Branch</div>
-                                        </div>
-                                        <div class="tree-level">
-                                            <div class="tree-node leaf-node">Leaf</div>
-                                            <div class="tree-node leaf-node">Leaf</div>
-                                            <div class="tree-node leaf-node">Leaf</div>
-                                            <div class="tree-node leaf-node">Leaf</div>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="explainer-text">
-                                    <p><strong>Branch pages</strong> (amber) are internal B+ tree nodes used for navigation. High branch fault counts indicate deep tree traversals.</p>
-                                    <p><strong>Leaf pages</strong> (green) contain actual key-value data. These are the "productive" I/O operations.</p>
-                                    <p><strong>Traversal ratio</strong> above 1.0 means more pages are spent navigating than accessing data - a sign of sparse or random access patterns.</p>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Per-Table Tree Depth -->
-                    <div class="card full-width">
-                        <div class="card-header">
-                            Per-Table Page Type Breakdown
-                            <span class="card-hint">Branch vs Leaf faults by table - identifies tables with deep tree traversal</span>
-                        </div>
-                        <div class="card-body" style="padding: 16px;">
-                            <div id="table-tree-bars"></div>
                         </div>
                     </div>
                 </div>
@@ -703,7 +601,7 @@ body {
 .details-content {
     padding: 16px 24px;
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: 2fr 1fr;
     gap: 20px;
 }
 
@@ -1024,217 +922,6 @@ body {
 ::-webkit-scrollbar-thumb:hover { background: #3a3a4a; }
 
 /* ============================================
-   IMPROVED TABLES TAB STYLES
-   ============================================ */
-
-/* Summary cards row */
-.tables-summary-row {
-    display: flex;
-    gap: 16px;
-    margin-bottom: 16px;
-    flex-wrap: wrap;
-}
-
-.tables-summary-card {
-    flex: 1;
-    min-width: 180px;
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    padding: 20px 24px;
-    background: #12121a;
-    border-radius: 12px;
-    border: 1px solid #1e1e2a;
-}
-
-.tables-summary-card.hottest {
-    background: linear-gradient(135deg, #12121a 0%, #1a1210 100%);
-    border-color: #f9731640;
-}
-
-.tables-summary-icon {
-    font-size: 32px;
-    opacity: 0.9;
-}
-
-.tables-summary-content {
-    display: flex;
-    flex-direction: column;
-}
-
-.tables-summary-value {
-    font-size: 24px;
-    font-weight: 700;
-    color: #fff;
-}
-
-.tables-summary-label {
-    font-size: 12px;
-    color: #71717a;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-}
-
-/* Table cards header */
-.table-cards-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin: 24px 0 16px;
-}
-
-.table-cards-header h3 {
-    font-size: 14px;
-    font-weight: 600;
-    color: #a1a1aa;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-}
-
-.severity-legend {
-    display: flex;
-    gap: 16px;
-    font-size: 12px;
-    color: #71717a;
-}
-
-.severity-dot {
-    display: inline-block;
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    margin-right: 4px;
-}
-
-.severity-dot.critical { background: #ef4444; }
-.severity-dot.high { background: #f97316; }
-.severity-dot.medium { background: #eab308; }
-.severity-dot.low { background: #22c55e; }
-
-/* Table cards grid */
-.table-cards-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
-    gap: 16px;
-    margin-bottom: 24px;
-}
-
-.table-card {
-    background: #12121a;
-    border-radius: 12px;
-    border: 1px solid #1e1e2a;
-    overflow: hidden;
-    transition: transform 0.15s, box-shadow 0.15s;
-}
-
-.table-card:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
-}
-
-.table-card-header {
-    padding: 16px;
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    border-bottom: 1px solid #1e1e2a;
-}
-
-.table-card-header.critical { border-left: 4px solid #ef4444; }
-.table-card-header.high { border-left: 4px solid #f97316; }
-.table-card-header.medium { border-left: 4px solid #eab308; }
-.table-card-header.low { border-left: 4px solid #22c55e; }
-
-.table-card-name {
-    font-size: 15px;
-    font-weight: 600;
-    color: #e4e4e7;
-    word-break: break-word;
-}
-
-.table-card-badge {
-    font-size: 11px;
-    padding: 2px 8px;
-    border-radius: 4px;
-    font-weight: 500;
-    white-space: nowrap;
-}
-
-.table-card-badge.critical { background: #ef444420; color: #ef4444; }
-.table-card-badge.high { background: #f9731620; color: #f97316; }
-.table-card-badge.medium { background: #eab30820; color: #eab308; }
-.table-card-badge.low { background: #22c55e20; color: #22c55e; }
-
-.table-card-metrics {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 12px;
-    padding: 16px;
-}
-
-.table-card-metric {
-    display: flex;
-    flex-direction: column;
-}
-
-.table-card-metric-value {
-    font-size: 18px;
-    font-weight: 600;
-    color: #fff;
-}
-
-.table-card-metric-value.major {
-    color: #f87171;
-}
-
-.table-card-metric-label {
-    font-size: 11px;
-    color: #71717a;
-    text-transform: uppercase;
-}
-
-.table-card-bar {
-    height: 6px;
-    background: #0a0a0f;
-    margin: 0 16px;
-}
-
-.table-card-bar-fill {
-    height: 100%;
-    border-radius: 3px;
-    transition: width 0.3s ease;
-}
-
-.table-card-bar-fill.critical { background: #ef4444; }
-.table-card-bar-fill.high { background: #f97316; }
-.table-card-bar-fill.medium { background: #eab308; }
-.table-card-bar-fill.low { background: #22c55e; }
-
-.table-card-footer {
-    padding: 12px 16px;
-    background: #0a0a0f;
-    font-size: 12px;
-    color: #71717a;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-}
-
-.table-card-op {
-    color: #a1a1aa;
-}
-
-.table-card-link {
-    color: #3b82f6;
-    text-decoration: none;
-    font-size: 11px;
-}
-
-.table-card-link:hover {
-    text-decoration: underline;
-}
-
-/* ============================================
    B+ TREE TAB STYLES
    ============================================ */
 
@@ -1245,23 +932,6 @@ body {
     --color-overflow: #8b5cf6;
     --color-meta: #6366f1;
     --color-unknown: #71717a;
-}
-
-/* Hero section with donut chart */
-.btree-hero {
-    display: flex;
-    gap: 24px;
-    margin-bottom: 16px;
-    background: #12121a;
-    border-radius: 12px;
-    padding: 24px;
-    border: 1px solid #1e1e2a;
-}
-
-.btree-hero-chart {
-    display: flex;
-    align-items: center;
-    gap: 24px;
 }
 
 .donut-container {
@@ -1331,143 +1001,6 @@ body {
 .legend-pct {
     color: #71717a;
     font-size: 12px;
-}
-
-/* Stat cards */
-.btree-hero-stats {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    flex: 1;
-}
-
-.btree-stat-card {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    padding: 16px 20px;
-    border-radius: 10px;
-    background: #0a0a0f;
-    border-left: 4px solid;
-}
-
-.btree-stat-card.btree-branch { border-color: var(--color-branch); }
-.btree-stat-card.btree-leaf { border-color: var(--color-leaf); }
-.btree-stat-card.btree-ratio { border-color: #3b82f6; }
-
-.btree-stat-icon {
-    font-size: 28px;
-    opacity: 0.9;
-}
-
-.btree-stat-content {
-    display: flex;
-    flex-direction: column;
-}
-
-.btree-stat-value {
-    font-size: 24px;
-    font-weight: 700;
-    color: #fff;
-}
-
-.btree-stat-label {
-    font-size: 13px;
-    color: #a1a1aa;
-    font-weight: 500;
-}
-
-.btree-stat-hint {
-    font-size: 11px;
-    color: #52525b;
-}
-
-/* Histogram stats row */
-.histogram-stats {
-    display: flex;
-    gap: 16px;
-    margin-bottom: 16px;
-    flex-wrap: wrap;
-}
-
-.hist-stat {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    min-width: 60px;
-}
-
-.hist-label {
-    font-size: 10px;
-    color: #71717a;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-}
-
-.hist-value {
-    font-size: 18px;
-    font-weight: 600;
-    color: #3b82f6;
-}
-
-.hist-value.major {
-    color: #f87171;
-}
-
-/* B+ Tree explainer */
-.btree-explainer {
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-}
-
-.explainer-visual {
-    display: flex;
-    justify-content: center;
-    padding: 16px;
-}
-
-.tree-diagram {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 8px;
-}
-
-.tree-level {
-    display: flex;
-    gap: 8px;
-}
-
-.tree-node {
-    padding: 8px 16px;
-    border-radius: 6px;
-    font-size: 12px;
-    font-weight: 500;
-}
-
-.tree-node.branch-node {
-    background: var(--color-branch);
-    color: #000;
-}
-
-.tree-node.leaf-node {
-    background: var(--color-leaf);
-    color: #000;
-}
-
-.explainer-text {
-    font-size: 13px;
-    color: #a1a1aa;
-    line-height: 1.6;
-}
-
-.explainer-text p {
-    margin-bottom: 8px;
-}
-
-.explainer-text strong {
-    color: #e4e4e7;
 }
 
 /* Per-table tree bars */
@@ -2287,68 +1820,6 @@ function initPhysical() {
     });
 }
 
-function renderTableCards(unified, totalFaults) {
-    const grid = document.getElementById('table-cards-grid');
-    if (!grid) return;
-
-    // Calculate severity for each table
-    const getSeverity = (pct) => {
-        if (pct > 30) return 'critical';
-        if (pct > 15) return 'high';
-        if (pct > 5) return 'medium';
-        return 'low';
-    };
-
-    grid.innerHTML = unified.map(t => {
-        const pct = totalFaults > 0 ? (t.faults / totalFaults) * 100 : 0;
-        const severity = getSeverity(pct);
-
-        const ioTime = t.time_lost_ms >= 1000
-            ? (t.time_lost_ms / 1000).toFixed(1) + 's'
-            : t.time_lost_ms.toFixed(0) + 'ms';
-
-        // Get Reth source link if available
-        const sourceLink = RETH_TABLE_SOURCES[t.name];
-        const sourceLinkHtml = sourceLink
-            ? `<a href="${sourceLink.github_url}" target="_blank" class="table-card-link">View in Reth</a>`
-            : '';
-
-        return `
-            <div class="table-card">
-                <div class="table-card-header ${severity}">
-                    <div class="table-card-name">${t.name}</div>
-                    <span class="table-card-badge ${severity}">${pct.toFixed(1)}%</span>
-                </div>
-                <div class="table-card-metrics">
-                    <div class="table-card-metric">
-                        <span class="table-card-metric-value">${fmt(t.faults)}</span>
-                        <span class="table-card-metric-label">Faults</span>
-                    </div>
-                    <div class="table-card-metric">
-                        <span class="table-card-metric-value major">${fmt(t.major_faults)}</span>
-                        <span class="table-card-metric-label">Major</span>
-                    </div>
-                    <div class="table-card-metric">
-                        <span class="table-card-metric-value">${t.slow_ops > 0 ? fmt(t.slow_ops) : '-'}</span>
-                        <span class="table-card-metric-label">Slow Ops</span>
-                    </div>
-                    <div class="table-card-metric">
-                        <span class="table-card-metric-value">${t.time_lost_ms > 0 ? ioTime : '-'}</span>
-                        <span class="table-card-metric-label">I/O Time</span>
-                    </div>
-                </div>
-                <div class="table-card-bar">
-                    <div class="table-card-bar-fill ${severity}" style="width: ${Math.min(pct, 100)}%;"></div>
-                </div>
-                <div class="table-card-footer">
-                    <span class="table-card-op">${t.top_operation || 'No operations traced'}</span>
-                    ${sourceLinkHtml}
-                </div>
-            </div>
-        `;
-    }).join('');
-}
-
 // Reth table source links for navigation
 const RETH_TABLE_SOURCES = {
     'CanonicalHeaders': { github_url: 'https://github.com/paradigmxyz/reth/blob/main/crates/storage/db-api/src/models/mod.rs' },
@@ -2437,9 +1908,6 @@ function initTables() {
         }
     }
 
-    // Render table cards
-    renderTableCards(unified, totalFaults);
-
     // Build unified table with expandable rows
     const tbody = document.querySelector('#unified-tables tbody');
 
@@ -2453,14 +1921,15 @@ function initTables() {
             ? (t.time_lost_ms / 1000).toFixed(1) + 's'
             : t.time_lost_ms.toFixed(0) + 'ms';
 
+        const pct = totalFaults > 0 ? (t.faults / totalFaults) * 100 : 0;
         tr.innerHTML = `
             <td><span class="expand-icon">▶</span></td>
             <td>${t.name}</td>
             <td>${fmt(t.faults)}</td>
+            <td>${pct.toFixed(1)}%</td>
             <td class="major">${fmt(t.major_faults)}</td>
-            <td>${t.slow_ops > 0 ? fmt(t.slow_ops) + ' (' + t.slow_ops_percentage.toFixed(1) + '%)' : '-'}</td>
+            <td>${t.slow_ops > 0 ? fmt(t.slow_ops) : '-'}</td>
             <td class="io-time">${t.time_lost_ms > 0 ? ioTime : '-'}</td>
-            <td>${t.top_operation || '-'}</td>
         `;
         tbody.appendChild(tr);
 
@@ -2471,47 +1940,35 @@ function initTables() {
 
         let detailsHtml = '<td colspan="7"><div class="details-content">';
 
-        // Faults by Operation Type
-        detailsHtml += '<div class="details-section"><div class="details-section-title">Faults by Operation</div><div class="details-list">';
+        // Top 5 Operations by Faults - Primary section
+        detailsHtml += '<div class="details-section"><div class="details-section-title">Top Operations by Page Faults</div><div class="details-list">';
         if (t.details.faults_by_op && t.details.faults_by_op.length > 0) {
-            t.details.faults_by_op.forEach(op => {
-                detailsHtml += `<div class="details-item">
-                    <span class="details-item-name">${op.operation}</span>
-                    <span class="details-item-value">${fmt(op.faults)} <span class="major">(${fmt(op.major_faults)} major)</span></span>
+            t.details.faults_by_op.slice(0, 5).forEach((op, i) => {
+                const opPct = t.faults > 0 ? (op.faults / t.faults * 100).toFixed(1) : 0;
+                const majorPct = op.faults > 0 ? (op.major_faults / op.faults * 100).toFixed(0) : 0;
+                detailsHtml += `<div class="details-item" style="padding: 6px 0;">
+                    <span class="details-item-name" style="font-weight: 500;">${i + 1}. ${op.operation}</span>
+                    <span class="details-item-value">${fmt(op.faults)} (${opPct}%) <span class="major" style="font-size: 11px;">${majorPct}% major</span></span>
                 </div>`;
             });
         } else {
-            detailsHtml += '<div class="details-item"><span class="details-item-name" style="color:#52525b;">No fault data</span></div>';
-        }
-        detailsHtml += '</div></div>';
-
-        // Faults by Cursor Operation (for CURSOR_GET)
-        detailsHtml += '<div class="details-section"><div class="details-section-title">By Cursor Op (GET)</div><div class="details-list">';
-        if (t.details.faults_by_cursor_op && t.details.faults_by_cursor_op.length > 0) {
-            t.details.faults_by_cursor_op.slice(0, 5).forEach(op => {
-                detailsHtml += `<div class="details-item">
-                    <span class="details-item-name">${op.operation}</span>
-                    <span class="details-item-value">${fmt(op.faults)}</span>
-                </div>`;
-            });
-        } else {
-            detailsHtml += '<div class="details-item"><span class="details-item-name" style="color:#52525b;">No GET operations</span></div>';
+            detailsHtml += '<div class="details-item"><span class="details-item-name" style="color:#52525b;">No operations traced</span></div>';
         }
         detailsHtml += '</div></div>';
 
         // Hot Keys
-        detailsHtml += '<div class="details-section"><div class="details-section-title">Hot Keys</div><div class="details-list">';
+        detailsHtml += '<div class="details-section"><div class="details-section-title">Slow Keys</div><div class="details-list">';
         if (t.details.hot_keys && t.details.hot_keys.length > 0) {
-            t.details.hot_keys.slice(0, 4).forEach(key => {
-                const keyShort = key.key_hex.length > 20 ? key.key_hex.substring(0, 20) + '...' : key.key_hex;
+            t.details.hot_keys.slice(0, 5).forEach(key => {
+                const keyShort = key.key_hex.length > 24 ? key.key_hex.substring(0, 22) + '...' : key.key_hex;
                 const avgMs = (key.avg_latency_us / 1000).toFixed(1);
                 detailsHtml += `<div class="details-item">
                     <span class="details-item-name" style="font-family:monospace;font-size:11px;">${keyShort}</span>
-                    <span class="details-item-value">${fmt(key.slow_count)} slow, ${avgMs}ms avg</span>
+                    <span class="details-item-value">${fmt(key.slow_count)} slow, ${avgMs}ms</span>
                 </div>`;
             });
         } else {
-            detailsHtml += '<div class="details-item"><span class="details-item-name" style="color:#52525b;">No hot keys</span></div>';
+            detailsHtml += '<div class="details-item"><span class="details-item-name" style="color:#52525b;">No slow keys</span></div>';
         }
         detailsHtml += '</div></div>';
 
@@ -2546,7 +2003,6 @@ function initTables() {
 
 function initBTree() {
     const pt = DATA.page_type_stats;
-    const oh = DATA.operation_histogram;
     const tt = DATA.tree_traversal;
 
     // Check if we have data
@@ -2562,7 +2018,7 @@ function initBTree() {
     // Page type donut chart
     drawPageTypeDonut(pt);
 
-    // Update hero stats
+    // Update metrics row
     const branchFaults = pt.by_type.find(t => t.page_type === 'Branch');
     const leafFaults = pt.by_type.find(t => t.page_type === 'Leaf');
     document.getElementById('branch-faults').textContent = fmt(branchFaults ? branchFaults.total_faults : 0);
@@ -2583,16 +2039,6 @@ function initBTree() {
             </div>
         `;
     }).join('');
-
-    // Operation histogram
-    if (oh && oh.has_data) {
-        document.getElementById('hist-avg').textContent = oh.avg_faults_per_op.toFixed(1);
-        document.getElementById('hist-p50').textContent = oh.p50_faults;
-        document.getElementById('hist-p95').textContent = oh.p95_faults;
-        document.getElementById('hist-p99').textContent = oh.p99_faults;
-        document.getElementById('hist-max').textContent = oh.max_faults_per_op;
-        drawFaultsHistogram(oh);
-    }
 
     // Per-table tree bars
     if (tt && tt.has_data && tt.tables.length) {
@@ -2637,76 +2083,6 @@ function drawPageTypeDonut(pt) {
 
         startAngle = endAngle;
     });
-}
-
-function drawFaultsHistogram(oh) {
-    const canvas = document.getElementById('faults-histogram');
-    const ctx = canvas.getContext('2d');
-    const dpr = window.devicePixelRatio || 1;
-
-    const rect = canvas.parentElement.getBoundingClientRect();
-    const width = rect.width || 400;
-    const height = 180;
-
-    canvas.width = width * dpr;
-    canvas.height = height * dpr;
-    canvas.style.width = width + 'px';
-    canvas.style.height = height + 'px';
-    ctx.scale(dpr, dpr);
-
-    const pad = { t: 10, r: 20, b: 40, l: 50 };
-    const chartW = width - pad.l - pad.r;
-    const chartH = height - pad.t - pad.b;
-
-    // Background
-    ctx.fillStyle = '#0a0a0f';
-    ctx.fillRect(pad.l, pad.t, chartW, chartH);
-
-    // Find max count
-    const maxCount = Math.max(...oh.distribution.map(b => b.count), 1);
-
-    // Draw bars
-    const barWidth = chartW / oh.distribution.length - 10;
-    const barGap = 10;
-
-    oh.distribution.forEach((bucket, i) => {
-        const barHeight = (bucket.count / maxCount) * chartH;
-        const x = pad.l + i * (barWidth + barGap) + barGap / 2;
-        const y = pad.t + chartH - barHeight;
-
-        // Gradient fill
-        const gradient = ctx.createLinearGradient(x, y, x, y + barHeight);
-        gradient.addColorStop(0, '#3b82f6');
-        gradient.addColorStop(1, '#1d4ed8');
-        ctx.fillStyle = gradient;
-        ctx.fillRect(x, y, barWidth, barHeight);
-
-        // Label
-        ctx.fillStyle = '#71717a';
-        ctx.font = '11px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText(bucket.label, x + barWidth / 2, height - 12);
-
-        // Count on top
-        if (bucket.count > 0) {
-            ctx.fillStyle = '#e4e4e7';
-            ctx.fillText(fmt(bucket.count), x + barWidth / 2, y - 5);
-        }
-    });
-
-    // Y-axis label
-    ctx.fillStyle = '#71717a';
-    ctx.font = '11px sans-serif';
-    ctx.save();
-    ctx.translate(15, height / 2);
-    ctx.rotate(-Math.PI / 2);
-    ctx.textAlign = 'center';
-    ctx.fillText('Operations', 0, 0);
-    ctx.restore();
-
-    // X-axis label
-    ctx.textAlign = 'center';
-    ctx.fillText('Faults per operation', width / 2, height - 2);
 }
 
 function drawTableTreeBars(tt) {
