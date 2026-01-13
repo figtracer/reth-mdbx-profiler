@@ -65,12 +65,15 @@
 // Sentinel value for "no active operation" on this thread
 #define NO_ACTIVE_OP_DBI 0xFFFFFFFF
 
-// MDBX page flags (from libmdbx internals - mp_flags field in page header)
-// The page header is at offset 0 of each MDBX page:
-//   pgno (8 bytes) | flags (2 bytes) | num_keys (2 bytes) | lower (2 bytes) | upper (2 bytes)
+// MDBX page flags (from libmdbx internals - flags field in page header)
+// MDBX page header layout (from libmdbx mdbx.c struct page):
+//   txnid (8 bytes, offset 0) | dupfix_ksize (2 bytes, offset 8) | flags (2 bytes, offset 10)
+//   | pages/lower+upper (4 bytes, offset 12) | pgno (4 bytes, offset 16)
+// Total header size: 20 bytes (PAGEHDRSZ)
+#define MDBX_PAGE_FLAGS_OFFSET 10  // Offset of flags field in page header
 #define MDBX_P_BRANCH   0x01   // Branch page (internal B+ tree node)
 #define MDBX_P_LEAF     0x02   // Leaf page (contains actual key/value data)
-#define MDBX_P_OVERFLOW 0x04   // Overflow page (for large values that don't fit in leaf)
+#define MDBX_P_LARGE    0x04   // Large/overflow page (for large values)
 #define MDBX_P_META     0x08   // Meta page (database metadata at page 0 and 1)
 
 // Page type enum for simplified reporting
@@ -587,8 +590,9 @@ int BPF_KRETPROBE(trace_page_fault_ret, vm_fault_t ret)
 
     // Detect MDBX page type by reading the page header
     // After the fault completes, the page is mapped and we can safely read it.
-    // MDBX page header layout: pgno(8 bytes) | flags(2 bytes) | ...
-    // The flags are at offset 8 from the page start
+    // MDBX page header layout (from libmdbx mdbx.c struct page):
+    //   txnid (8 bytes) | dupfix_ksize (2 bytes) | flags (2 bytes) | ...
+    // The flags are at offset 10 from the page start (MDBX_PAGE_FLAGS_OFFSET)
     __u8 page_type = PAGE_TYPE_UNKNOWN;
     __u64 page_num = fctx->file_offset >> 12;  // Divide by 4096 (page size)
 
@@ -602,16 +606,18 @@ int BPF_KRETPROBE(trace_page_fault_ret, vm_fault_t ret)
 
         // Use bpf_probe_read_user to safely read from user space
         // The page should be mapped now since the fault handler completed
-        if (bpf_probe_read_user(&flags, sizeof(flags), (void *)(page_start + 8)) == 0) {
+        // Flags are at offset 10 (after txnid[8] + dupfix_ksize[2])
+        if (bpf_probe_read_user(&flags, sizeof(flags), (void *)(page_start + MDBX_PAGE_FLAGS_OFFSET)) == 0) {
             // Determine page type from flags
+            // Check in order of specificity (META is rare, check first)
             if (flags & MDBX_P_META) {
                 page_type = PAGE_TYPE_META;
+            } else if (flags & MDBX_P_LARGE) {
+                page_type = PAGE_TYPE_OVERFLOW;
             } else if (flags & MDBX_P_BRANCH) {
                 page_type = PAGE_TYPE_BRANCH;
             } else if (flags & MDBX_P_LEAF) {
                 page_type = PAGE_TYPE_LEAF;
-            } else if (flags & MDBX_P_OVERFLOW) {
-                page_type = PAGE_TYPE_OVERFLOW;
             }
             // If flags is 0 or doesn't match any known type, stays as UNKNOWN
         }
