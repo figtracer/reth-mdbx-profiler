@@ -3602,7 +3602,6 @@ fn generate_block_analysis(
 
     for i in 0..block_timestamps.len() {
         let (block_num, _block_ts) = block_timestamps[i];
-z
         // Simple approach: divide trace time evenly among all blocks
         // This is more robust than trying to use interpolated timestamps
         let window_start = trace_start + (i as u64) * time_per_block;
