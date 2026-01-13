@@ -75,6 +75,8 @@
 #define MDBX_P_LEAF     0x02   // Leaf page (contains actual key/value data)
 #define MDBX_P_LARGE    0x04   // Large/overflow page (for large values)
 #define MDBX_P_META     0x08   // Meta page (database metadata at page 0 and 1)
+#define MDBX_P_DUPFIX   0x20   // DUPFIXED records (leaf pages for sorted dups)
+#define MDBX_P_SUBP     0x40   // Sub-page for DUPSORT
 
 // Page type enum for simplified reporting
 #define PAGE_TYPE_UNKNOWN  0
@@ -616,10 +618,13 @@ int BPF_KRETPROBE(trace_page_fault_ret, vm_fault_t ret)
                 page_type = PAGE_TYPE_OVERFLOW;
             } else if (flags & MDBX_P_BRANCH) {
                 page_type = PAGE_TYPE_BRANCH;
-            } else if (flags & MDBX_P_LEAF) {
+            } else if (flags & (MDBX_P_LEAF | MDBX_P_DUPFIX)) {
+                // Both P_LEAF and P_DUPFIX pages contain actual data (leaf-level)
+                // P_DUPFIX is used for MDBX_DUPFIXED sorted duplicates
                 page_type = PAGE_TYPE_LEAF;
             }
             // If flags is 0 or doesn't match any known type, stays as UNKNOWN
+            // This can happen for sub-pages (P_SUBP) or internal states
         }
         // If read fails, page_type stays as PAGE_TYPE_UNKNOWN
     }

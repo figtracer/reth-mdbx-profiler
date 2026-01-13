@@ -5,7 +5,7 @@
 
 mod template;
 
-use crate::event::{dbi_to_table_name, is_pre_trace_cursor, CursorEvent, PageFaultEvent, TxnEvent};
+use crate::event::{CursorEvent, PageFaultEvent, TxnEvent, dbi_to_table_name, is_pre_trace_cursor};
 use crate::mdbx_metadata::{PageAttribution, RethTable};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -277,7 +277,7 @@ pub struct ViewerData {
     pub timeline: Vec<TimelinePoint>,
     /// Table breakdown (legacy - kept for compatibility)
     pub tables: Vec<TableStats>,
-    /// Unified table view with drill-down (new)
+    /// Unified table view with drill-dow
     pub unified_tables: Vec<UnifiedTableStats>,
     /// Thread distribution
     pub threads: Vec<ThreadStats>,
@@ -294,14 +294,15 @@ pub struct ViewerData {
     pub page_fault_attribution_warning: Option<String>,
     /// Direct fault attribution data (from BPF active_ops tracking)
     pub direct_fault_attribution: DirectFaultAttribution,
-
-    // === NEW: Phase 2-3 Page Type and Tree Traversal Data ===
     /// Page type distribution (Branch, Leaf, Overflow, Meta)
     pub page_type_stats: PageTypeStats,
     /// Histogram of faults per operation
     pub operation_histogram: OperationFaultHistogram,
     /// B+ tree traversal visualization data
     pub tree_traversal: TreeTraversalViz,
+    /// Comprehensive B+ tree visualization data including per-block analysis,
+    /// operation-to-page-type breakdown, and tree depth estimates
+    pub btree_viz: BTreeVisualization,
 }
 
 /// Direct fault attribution data from BPF active_ops tracking.
@@ -400,6 +401,67 @@ pub struct TreeTraversalViz {
     pub tables: Vec<TableTreeStats>,
 }
 
+/// Per-block analysis showing page faults and I/O time for each Ethereum block.
+/// This helps identify which blocks caused the most tree traversal overhead.
+#[derive(Debug, Serialize, Default, Clone)]
+pub struct BlockAnalysis {
+    /// Ethereum block number
+    pub block_number: u64,
+    /// Faults on branch pages (B+ tree traversal)
+    pub branch_faults: u32,
+    /// Faults on leaf pages (data access)
+    pub leaf_faults: u32,
+    /// Faults on overflow pages (large values)
+    pub overflow_faults: u32,
+    /// Total major faults (disk I/O)
+    pub major_faults: u32,
+    /// Total I/O time in microseconds (estimated from major faults)
+    pub io_time_us: u64,
+    /// Tables touched while processing this block
+    pub tables_touched: Vec<String>,
+    /// Total faults for this block
+    pub total_faults: u32,
+}
+
+/// Operation-to-page-type breakdown showing which cursor operations
+/// cause which types of page faults (branch vs leaf).
+#[derive(Debug, Serialize, Clone)]
+pub struct OperationPageTypeBreakdown {
+    /// Cursor operation name (SET_RANGE, NEXT, etc.)
+    pub cursor_op: String,
+    /// Faults on branch pages
+    pub branch_faults: u32,
+    /// Faults on leaf pages
+    pub leaf_faults: u32,
+    /// Faults on overflow pages
+    pub overflow_faults: u32,
+    /// Total operations of this type
+    pub total_ops: u32,
+    /// Average faults per operation
+    pub avg_faults_per_op: f64,
+    /// Major faults (disk I/O)
+    pub major_faults: u32,
+    /// Percentage of total faults this operation causes
+    pub fault_percentage: f64,
+}
+
+/// Aggregated B+ tree visualization data for the enhanced Page Types tab
+#[derive(Debug, Serialize, Default)]
+pub struct BTreeVisualization {
+    /// Whether B+ tree visualization data is available
+    pub has_data: bool,
+    /// Per-block analysis (sorted by total_faults descending)
+    pub block_analysis: Vec<BlockAnalysis>,
+    /// Operation-to-page-type breakdown
+    pub operation_page_types: Vec<OperationPageTypeBreakdown>,
+    /// Block range covered
+    pub block_range: Option<BlockRange>,
+    /// Tree depth estimates per table (table_name -> estimated_depth)
+    pub tree_depth_estimates: Vec<TreeDepthEstimate>,
+    /// Overall traversal efficiency score (0-100, higher is better)
+    pub traversal_efficiency_score: f64,
+}
+
 /// Tree traversal statistics for a specific table
 #[derive(Debug, Serialize)]
 pub struct TableTreeStats {
@@ -415,6 +477,21 @@ pub struct TableTreeStats {
     pub overflow_faults: u64,
     /// Branch to leaf ratio (higher = deeper traversal overhead)
     pub branch_leaf_ratio: f64,
+}
+
+/// Estimated tree depth for a table based on branch:leaf ratio
+#[derive(Debug, Serialize, Clone)]
+pub struct TreeDepthEstimate {
+    /// Table name
+    pub table_name: String,
+    /// Estimated tree depth (1 = flat, 4+ = deep)
+    pub estimated_depth: f64,
+    /// Branch to leaf ratio used for estimation
+    pub branch_leaf_ratio: f64,
+    /// Confidence level (based on sample size)
+    pub confidence: String,
+    /// Total faults used for estimation
+    pub sample_size: u64,
 }
 
 /// Link to reth source code for a table
@@ -722,8 +799,6 @@ pub struct UnifiedTableStats {
     pub top_operation: String,
     // Drill-down details
     pub details: TableDrillDown,
-
-    // === NEW: Page type breakdown ===
     /// Faults on branch pages (B+ tree traversal)
     pub branch_faults: u64,
     /// Faults on leaf pages (actual data)
@@ -886,6 +961,7 @@ pub fn generate_viewer_data(
             page_type_stats: PageTypeStats::default(),
             operation_histogram: OperationFaultHistogram::default(),
             tree_traversal: TreeTraversalViz::default(),
+            btree_viz: BTreeVisualization::default(),
         };
     }
 
@@ -969,6 +1045,14 @@ pub fn generate_viewer_data(
     // Generate tree traversal visualization data
     let tree_traversal = generate_tree_traversal_viz(&page_faults);
 
+    // Generate comprehensive B+ tree visualization data
+    let btree_viz = generate_btree_visualization(
+        &page_faults,
+        cursor_events,
+        &tree_traversal,
+        &summary.block_range,
+    );
+
     ViewerData {
         summary,
         timeline,
@@ -985,6 +1069,7 @@ pub fn generate_viewer_data(
         page_type_stats,
         operation_histogram,
         tree_traversal,
+        btree_viz,
     }
 }
 
@@ -3125,4 +3210,337 @@ fn generate_tree_traversal_viz(page_faults: &[&PageFaultEvent]) -> TreeTraversal
         has_data: true,
         tables,
     }
+}
+
+// =============================================================================
+// BTREE_VIZ_PLAN Phase 1: Comprehensive B+ Tree Visualization Generation
+// =============================================================================
+
+/// Generate comprehensive B+ tree visualization data.
+/// This includes per-block analysis, operation-to-page-type breakdown,
+/// tree depth estimates, and traversal efficiency scoring.
+fn generate_btree_visualization(
+    page_faults: &[&PageFaultEvent],
+    cursor_events: &[CursorEvent],
+    tree_traversal: &TreeTraversalViz,
+    block_range: &Option<BlockRange>,
+) -> BTreeVisualization {
+    use crate::event::MdbxPageType;
+
+    // Check if we have the necessary data
+    let has_page_type_data = page_faults
+        .iter()
+        .any(|f| f.page_type() != MdbxPageType::Unknown);
+
+    if !has_page_type_data || page_faults.is_empty() {
+        return BTreeVisualization::default();
+    }
+
+    // Generate per-block analysis
+    let block_analysis = generate_block_analysis(page_faults, cursor_events);
+
+    // Generate operation-to-page-type breakdown
+    let operation_page_types = generate_operation_page_type_breakdown(page_faults);
+
+    // Generate tree depth estimates from tree_traversal data
+    let tree_depth_estimates = generate_tree_depth_estimates(tree_traversal);
+
+    // Calculate overall traversal efficiency score
+    let traversal_efficiency_score = calculate_traversal_efficiency(tree_traversal);
+
+    BTreeVisualization {
+        has_data: true,
+        block_analysis,
+        operation_page_types,
+        block_range: block_range.clone(),
+        tree_depth_estimates,
+        traversal_efficiency_score,
+    }
+}
+
+/// Generate per-block analysis by correlating page faults with block numbers
+/// extracted from cursor event keys.
+fn generate_block_analysis(
+    page_faults: &[&PageFaultEvent],
+    cursor_events: &[CursorEvent],
+) -> Vec<BlockAnalysis> {
+    use crate::event::MdbxPageType;
+
+    // Build a map of timestamp ranges to block numbers from write operations
+    // Key: (start_ts, end_ts), Value: block_number
+    let mut block_time_ranges: Vec<(u64, u64, u64)> = Vec::new();
+
+    for event in cursor_events {
+        // Only consider write operations to block-keyed tables
+        if !event.is_write_op() {
+            continue;
+        }
+
+        if let Some(block) = extract_block_from_key(event.dbi, &event.key_data, event.key_size) {
+            let start_ts = event.timestamp_ns;
+            let end_ts = event.timestamp_ns + event.latency_ns;
+            block_time_ranges.push((start_ts, end_ts, block));
+        }
+    }
+
+    if block_time_ranges.is_empty() {
+        return Vec::new();
+    }
+
+    // Sort by start time for efficient lookup
+    block_time_ranges.sort_by_key(|(start, _, _)| *start);
+
+    // Group page faults by block number
+    // Key: block_number, Value: BlockAnalysis data
+    let mut block_stats: HashMap<
+        u64,
+        (u32, u32, u32, u32, u64, std::collections::HashSet<String>),
+    > = HashMap::new();
+
+    // Estimate I/O time per major fault (average disk seek + read ~200μs)
+    const ESTIMATED_IO_TIME_PER_MAJOR_FAULT_US: u64 = 200;
+
+    for fault in page_faults {
+        let fault_ts = fault.timestamp_ns;
+
+        // Find which block this fault belongs to (if any)
+        // Use binary search to find potential matching time ranges
+        let search_idx = block_time_ranges
+            .binary_search_by(|(start, _, _)| start.cmp(&fault_ts))
+            .unwrap_or_else(|i| i);
+
+        // Check nearby ranges (fault could be during a block's processing window)
+        let check_start = search_idx.saturating_sub(10);
+        let check_end = (search_idx + 10).min(block_time_ranges.len());
+
+        let mut matched_block: Option<u64> = None;
+        for i in check_start..check_end {
+            let (start, end, block) = block_time_ranges[i];
+            if fault_ts >= start && fault_ts <= end {
+                matched_block = Some(block);
+                break;
+            }
+        }
+
+        // If we found a matching block, attribute this fault to it
+        if let Some(block_num) = matched_block {
+            let is_major = fault.is_major_fault();
+            let page_type = fault.page_type();
+
+            let entry = block_stats
+                .entry(block_num)
+                .or_insert_with(|| (0, 0, 0, 0, 0, std::collections::HashSet::new()));
+
+            // Count by page type
+            match page_type {
+                MdbxPageType::Branch => entry.0 += 1,
+                MdbxPageType::Leaf => entry.1 += 1,
+                MdbxPageType::Overflow => entry.2 += 1,
+                _ => {}
+            }
+
+            // Count major faults
+            if is_major {
+                entry.3 += 1;
+                entry.4 += ESTIMATED_IO_TIME_PER_MAJOR_FAULT_US;
+            }
+
+            // Track tables touched
+            if fault.has_active_op() && fault.active_dbi < 100 {
+                let table_name = dbi_to_table_name(fault.active_dbi).to_string();
+                entry.5.insert(table_name);
+            }
+        }
+    }
+
+    // Convert to sorted list
+    let mut block_analysis: Vec<BlockAnalysis> = block_stats
+        .into_iter()
+        .map(
+            |(block_number, (branch, leaf, overflow, major, io_time, tables))| {
+                let total = branch + leaf + overflow;
+                BlockAnalysis {
+                    block_number,
+                    branch_faults: branch,
+                    leaf_faults: leaf,
+                    overflow_faults: overflow,
+                    major_faults: major,
+                    io_time_us: io_time,
+                    tables_touched: tables.into_iter().collect(),
+                    total_faults: total,
+                }
+            },
+        )
+        .collect();
+
+    // Sort by total faults descending (most impactful blocks first)
+    block_analysis.sort_by(|a, b| b.total_faults.cmp(&a.total_faults));
+
+    // Limit to top 100 blocks to avoid excessive data
+    block_analysis.truncate(100);
+
+    block_analysis
+}
+
+/// Generate operation-to-page-type breakdown.
+/// Shows which cursor operations (SET_RANGE, NEXT, etc.) cause which page types.
+fn generate_operation_page_type_breakdown(
+    page_faults: &[&PageFaultEvent],
+) -> Vec<OperationPageTypeBreakdown> {
+    use crate::event::{CursorOp, MdbxPageType};
+
+    // Group faults by cursor operation
+    // Key: cursor_op, Value: (branch, leaf, overflow, major, total_ops)
+    let mut op_stats: HashMap<u32, (u32, u32, u32, u32, u32)> = HashMap::new();
+
+    // Also track total ops per operation type from the active_cursor_op field
+    let mut op_counts: HashMap<u32, u32> = HashMap::new();
+
+    for fault in page_faults {
+        // Only include faults with active operation attribution
+        if !fault.has_active_op() {
+            continue;
+        }
+
+        // Only count faults from CURSOR_GET operations (op_type == 3)
+        // as these are the ones with meaningful cursor_op values
+        if fault.active_op_type != 3 {
+            continue;
+        }
+
+        let cursor_op = fault.active_cursor_op;
+        let page_type = fault.page_type();
+        let is_major = fault.is_major_fault();
+
+        let entry = op_stats.entry(cursor_op).or_insert((0, 0, 0, 0, 0));
+
+        match page_type {
+            MdbxPageType::Branch => entry.0 += 1,
+            MdbxPageType::Leaf => entry.1 += 1,
+            MdbxPageType::Overflow => entry.2 += 1,
+            _ => {}
+        }
+
+        if is_major {
+            entry.3 += 1;
+        }
+
+        entry.4 += 1; // total faults for this op
+
+        // Track operation count
+        *op_counts.entry(cursor_op).or_insert(0) += 1;
+    }
+
+    if op_stats.is_empty() {
+        return Vec::new();
+    }
+
+    // Calculate total faults for percentage calculation
+    let total_faults: u32 = op_stats.values().map(|(_, _, _, _, t)| t).sum();
+
+    // Convert to sorted list
+    let mut breakdown: Vec<OperationPageTypeBreakdown> = op_stats
+        .into_iter()
+        .map(|(cursor_op, (branch, leaf, overflow, major, total))| {
+            let op = CursorOp::from_raw(cursor_op);
+            let op_count = op_counts.get(&cursor_op).copied().unwrap_or(1);
+            let avg_faults = total as f64 / op_count as f64;
+
+            OperationPageTypeBreakdown {
+                cursor_op: op.name().to_string(),
+                branch_faults: branch,
+                leaf_faults: leaf,
+                overflow_faults: overflow,
+                total_ops: op_count,
+                avg_faults_per_op: avg_faults,
+                major_faults: major,
+                fault_percentage: (total as f64 / total_faults as f64) * 100.0,
+            }
+        })
+        .collect();
+
+    // Sort by total faults (branch + leaf + overflow) descending
+    breakdown.sort_by(|a, b| {
+        let total_a = a.branch_faults + a.leaf_faults + a.overflow_faults;
+        let total_b = b.branch_faults + b.leaf_faults + b.overflow_faults;
+        total_b.cmp(&total_a)
+    });
+
+    breakdown
+}
+
+/// Generate tree depth estimates for each table based on branch:leaf ratio.
+/// Uses a simple heuristic: depth ≈ 1 + log2(1 + branch_leaf_ratio * 3)
+fn generate_tree_depth_estimates(tree_traversal: &TreeTraversalViz) -> Vec<TreeDepthEstimate> {
+    if !tree_traversal.has_data {
+        return Vec::new();
+    }
+
+    tree_traversal
+        .tables
+        .iter()
+        .filter(|t| t.total_faults >= 100) // Only estimate for tables with enough samples
+        .map(|table| {
+            // Estimate tree depth from branch:leaf ratio
+            // Higher ratio = deeper tree traversal
+            // Formula: depth ≈ 1 + log2(1 + ratio * 3)
+            // This maps:
+            //   ratio 0.0 -> depth ~1 (flat, mostly leaf)
+            //   ratio 0.33 -> depth ~2 (one branch level)
+            //   ratio 0.66 -> depth ~2.5
+            //   ratio 1.0 -> depth ~3 (balanced branch/leaf)
+            //   ratio 2.0 -> depth ~4 (deep tree)
+            let estimated_depth = 1.0 + (1.0 + table.branch_leaf_ratio * 3.0).log2();
+
+            // Determine confidence based on sample size
+            let confidence = if table.total_faults >= 10000 {
+                "high"
+            } else if table.total_faults >= 1000 {
+                "medium"
+            } else {
+                "low"
+            }
+            .to_string();
+
+            TreeDepthEstimate {
+                table_name: table.name.clone(),
+                estimated_depth,
+                branch_leaf_ratio: table.branch_leaf_ratio,
+                confidence,
+                sample_size: table.total_faults,
+            }
+        })
+        .collect()
+}
+
+/// Calculate overall traversal efficiency score (0-100).
+/// Higher score = more efficient (fewer branch traversals per data access).
+fn calculate_traversal_efficiency(tree_traversal: &TreeTraversalViz) -> f64 {
+    if !tree_traversal.has_data || tree_traversal.tables.is_empty() {
+        return 0.0;
+    }
+
+    // Calculate weighted average of branch:leaf ratios
+    let total_faults: u64 = tree_traversal.tables.iter().map(|t| t.total_faults).sum();
+    if total_faults == 0 {
+        return 100.0; // No faults = perfect efficiency
+    }
+
+    let weighted_ratio: f64 = tree_traversal
+        .tables
+        .iter()
+        .map(|t| t.branch_leaf_ratio * t.total_faults as f64)
+        .sum::<f64>()
+        / total_faults as f64;
+
+    // Convert ratio to score:
+    // ratio 0.0 -> score 100 (all leaf, no traversal overhead)
+    // ratio 0.5 -> score 80
+    // ratio 1.0 -> score 50 (equal branch/leaf)
+    // ratio 2.0 -> score 25
+    // ratio 4.0+ -> score ~10
+    let score = 100.0 / (1.0 + weighted_ratio * 2.0);
+
+    // Clamp to 0-100 range
+    score.max(0.0).min(100.0)
 }

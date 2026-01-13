@@ -200,14 +200,14 @@ pub fn generate_html(data: &ViewerData) -> String {
                 </div>
             </section>
 
-            <!-- PAGE TYPES TAB -->
+            <!-- PAGE TYPES TAB (Enhanced B+ Tree Visualization) -->
             <section id="btree" class="panel">
                 <div id="btree-no-data" class="no-data" style="display:none;">
                     No page type data available. Page type detection requires BPF to read MDBX page headers after faults.
                 </div>
 
                 <div id="btree-content">
-                    <!-- Page Type Distribution -->
+                    <!-- Top Overview Metrics -->
                     <div class="metrics-row">
                         <div class="metric">
                             <span class="metric-value" id="page-type-total">0</span>
@@ -215,20 +215,40 @@ pub fn generate_html(data: &ViewerData) -> String {
                         </div>
                         <div class="metric">
                             <span class="metric-value" id="branch-faults">0</span>
-                            <span class="metric-label">Branch Faults</span>
+                            <span class="metric-label">Branch (Traversal)</span>
                         </div>
                         <div class="metric">
                             <span class="metric-value" id="leaf-faults">0</span>
-                            <span class="metric-label">Leaf Faults</span>
+                            <span class="metric-label">Leaf (Data)</span>
                         </div>
                         <div class="metric">
                             <span class="metric-value" id="traversal-ratio">0.0</span>
                             <span class="metric-label">Branch:Leaf Ratio</span>
                         </div>
+                        <div class="metric">
+                            <span class="metric-value" id="traversal-efficiency">0%</span>
+                            <span class="metric-label">Traversal Efficiency</span>
+                        </div>
                     </div>
 
-                    <!-- Page Type Breakdown -->
+                    <!-- Tree Structure Visualization (Phase 2) -->
+                    <div class="card full-width">
+                        <div class="card-header">B+ Tree Structure by Table <span class="card-hint">Hover for details</span></div>
+                        <div class="card-body" style="padding: 16px;">
+                            <div id="tree-structure-container" style="display: flex; flex-wrap: wrap; gap: 16px; justify-content: flex-start;">
+                                <!-- Mini tree diagrams will be rendered here -->
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Operation to Page Type Mapping (Phase 3) -->
                     <div class="two-col">
+                        <div class="card">
+                            <div class="card-header">Operation → Page Type Distribution</div>
+                            <div class="card-body" style="padding: 16px;">
+                                <canvas id="op-page-type-chart" height="250"></canvas>
+                            </div>
+                        </div>
                         <div class="card">
                             <div class="card-header">Page Type Distribution</div>
                             <div class="card-body" style="padding: 16px;">
@@ -238,11 +258,63 @@ pub fn generate_html(data: &ViewerData) -> String {
                                 </div>
                             </div>
                         </div>
-                        <div class="card">
-                            <div class="card-header">Page Type by Table</div>
-                            <div class="card-body" style="padding: 16px; max-height: 300px; overflow-y: auto;">
-                                <div id="table-tree-bars"></div>
+                    </div>
+
+                    <!-- Per-Block Analysis (Phase 4) -->
+                    <div class="card full-width" id="block-analysis-section" style="display:none;">
+                        <div class="card-header">
+                            Page Faults by Block
+                            <span class="card-hint">Click block for table breakdown</span>
+                        </div>
+                        <div class="card-body" style="padding: 16px;">
+                            <div id="block-histogram-container" style="height: 200px; position: relative;">
+                                <canvas id="block-histogram-canvas"></canvas>
                             </div>
+                            <div class="compact-table-container" style="max-height: 300px; margin-top: 16px;">
+                                <table class="compact-table" id="block-analysis-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Block</th>
+                                            <th>Total Faults</th>
+                                            <th>Branch</th>
+                                            <th>Leaf</th>
+                                            <th>Major %</th>
+                                            <th>I/O Time</th>
+                                            <th>Tables</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Comparative Table View (Phase 5) -->
+                    <div class="card full-width">
+                        <div class="card-header">
+                            Table Comparison
+                            <div class="sort-controls" style="display: inline-flex; gap: 8px; margin-left: 16px;">
+                                <button class="sort-btn active" data-sort="faults">By Faults</button>
+                                <button class="sort-btn" data-sort="ratio">By B:L Ratio</button>
+                                <button class="sort-btn" data-sort="depth">By Est. Depth</button>
+                            </div>
+                        </div>
+                        <div class="card-body" style="padding: 0;">
+                            <table class="compact-table" id="table-comparison">
+                                <thead>
+                                    <tr>
+                                        <th>Table</th>
+                                        <th>B:L Ratio</th>
+                                        <th>Est. Depth</th>
+                                        <th>Total Faults</th>
+                                        <th>Branch</th>
+                                        <th>Leaf</th>
+                                        <th>Major %</th>
+                                        <th style="width: 150px;">Distribution</th>
+                                    </tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
                         </div>
                     </div>
                 </div>
@@ -1075,6 +1147,165 @@ body {
     color: var(--color-leaf);
 }
 
+.tree-card {
+    background: #1a1a24;
+    border: 1px solid #27272a;
+    border-radius: 8px;
+    padding: 12px;
+    width: 180px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.tree-card:hover {
+    border-color: #3f3f46;
+    transform: translateY(-2px);
+}
+
+.tree-card-header {
+    font-size: 12px;
+    font-weight: 600;
+    color: #e4e4e7;
+    margin-bottom: 8px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.tree-diagram {
+    height: 80px;
+    position: relative;
+    margin-bottom: 8px;
+}
+
+.tree-card-stats {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+}
+
+.tree-card-stat {
+    text-align: center;
+}
+
+.tree-card-stat-value {
+    font-weight: 600;
+    color: #e4e4e7;
+}
+
+.tree-card-stat-label {
+    color: #71717a;
+    font-size: 10px;
+}
+
+/* Tree tooltip */
+.tree-tooltip {
+    position: fixed;
+    background: #1a1a24;
+    border: 1px solid #3f3f46;
+    border-radius: 8px;
+    padding: 12px;
+    font-size: 12px;
+    z-index: 1000;
+    pointer-events: none;
+    max-width: 280px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+}
+
+.tree-tooltip-header {
+    font-weight: 600;
+    color: #e4e4e7;
+    margin-bottom: 8px;
+    border-bottom: 1px solid #27272a;
+    padding-bottom: 6px;
+}
+
+.tree-tooltip-row {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 4px;
+}
+
+.tree-tooltip-label {
+    color: #71717a;
+}
+
+.tree-tooltip-value {
+    color: #e4e4e7;
+    font-weight: 500;
+}
+
+/* Sort controls for table comparison */
+.sort-controls {
+    font-size: 12px;
+}
+
+.sort-btn {
+    background: #27272a;
+    border: 1px solid #3f3f46;
+    color: #a1a1aa;
+    padding: 4px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.sort-btn:hover {
+    background: #3f3f46;
+    color: #e4e4e7;
+}
+
+.sort-btn.active {
+    background: var(--color-branch);
+    border-color: var(--color-branch);
+    color: #000;
+}
+
+/* Distribution bar in table comparison */
+.dist-bar {
+    display: flex;
+    height: 16px;
+    border-radius: 4px;
+    overflow: hidden;
+    background: #27272a;
+}
+
+.dist-bar-segment {
+    height: 100%;
+    transition: width 0.3s ease;
+}
+
+.dist-bar-segment.branch {
+    background: var(--color-branch);
+}
+
+.dist-bar-segment.leaf {
+    background: var(--color-leaf);
+}
+
+.dist-bar-segment.overflow {
+    background: var(--color-overflow);
+}
+
+/* Efficiency score color coding */
+.efficiency-high { color: #22c55e; }
+.efficiency-medium { color: #f59e0b; }
+.efficiency-low { color: #ef4444; }
+
+/* Block analysis table enhancements */
+#block-analysis-table tbody tr:hover {
+    background: #1f1f2a;
+}
+
+.tables-touched {
+    font-size: 10px;
+    color: #71717a;
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 @media (max-width: 1000px) {
     .btree-hero {
         flex-direction: column;
@@ -1670,6 +1901,34 @@ document.getElementById('export-compact-btn').addEventListener('click', () => {
             uncorrelated: DATA.direct_fault_attribution.uncorrelated_count,
             by_op_type: DATA.direct_fault_attribution.faults_by_op_type,
             by_cursor_op: DATA.direct_fault_attribution.faults_by_cursor_op
+        } : null,
+        // B+ Tree Visualization data (BTREE_VIZ_PLAN)
+        btree: DATA.btree_viz && DATA.btree_viz.has_data ? {
+            traversal_efficiency_score: DATA.btree_viz.traversal_efficiency_score,
+            tree_depth_estimates: DATA.btree_viz.tree_depth_estimates,
+            operation_page_types: DATA.btree_viz.operation_page_types.slice(0, 10),
+            block_analysis: DATA.btree_viz.block_analysis.slice(0, 20).map(b => ({
+                block: b.block_number,
+                total: b.total_faults,
+                branch: b.branch_faults,
+                leaf: b.leaf_faults,
+                major: b.major_faults,
+                io_time_us: b.io_time_us,
+                tables: b.tables_touched
+            })),
+            tree_traversal: DATA.tree_traversal && DATA.tree_traversal.has_data ?
+                DATA.tree_traversal.tables.slice(0, 15).map(t => ({
+                    name: t.name,
+                    total_faults: t.total_faults,
+                    branch_faults: t.branch_faults,
+                    leaf_faults: t.leaf_faults,
+                    branch_leaf_ratio: t.branch_leaf_ratio
+                })) : null
+        } : null,
+        page_types: DATA.page_type_stats && DATA.page_type_stats.has_data ? {
+            total_faults: DATA.page_type_stats.total_faults,
+            traversal_to_data_ratio: DATA.page_type_stats.traversal_to_data_ratio,
+            by_type: DATA.page_type_stats.by_type
         } : null
     };
 
@@ -1998,12 +2257,13 @@ function initTables() {
 }
 
 // ============================================
-// B+ TREE TAB
+// B+ TREE TAB (Enhanced - BTREE_VIZ_PLAN)
 // ============================================
 
 function initBTree() {
     const pt = DATA.page_type_stats;
     const tt = DATA.tree_traversal;
+    const bv = DATA.btree_viz;
 
     // Check if we have data
     if (!pt || !pt.has_data) {
@@ -2015,9 +2275,6 @@ function initBTree() {
     document.getElementById('btree-no-data').style.display = 'none';
     document.getElementById('btree-content').style.display = 'block';
 
-    // Page type donut chart
-    drawPageTypeDonut(pt);
-
     // Update metrics row
     const branchFaults = pt.by_type.find(t => t.page_type === 'Branch');
     const leafFaults = pt.by_type.find(t => t.page_type === 'Leaf');
@@ -2025,6 +2282,17 @@ function initBTree() {
     document.getElementById('leaf-faults').textContent = fmt(leafFaults ? leafFaults.total_faults : 0);
     document.getElementById('traversal-ratio').textContent = pt.traversal_to_data_ratio.toFixed(2);
     document.getElementById('page-type-total').textContent = fmt(pt.total_faults);
+
+    // Traversal efficiency score (from btree_viz)
+    if (bv && bv.has_data) {
+        const effEl = document.getElementById('traversal-efficiency');
+        const eff = bv.traversal_efficiency_score;
+        effEl.textContent = eff.toFixed(0) + '%';
+        effEl.className = 'metric-value ' + (eff >= 70 ? 'efficiency-high' : eff >= 40 ? 'efficiency-medium' : 'efficiency-low');
+    }
+
+    // Page type donut chart
+    drawPageTypeDonut(pt);
 
     // Legend
     const legendEl = document.getElementById('page-type-legend');
@@ -2040,10 +2308,483 @@ function initBTree() {
         `;
     }).join('');
 
-    // Per-table tree bars
+    // Phase 2: Tree structure visualization
     if (tt && tt.has_data && tt.tables.length) {
-        drawTableTreeBars(tt);
+        drawTreeStructureCards(tt, bv);
     }
+
+    // Phase 3: Operation to page type chart
+    if (bv && bv.has_data && bv.operation_page_types.length) {
+        drawOperationPageTypeChart(bv.operation_page_types);
+    }
+
+    // Phase 4: Per-block analysis
+    if (bv && bv.has_data && bv.block_analysis.length) {
+        document.getElementById('block-analysis-section').style.display = 'block';
+        drawBlockAnalysis(bv.block_analysis);
+    }
+
+    // Phase 5: Comparative table view
+    if (tt && tt.has_data && tt.tables.length) {
+        drawTableComparison(tt, bv);
+        initTableComparisonSort(tt, bv);
+    }
+}
+
+// Phase 2: Draw mini tree structure cards for each table
+function drawTreeStructureCards(tt, bv) {
+    const container = document.getElementById('tree-structure-container');
+    if (!container) return;
+
+    // Get depth estimates map
+    const depthMap = {};
+    if (bv && bv.tree_depth_estimates) {
+        bv.tree_depth_estimates.forEach(d => {
+            depthMap[d.table_name] = d;
+        });
+    }
+
+    // Take top 10 tables by faults
+    const tables = tt.tables.slice(0, 10);
+
+    container.innerHTML = tables.map(table => {
+        const depth = depthMap[table.name];
+        const estDepth = depth ? depth.estimated_depth.toFixed(1) : '?';
+
+        return `
+            <div class="tree-card" data-table="${table.name}">
+                <div class="tree-card-header" title="${table.name}">${table.name}</div>
+                <canvas class="tree-diagram" data-branch="${table.branch_faults}" data-leaf="${table.leaf_faults}" data-ratio="${table.branch_leaf_ratio}" width="156" height="80"></canvas>
+                <div class="tree-card-stats">
+                    <div class="tree-card-stat">
+                        <div class="tree-card-stat-value">${table.branch_leaf_ratio.toFixed(2)}</div>
+                        <div class="tree-card-stat-label">B:L</div>
+                    </div>
+                    <div class="tree-card-stat">
+                        <div class="tree-card-stat-value">~${estDepth}</div>
+                        <div class="tree-card-stat-label">Depth</div>
+                    </div>
+                    <div class="tree-card-stat">
+                        <div class="tree-card-stat-value">${fmtK(table.total_faults)}</div>
+                        <div class="tree-card-stat-label">Faults</div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }).join('');
+
+    // Draw mini tree diagrams on each canvas
+    container.querySelectorAll('.tree-diagram').forEach(canvas => {
+        drawMiniTree(canvas);
+    });
+
+    // Add tooltips
+    addTreeCardTooltips(container, tt, depthMap);
+}
+
+// Draw a mini B+ tree diagram on canvas
+function drawMiniTree(canvas) {
+    const ctx = canvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+    const w = 156;
+    const h = 80;
+
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
+    ctx.scale(dpr, dpr);
+
+    const ratio = parseFloat(canvas.dataset.ratio) || 0;
+
+    // Estimate levels from ratio (1-4 levels)
+    const levels = Math.min(4, Math.max(1, Math.round(1 + ratio * 2)));
+
+    const branchColor = '#f59e0b';
+    const leafColor = '#22c55e';
+    const lineColor = '#3f3f46';
+
+    ctx.clearRect(0, 0, w, h);
+
+    // Draw tree structure based on levels
+    const nodeRadius = 6;
+    const levelHeight = (h - 20) / levels;
+
+    for (let level = 0; level < levels; level++) {
+        const y = 10 + level * levelHeight;
+        const isLeaf = level === levels - 1;
+        const nodesAtLevel = Math.pow(2, level);
+        const spacing = w / (nodesAtLevel + 1);
+
+        ctx.fillStyle = isLeaf ? leafColor : branchColor;
+
+        for (let i = 0; i < nodesAtLevel; i++) {
+            const x = spacing * (i + 1);
+
+            // Draw connecting lines to children
+            if (!isLeaf && level < levels - 1) {
+                const childSpacing = w / (nodesAtLevel * 2 + 1);
+                const childY = y + levelHeight;
+                ctx.strokeStyle = lineColor;
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(x, y + nodeRadius);
+                ctx.lineTo(childSpacing * (i * 2 + 1), childY - nodeRadius);
+                ctx.stroke();
+                ctx.beginPath();
+                ctx.moveTo(x, y + nodeRadius);
+                ctx.lineTo(childSpacing * (i * 2 + 2), childY - nodeRadius);
+                ctx.stroke();
+            }
+
+            // Draw node
+            ctx.beginPath();
+            ctx.arc(x, y, nodeRadius, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+}
+
+// Add hover tooltips to tree cards
+function addTreeCardTooltips(container, tt, depthMap) {
+    let tooltip = document.querySelector('.tree-tooltip');
+    if (!tooltip) {
+        tooltip = document.createElement('div');
+        tooltip.className = 'tree-tooltip';
+        tooltip.style.display = 'none';
+        document.body.appendChild(tooltip);
+    }
+
+    container.querySelectorAll('.tree-card').forEach(card => {
+        const tableName = card.dataset.table;
+        const table = tt.tables.find(t => t.name === tableName);
+        const depth = depthMap[tableName];
+
+        card.addEventListener('mouseenter', (e) => {
+            if (!table) return;
+
+            const majorPct = table.total_faults > 0 ? ((table.branch_faults + table.leaf_faults) > 0 ? '~' : '0') : '0';
+
+            tooltip.innerHTML = `
+                <div class="tree-tooltip-header">${table.name}</div>
+                <div class="tree-tooltip-row">
+                    <span class="tree-tooltip-label">Branch Faults:</span>
+                    <span class="tree-tooltip-value" style="color: #f59e0b">${fmt(table.branch_faults)}</span>
+                </div>
+                <div class="tree-tooltip-row">
+                    <span class="tree-tooltip-label">Leaf Faults:</span>
+                    <span class="tree-tooltip-value" style="color: #22c55e">${fmt(table.leaf_faults)}</span>
+                </div>
+                <div class="tree-tooltip-row">
+                    <span class="tree-tooltip-label">Overflow:</span>
+                    <span class="tree-tooltip-value" style="color: #8b5cf6">${fmt(table.overflow_faults)}</span>
+                </div>
+                <div class="tree-tooltip-row">
+                    <span class="tree-tooltip-label">B:L Ratio:</span>
+                    <span class="tree-tooltip-value">${table.branch_leaf_ratio.toFixed(3)}</span>
+                </div>
+                ${depth ? `
+                <div class="tree-tooltip-row">
+                    <span class="tree-tooltip-label">Est. Depth:</span>
+                    <span class="tree-tooltip-value">~${depth.estimated_depth.toFixed(1)} levels (${depth.confidence})</span>
+                </div>
+                ` : ''}
+                <div class="tree-tooltip-row" style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #27272a;">
+                    <span class="tree-tooltip-label">Avg traversal:</span>
+                    <span class="tree-tooltip-value">${table.branch_leaf_ratio.toFixed(1)} branches/leaf</span>
+                </div>
+            `;
+            tooltip.style.display = 'block';
+        });
+
+        card.addEventListener('mousemove', (e) => {
+            tooltip.style.left = (e.clientX + 15) + 'px';
+            tooltip.style.top = (e.clientY + 15) + 'px';
+        });
+
+        card.addEventListener('mouseleave', () => {
+            tooltip.style.display = 'none';
+        });
+    });
+}
+
+// Phase 3: Draw operation to page type horizontal bar chart
+function drawOperationPageTypeChart(opPageTypes) {
+    const canvas = document.getElementById('op-page-type-chart');
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+
+    const containerWidth = canvas.parentElement.offsetWidth - 32;
+    const barHeight = 24;
+    const labelWidth = 100;
+    const padding = 8;
+    const numBars = Math.min(opPageTypes.length, 8);
+    const h = numBars * (barHeight + padding) + 40;
+
+    canvas.width = containerWidth * dpr;
+    canvas.height = h * dpr;
+    canvas.style.width = containerWidth + 'px';
+    canvas.style.height = h + 'px';
+    ctx.scale(dpr, dpr);
+
+    ctx.clearRect(0, 0, containerWidth, h);
+
+    // Find max total for scaling
+    const maxTotal = Math.max(...opPageTypes.map(o => o.branch_faults + o.leaf_faults + o.overflow_faults), 1);
+    const barMaxWidth = containerWidth - labelWidth - 80;
+
+    // Draw bars
+    opPageTypes.slice(0, numBars).forEach((op, i) => {
+        const y = i * (barHeight + padding) + 10;
+        const total = op.branch_faults + op.leaf_faults + op.overflow_faults;
+
+        // Label
+        ctx.fillStyle = '#e4e4e7';
+        ctx.font = '12px -apple-system, BlinkMacSystemFont, sans-serif';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(op.cursor_op, 0, y + barHeight / 2);
+
+        // Stacked bar
+        const scale = barMaxWidth / maxTotal;
+        let x = labelWidth;
+
+        // Branch segment
+        if (op.branch_faults > 0) {
+            const segWidth = op.branch_faults * scale;
+            ctx.fillStyle = '#f59e0b';
+            ctx.fillRect(x, y, segWidth, barHeight);
+            x += segWidth;
+        }
+
+        // Leaf segment
+        if (op.leaf_faults > 0) {
+            const segWidth = op.leaf_faults * scale;
+            ctx.fillStyle = '#22c55e';
+            ctx.fillRect(x, y, segWidth, barHeight);
+            x += segWidth;
+        }
+
+        // Overflow segment
+        if (op.overflow_faults > 0) {
+            const segWidth = op.overflow_faults * scale;
+            ctx.fillStyle = '#8b5cf6';
+            ctx.fillRect(x, y, segWidth, barHeight);
+            x += segWidth;
+        }
+
+        // Total count label
+        ctx.fillStyle = '#71717a';
+        ctx.textAlign = 'left';
+        ctx.fillText(fmtK(total), x + 8, y + barHeight / 2);
+    });
+
+    // Legend at bottom
+    const legendY = h - 20;
+    ctx.font = '11px -apple-system, BlinkMacSystemFont, sans-serif';
+
+    ctx.fillStyle = '#f59e0b';
+    ctx.fillRect(labelWidth, legendY, 12, 12);
+    ctx.fillStyle = '#a1a1aa';
+    ctx.fillText('Branch', labelWidth + 16, legendY + 9);
+
+    ctx.fillStyle = '#22c55e';
+    ctx.fillRect(labelWidth + 80, legendY, 12, 12);
+    ctx.fillStyle = '#a1a1aa';
+    ctx.fillText('Leaf', labelWidth + 96, legendY + 9);
+
+    ctx.fillStyle = '#8b5cf6';
+    ctx.fillRect(labelWidth + 140, legendY, 12, 12);
+    ctx.fillStyle = '#a1a1aa';
+    ctx.fillText('Overflow', labelWidth + 156, legendY + 9);
+}
+
+// Phase 4: Draw block analysis section
+function drawBlockAnalysis(blockAnalysis) {
+    // Sort by block number for histogram
+    const sorted = [...blockAnalysis].sort((a, b) => a.block_number - b.block_number);
+
+    // Draw histogram
+    drawBlockHistogram(sorted);
+
+    // Populate table (already sorted by total_faults from backend)
+    const tbody = document.querySelector('#block-analysis-table tbody');
+    if (!tbody) return;
+
+    tbody.innerHTML = blockAnalysis.slice(0, 20).map(block => {
+        const majorPct = block.total_faults > 0 ? ((block.major_faults / block.total_faults) * 100).toFixed(0) : '0';
+        const tables = block.tables_touched.slice(0, 3).join(', ') + (block.tables_touched.length > 3 ? '...' : '');
+
+        return `
+            <tr>
+                <td>${fmt(block.block_number)}</td>
+                <td>${fmt(block.total_faults)}</td>
+                <td style="color: #f59e0b">${fmt(block.branch_faults)}</td>
+                <td style="color: #22c55e">${fmt(block.leaf_faults)}</td>
+                <td>${majorPct}%</td>
+                <td>${(block.io_time_us / 1000).toFixed(1)}ms</td>
+                <td class="tables-touched" title="${block.tables_touched.join(', ')}">${tables}</td>
+            </tr>
+        `;
+    }).join('');
+}
+
+function drawBlockHistogram(blocks) {
+    const canvas = document.getElementById('block-histogram-canvas');
+    if (!canvas || blocks.length === 0) return;
+
+    const ctx = canvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+    const container = canvas.parentElement;
+    const w = container.offsetWidth;
+    const h = 180;
+
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
+    ctx.scale(dpr, dpr);
+
+    ctx.clearRect(0, 0, w, h);
+
+    const padding = { top: 20, right: 20, bottom: 30, left: 50 };
+    const chartW = w - padding.left - padding.right;
+    const chartH = h - padding.top - padding.bottom;
+
+    // Find max faults for y-axis
+    const maxFaults = Math.max(...blocks.map(b => b.total_faults), 1);
+
+    // Draw axes
+    ctx.strokeStyle = '#3f3f46';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(padding.left, padding.top);
+    ctx.lineTo(padding.left, h - padding.bottom);
+    ctx.lineTo(w - padding.right, h - padding.bottom);
+    ctx.stroke();
+
+    // Draw bars
+    const barWidth = Math.max(2, (chartW / blocks.length) - 1);
+
+    blocks.forEach((block, i) => {
+        const x = padding.left + (i / blocks.length) * chartW;
+        const barH = (block.total_faults / maxFaults) * chartH;
+        const y = h - padding.bottom - barH;
+
+        // Color by major fault ratio
+        const majorRatio = block.total_faults > 0 ? block.major_faults / block.total_faults : 0;
+        const r = Math.round(34 + majorRatio * (239 - 34));
+        const g = Math.round(197 - majorRatio * (197 - 68));
+        const b = Math.round(94 - majorRatio * (94 - 68));
+        ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+
+        ctx.fillRect(x, y, barWidth, barH);
+    });
+
+    // Y-axis labels
+    ctx.fillStyle = '#71717a';
+    ctx.font = '10px -apple-system, BlinkMacSystemFont, sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText(fmtK(maxFaults), padding.left - 5, padding.top + 5);
+    ctx.fillText('0', padding.left - 5, h - padding.bottom + 5);
+
+    // X-axis labels
+    ctx.textAlign = 'center';
+    if (blocks.length > 0) {
+        ctx.fillText(fmt(blocks[0].block_number), padding.left, h - 10);
+        ctx.fillText(fmt(blocks[blocks.length - 1].block_number), w - padding.right, h - 10);
+    }
+}
+
+// Phase 5: Draw comparative table view
+function drawTableComparison(tt, bv) {
+    const tbody = document.querySelector('#table-comparison tbody');
+    if (!tbody) return;
+
+    // Get depth estimates map
+    const depthMap = {};
+    if (bv && bv.tree_depth_estimates) {
+        bv.tree_depth_estimates.forEach(d => {
+            depthMap[d.table_name] = d;
+        });
+    }
+
+    renderTableComparisonRows(tbody, tt.tables, depthMap);
+}
+
+function renderTableComparisonRows(tbody, tables, depthMap) {
+    tbody.innerHTML = tables.slice(0, 20).map(table => {
+        const depth = depthMap[table.name];
+        const estDepth = depth ? depth.estimated_depth.toFixed(1) : '-';
+        const total = table.branch_faults + table.leaf_faults + table.overflow_faults;
+        const branchPct = total > 0 ? (table.branch_faults / total) * 100 : 0;
+        const leafPct = total > 0 ? (table.leaf_faults / total) * 100 : 0;
+        const overflowPct = total > 0 ? (table.overflow_faults / total) * 100 : 0;
+
+        // Estimate major % (not directly available, approximate from ratio)
+        const majorEstPct = table.branch_leaf_ratio > 1 ? '~40%' : table.branch_leaf_ratio > 0.5 ? '~25%' : '~15%';
+
+        return `
+            <tr>
+                <td title="${table.name}">${table.name}</td>
+                <td>${table.branch_leaf_ratio.toFixed(2)}</td>
+                <td>${estDepth}</td>
+                <td>${fmt(table.total_faults)}</td>
+                <td style="color: #f59e0b">${fmt(table.branch_faults)}</td>
+                <td style="color: #22c55e">${fmt(table.leaf_faults)}</td>
+                <td>${majorEstPct}</td>
+                <td>
+                    <div class="dist-bar">
+                        <div class="dist-bar-segment branch" style="width: ${branchPct}%"></div>
+                        <div class="dist-bar-segment leaf" style="width: ${leafPct}%"></div>
+                        <div class="dist-bar-segment overflow" style="width: ${overflowPct}%"></div>
+                    </div>
+                </td>
+            </tr>
+        `;
+    }).join('');
+}
+
+function initTableComparisonSort(tt, bv) {
+    const buttons = document.querySelectorAll('.sort-btn');
+
+    // Get depth estimates map
+    const depthMap = {};
+    if (bv && bv.tree_depth_estimates) {
+        bv.tree_depth_estimates.forEach(d => {
+            depthMap[d.table_name] = d;
+        });
+    }
+
+    buttons.forEach(btn => {
+        btn.addEventListener('click', () => {
+            buttons.forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+
+            const sortBy = btn.dataset.sort;
+            let sorted = [...tt.tables];
+
+            switch (sortBy) {
+                case 'ratio':
+                    sorted.sort((a, b) => b.branch_leaf_ratio - a.branch_leaf_ratio);
+                    break;
+                case 'depth':
+                    sorted.sort((a, b) => {
+                        const da = depthMap[a.name]?.estimated_depth || 0;
+                        const db = depthMap[b.name]?.estimated_depth || 0;
+                        return db - da;
+                    });
+                    break;
+                default: // faults
+                    sorted.sort((a, b) => b.total_faults - a.total_faults);
+            }
+
+            const tbody = document.querySelector('#table-comparison tbody');
+            renderTableComparisonRows(tbody, sorted, depthMap);
+        });
+    });
 }
 
 function drawPageTypeDonut(pt) {
@@ -2085,44 +2826,11 @@ function drawPageTypeDonut(pt) {
     });
 }
 
-function drawTableTreeBars(tt) {
-    const container = document.getElementById('table-tree-bars');
-    if (!container) return;
-
-    // Find max total for scaling
-    const maxTotal = Math.max(...tt.tables.map(t => t.total_faults), 1);
-
-    container.innerHTML = tt.tables.slice(0, 15).map(table => {
-        const branchPct = (table.branch_faults / table.total_faults) * 100;
-        const leafPct = (table.leaf_faults / table.total_faults) * 100;
-        const overflowPct = (table.overflow_faults / table.total_faults) * 100;
-        const widthPct = (table.total_faults / maxTotal) * 100;
-
-        return `
-            <div class="table-tree-bar">
-                <div class="table-tree-name" title="${table.name}">${table.name}</div>
-                <div class="table-tree-bar-container" style="width: ${widthPct}%;">
-                    <div class="table-tree-segment branch" style="width: ${branchPct}%;" title="Branch: ${fmt(table.branch_faults)}"></div>
-                    <div class="table-tree-segment leaf" style="width: ${leafPct}%;" title="Leaf: ${fmt(table.leaf_faults)}"></div>
-                    <div class="table-tree-segment overflow" style="width: ${overflowPct}%;" title="Overflow: ${fmt(table.overflow_faults)}"></div>
-                </div>
-                <div class="table-tree-stats">
-                    <div class="table-tree-stat">
-                        <span class="table-tree-stat-label">B:</span>
-                        <span class="table-tree-stat-value branch">${fmt(table.branch_faults)}</span>
-                    </div>
-                    <div class="table-tree-stat">
-                        <span class="table-tree-stat-label">L:</span>
-                        <span class="table-tree-stat-value leaf">${fmt(table.leaf_faults)}</span>
-                    </div>
-                    <div class="table-tree-stat">
-                        <span class="table-tree-stat-label">Ratio:</span>
-                        <span class="table-tree-stat-value">${table.branch_leaf_ratio.toFixed(2)}</span>
-                    </div>
-                </div>
-            </div>
-        `;
-    }).join('');
+// Helper: format large numbers with K suffix
+function fmtK(n) {
+    if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+    if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+    return n.toString();
 }
 
 function initTxns() {
