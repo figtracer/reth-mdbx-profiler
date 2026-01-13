@@ -3380,10 +3380,14 @@ fn generate_batch_analysis(
     }
 
     // Step 4: Build batch windows and attribute faults
-    // Each batch's window = [begin_ts, commit_ts] (the transaction's active period)
+    // Window for batch N = [commit(N-1), commit(N)]
+    // This captures all faults that occurred between consecutive commits,
+    // including faults in RO transactions that happened while processing blocks.
     let mut batches: Vec<BatchAnalysis> = Vec::new();
+    let trace_end = page_faults.iter().map(|f| f.timestamp_ns).max().unwrap();
 
-    for (batch_idx, &(begin_ts, commit_ts, latency_ns, txn_ptr)) in sorted_txns.iter().enumerate() {
+    for (batch_idx, &(_begin_ts, commit_ts, latency_ns, txn_ptr)) in sorted_txns.iter().enumerate()
+    {
         // Get blocks for this transaction
         let mut blocks: Vec<u64> = blocks_per_txn.get(&txn_ptr).cloned().unwrap_or_default();
         blocks.sort();
@@ -3399,10 +3403,17 @@ fn generate_batch_analysis(
             )
         };
 
-        // Attribution window: the transaction's active period (begin to commit)
-        // This attributes faults to the batch that was actively processing when they occurred
-        let window_start = begin_ts;
-        let window_end = commit_ts;
+        // Attribution window: from previous commit (or trace start) to this commit
+        let window_start = if batch_idx == 0 {
+            trace_start
+        } else {
+            sorted_txns[batch_idx - 1].1 // previous commit timestamp
+        };
+        let window_end = if batch_idx == sorted_txns.len() - 1 {
+            trace_end + 1 // Include all remaining faults in last batch
+        } else {
+            commit_ts
+        };
 
         // Count faults in this window
         let mut branch_faults = 0u32;
@@ -3591,7 +3602,7 @@ fn generate_block_analysis(
 
     for i in 0..block_timestamps.len() {
         let (block_num, _block_ts) = block_timestamps[i];
-
+z
         // Simple approach: divide trace time evenly among all blocks
         // This is more robust than trying to use interpolated timestamps
         let window_start = trace_start + (i as u64) * time_per_block;
