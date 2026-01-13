@@ -497,6 +497,29 @@ pub struct BTreeVisualization {
     pub tree_depth_estimates: Vec<TreeDepthEstimate>,
     /// Overall traversal efficiency score (0-100, higher is better)
     pub traversal_efficiency_score: f64,
+    /// Attribution statistics - how much data is accurately attributed
+    pub attribution_stats: AttributionStats,
+}
+
+/// Statistics about how accurately we could attribute page faults to blocks/batches
+#[derive(Debug, Serialize, Default, Clone)]
+pub struct AttributionStats {
+    /// Total page faults in the trace
+    pub total_faults: u64,
+    /// Faults attributed to specific batches (between RW commits)
+    pub batch_attributed_faults: u64,
+    /// Faults attributed to specific blocks (between block writes)
+    pub block_attributed_faults: u64,
+    /// Faults that couldn't be attributed (outside known windows)
+    pub unattributed_faults: u64,
+    /// Percentage of faults with batch attribution (0-100)
+    pub batch_attribution_pct: f64,
+    /// Percentage of faults with block attribution (0-100)
+    pub block_attribution_pct: f64,
+    /// Number of RW commits detected
+    pub rw_commits_detected: u32,
+    /// Number of blocks with write data
+    pub blocks_with_writes: u32,
 }
 
 /// Tree traversal statistics for a specific table
@@ -3270,11 +3293,21 @@ fn generate_btree_visualization(
         return BTreeVisualization::default();
     }
 
-    // Generate per-batch analysis (more accurate - uses RW transaction boundaries)
-    let batch_analysis = generate_batch_analysis(page_faults, cursor_events, txn_events);
+    let total_faults = page_faults.len() as u64;
 
-    // Generate per-block analysis (kept for compatibility, less accurate due to batching)
-    let block_analysis = generate_block_analysis(page_faults, cursor_events);
+    // Count RW commits for stats
+    let rw_commits_detected = txn_events
+        .iter()
+        .filter(|e| e.event_type == 8 && e.txn_flags == 0)
+        .count() as u32;
+
+    // Generate per-batch analysis (uses RW commit timestamps as boundaries)
+    let (batch_analysis, batch_attributed) =
+        generate_batch_analysis(page_faults, cursor_events, txn_events);
+
+    // Generate per-block analysis (uses only blocks with actual write data)
+    let (block_analysis, block_attributed, blocks_with_writes) =
+        generate_block_analysis(page_faults, cursor_events);
 
     // Generate operation-to-page-type breakdown
     let operation_page_types = generate_operation_page_type_breakdown(page_faults);
@@ -3285,6 +3318,26 @@ fn generate_btree_visualization(
     // Calculate overall traversal efficiency score
     let traversal_efficiency_score = calculate_traversal_efficiency(tree_traversal);
 
+    // Build attribution statistics
+    let attribution_stats = AttributionStats {
+        total_faults,
+        batch_attributed_faults: batch_attributed,
+        block_attributed_faults: block_attributed,
+        unattributed_faults: total_faults.saturating_sub(batch_attributed),
+        batch_attribution_pct: if total_faults > 0 {
+            (batch_attributed as f64 / total_faults as f64) * 100.0
+        } else {
+            0.0
+        },
+        block_attribution_pct: if total_faults > 0 {
+            (block_attributed as f64 / total_faults as f64) * 100.0
+        } else {
+            0.0
+        },
+        rw_commits_detected,
+        blocks_with_writes,
+    };
+
     BTreeVisualization {
         has_data: true,
         batch_analysis,
@@ -3293,6 +3346,7 @@ fn generate_btree_visualization(
         block_range: block_range.clone(),
         tree_depth_estimates,
         traversal_efficiency_score,
+        attribution_stats,
     }
 }
 
@@ -3306,62 +3360,47 @@ fn generate_btree_visualization(
 /// - We have precise transaction boundaries (begin/commit timestamps)
 /// - We know exactly which blocks were written in each transaction
 /// - Page faults can be accurately attributed to the batch that was active
+/// Generate per-batch analysis using RW commit timestamps as boundaries.
+///
+/// This approach uses ALL RW commits (not just those where we saw BEGIN),
+/// creating windows between consecutive commits. This is more accurate because:
+/// - We capture all commit events regardless of when the transaction started
+/// - Windows are defined by actual commit timestamps (100% accurate boundaries)
+/// - Blocks are associated with batches based on when their writes occurred
+///
+/// Returns (batches, attributed_fault_count)
 fn generate_batch_analysis(
     page_faults: &[&PageFaultEvent],
     cursor_events: &[CursorEvent],
     txn_events: &[TxnEvent],
-) -> Vec<BatchAnalysis> {
+) -> (Vec<BatchAnalysis>, u64) {
     use crate::event::MdbxPageType;
 
     if page_faults.is_empty() || txn_events.is_empty() {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
 
     let trace_start = page_faults.iter().map(|f| f.timestamp_ns).min().unwrap();
+    let trace_end = page_faults.iter().map(|f| f.timestamp_ns).max().unwrap();
 
-    // Step 1: Find all RW transaction lifecycles (begin -> commit)
-    // Key: txn_ptr, Value: (begin_ts, commit_ts, commit_latency_ns)
-    let mut rw_txn_lifecycles: HashMap<u64, (u64, u64, u64)> = HashMap::new();
-    let mut rw_begins: HashMap<u64, u64> = HashMap::new();
-
-    for event in txn_events {
-        // RW transactions have txn_flags == 0
-        if event.txn_flags != 0 {
-            continue;
-        }
-
-        match event.event_type {
-            7 => {
-                // TXN_BEGIN
-                rw_begins.insert(event.txn_ptr, event.timestamp_ns);
-            }
-            8 => {
-                // TXN_COMMIT
-                if let Some(begin_ts) = rw_begins.remove(&event.txn_ptr) {
-                    rw_txn_lifecycles.insert(
-                        event.txn_ptr,
-                        (begin_ts, event.timestamp_ns, event.latency_ns),
-                    );
-                }
-            }
-            _ => {}
-        }
-    }
-
-    if rw_txn_lifecycles.is_empty() {
-        return Vec::new();
-    }
-
-    // Step 2: Sort RW transactions by commit timestamp
-    let mut sorted_txns: Vec<(u64, u64, u64, u64)> = rw_txn_lifecycles
-        .into_iter()
-        .map(|(ptr, (begin, commit, latency))| (begin, commit, latency, ptr))
+    // Step 1: Collect ALL RW commit events (not just those with matching BEGIN)
+    // Format: (commit_timestamp, latency_ns)
+    let mut rw_commits: Vec<(u64, u64)> = txn_events
+        .iter()
+        .filter(|e| e.event_type == 8 && e.txn_flags == 0) // TXN_COMMIT for RW
+        .map(|e| (e.timestamp_ns, e.latency_ns))
         .collect();
-    sorted_txns.sort_by_key(|(_, commit, _, _)| *commit);
 
-    // Step 3: Find which blocks were written in each transaction
-    // We associate cursor writes with the RW transaction that was active at that time
-    let mut blocks_per_txn: HashMap<u64, Vec<u64>> = HashMap::new();
+    if rw_commits.is_empty() {
+        return (Vec::new(), 0);
+    }
+
+    // Sort by commit timestamp
+    rw_commits.sort_by_key(|(ts, _)| *ts);
+
+    // Step 2: Find block writes and their timestamps
+    // Key: block_number, Value: (first_write_ts, last_write_ts)
+    let mut block_write_times: HashMap<u64, (u64, u64)> = HashMap::new();
 
     for event in cursor_events {
         if !event.is_write_op() {
@@ -3369,50 +3408,57 @@ fn generate_batch_analysis(
         }
 
         if let Some(block) = extract_block_from_key(event.dbi, &event.key_data, event.key_size) {
-            // Find which RW transaction this write belongs to
-            for &(begin, commit, _, ptr) in &sorted_txns {
-                if event.timestamp_ns >= begin && event.timestamp_ns <= commit {
-                    blocks_per_txn.entry(ptr).or_default().push(block);
-                    break;
-                }
-            }
+            block_write_times
+                .entry(block)
+                .and_modify(|(first, last)| {
+                    *first = (*first).min(event.timestamp_ns);
+                    *last = (*last).max(event.timestamp_ns);
+                })
+                .or_insert((event.timestamp_ns, event.timestamp_ns));
         }
     }
 
-    // Step 4: Build batch windows and attribute faults
-    // Window for batch N = [commit(N-1), commit(N)]
-    // This captures all faults that occurred between consecutive commits,
-    // including faults in RO transactions that happened while processing blocks.
+    // Step 3: Build batch windows between consecutive commits
+    // Each batch window is [previous_commit, this_commit)
+    // The first batch starts at trace_start (to capture pre-first-commit faults)
     let mut batches: Vec<BatchAnalysis> = Vec::new();
-    let trace_end = page_faults.iter().map(|f| f.timestamp_ns).max().unwrap();
+    let mut total_attributed: u64 = 0;
 
-    for (batch_idx, &(_begin_ts, commit_ts, latency_ns, txn_ptr)) in sorted_txns.iter().enumerate()
-    {
-        // Get blocks for this transaction
-        let mut blocks: Vec<u64> = blocks_per_txn.get(&txn_ptr).cloned().unwrap_or_default();
-        blocks.sort();
-        blocks.dedup();
-
-        let (first_block, last_block, block_count) = if blocks.is_empty() {
-            (0, 0, 0)
-        } else {
-            (
-                *blocks.first().unwrap(),
-                *blocks.last().unwrap(),
-                blocks.len() as u32,
-            )
-        };
-
-        // Attribution window: from previous commit (or trace start) to this commit
+    for (batch_idx, &(commit_ts, latency_ns)) in rw_commits.iter().enumerate() {
+        // Window start: previous commit timestamp, or trace_start for first batch
         let window_start = if batch_idx == 0 {
             trace_start
         } else {
-            sorted_txns[batch_idx - 1].1 // previous commit timestamp
+            rw_commits[batch_idx - 1].0
         };
-        let window_end = if batch_idx == sorted_txns.len() - 1 {
-            trace_end + 1 // Include all remaining faults in last batch
+
+        // Window end: this commit timestamp
+        let window_end = commit_ts;
+
+        // Skip if window is invalid (can happen with duplicate timestamps)
+        if window_end <= window_start {
+            continue;
+        }
+
+        // Find which blocks were written in this window
+        let mut blocks_in_batch: Vec<u64> = block_write_times
+            .iter()
+            .filter(|(_, (first_write, _))| {
+                *first_write >= window_start && *first_write < window_end
+            })
+            .map(|(&block, _)| block)
+            .collect();
+        blocks_in_batch.sort();
+        blocks_in_batch.dedup();
+
+        let (first_block, last_block, block_count) = if blocks_in_batch.is_empty() {
+            (0, 0, 0)
         } else {
-            commit_ts
+            (
+                *blocks_in_batch.first().unwrap(),
+                *blocks_in_batch.last().unwrap(),
+                blocks_in_batch.len() as u32,
+            )
         };
 
         // Count faults in this window
@@ -3442,6 +3488,8 @@ fn generate_batch_analysis(
         }
 
         let total_faults = branch_faults + leaf_faults + overflow_faults;
+        total_attributed += total_faults as u64;
+
         const ESTIMATED_IO_TIME_PER_MAJOR_FAULT_US: u64 = 200;
 
         batches.push(BatchAnalysis {
@@ -3462,169 +3510,176 @@ fn generate_batch_analysis(
         });
     }
 
-    batches
+    // Handle faults after the last commit (if any)
+    if let Some(&(last_commit_ts, _)) = rw_commits.last() {
+        if last_commit_ts < trace_end {
+            let mut branch_faults = 0u32;
+            let mut leaf_faults = 0u32;
+            let mut overflow_faults = 0u32;
+            let mut major_faults = 0u32;
+            let mut tables_touched: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+
+            for fault in page_faults {
+                if fault.timestamp_ns >= last_commit_ts {
+                    let page_type = fault.page_type();
+                    match page_type {
+                        MdbxPageType::Branch => branch_faults += 1,
+                        MdbxPageType::Leaf => leaf_faults += 1,
+                        MdbxPageType::Overflow => overflow_faults += 1,
+                        _ => {}
+                    }
+                    if fault.is_major_fault() {
+                        major_faults += 1;
+                    }
+                    if fault.has_active_op() && fault.active_dbi < 100 {
+                        tables_touched.insert(dbi_to_table_name(fault.active_dbi).to_string());
+                    }
+                }
+            }
+
+            let total_faults = branch_faults + leaf_faults + overflow_faults;
+            if total_faults > 0 {
+                // Find blocks written after last commit
+                let mut blocks_in_batch: Vec<u64> = block_write_times
+                    .iter()
+                    .filter(|(_, (first_write, _))| *first_write >= last_commit_ts)
+                    .map(|(&block, _)| block)
+                    .collect();
+                blocks_in_batch.sort();
+
+                let (first_block, last_block, block_count) = if blocks_in_batch.is_empty() {
+                    (0, 0, 0)
+                } else {
+                    (
+                        *blocks_in_batch.first().unwrap(),
+                        *blocks_in_batch.last().unwrap(),
+                        blocks_in_batch.len() as u32,
+                    )
+                };
+
+                total_attributed += total_faults as u64;
+
+                const ESTIMATED_IO_TIME_PER_MAJOR_FAULT_US: u64 = 200;
+
+                batches.push(BatchAnalysis {
+                    batch_index: batches.len() as u32,
+                    first_block,
+                    last_block,
+                    block_count,
+                    branch_faults,
+                    leaf_faults,
+                    overflow_faults,
+                    major_faults,
+                    io_time_us: major_faults as u64 * ESTIMATED_IO_TIME_PER_MAJOR_FAULT_US,
+                    tables_touched: tables_touched.into_iter().collect(),
+                    total_faults,
+                    start_time_ns: last_commit_ts.saturating_sub(trace_start),
+                    end_time_ns: trace_end.saturating_sub(trace_start),
+                    commit_latency_us: 0, // No commit yet
+                });
+            }
+        }
+    }
+
+    (batches, total_attributed)
 }
 
-/// Generate per-block analysis by correlating page faults with block numbers
-/// using inter-block gap attribution.
+/// Generate per-block analysis using ONLY accurate data from consecutive block writes.
 ///
-/// This algorithm uses the insight that for sequential block processing at the tip:
-/// - Writes to changeset tables (AccountChangeSets, StorageChangeSets) happen at the END
-///   of block execution
-/// - The first write with block N's key marks the end of block N's execution
-/// - All page faults between first_write(N) and first_write(N+1) belong to block N+1's
-///   execution phase
+/// This function does NOT interpolate or estimate. It only attributes faults to blocks
+/// where we have concrete timestamp boundaries from cursor writes.
 ///
-/// This correctly attributes faults from the execution phase (reads from HashedAccounts,
-/// Tries, etc.) to the block being executed, not just faults during the write phase.
+/// For blocks processed sequentially:
+/// - Window for block N = [first_write(N-1), first_write(N))
+///   This captures the read phase of block N (between previous block's writes and this block's writes)
+/// - Plus the write phase: [first_write(N), last_write(N)]
+///
+/// Returns (block_analysis, attributed_fault_count, blocks_with_data_count)
 fn generate_block_analysis(
     page_faults: &[&PageFaultEvent],
     cursor_events: &[CursorEvent],
-) -> Vec<BlockAnalysis> {
+) -> (Vec<BlockAnalysis>, u64, u32) {
     use crate::event::MdbxPageType;
 
     if page_faults.is_empty() {
-        return Vec::new();
+        return (Vec::new(), 0, 0);
     }
 
-    // Step 1: Find the first write timestamp for each block number
-    // Key: block_number, Value: first_write_timestamp
-    let mut first_write_per_block: HashMap<u64, u64> = HashMap::new();
+    // Step 1: Find first and last write timestamps for each block
+    // Key: block_number, Value: (first_write_ts, last_write_ts)
+    let mut block_write_times: HashMap<u64, (u64, u64)> = HashMap::new();
 
     for event in cursor_events {
-        // Only consider write operations to block-keyed tables
         if !event.is_write_op() {
             continue;
         }
 
         if let Some(block) = extract_block_from_key(event.dbi, &event.key_data, event.key_size) {
-            first_write_per_block
+            block_write_times
                 .entry(block)
-                .and_modify(|ts| *ts = (*ts).min(event.timestamp_ns))
-                .or_insert(event.timestamp_ns);
+                .and_modify(|(first, last)| {
+                    *first = (*first).min(event.timestamp_ns);
+                    *last = (*last).max(event.timestamp_ns);
+                })
+                .or_insert((event.timestamp_ns, event.timestamp_ns));
         }
     }
 
-    if first_write_per_block.is_empty() {
-        return Vec::new();
+    if block_write_times.is_empty() {
+        return (Vec::new(), 0, 0);
     }
 
-    // Step 2: Determine block range and trace time bounds
-    let min_block = *first_write_per_block.keys().min().unwrap();
-    let max_block = *first_write_per_block.keys().max().unwrap();
-    let trace_start = page_faults.iter().map(|f| f.timestamp_ns).min().unwrap();
-    let trace_end = page_faults.iter().map(|f| f.timestamp_ns).max().unwrap();
+    let blocks_with_data = block_write_times.len() as u32;
 
-    // Step 3: Create sorted list of known (timestamp, block_number) pairs
-    let mut known_boundaries: Vec<(u64, u64)> = first_write_per_block
+    // Step 2: Sort blocks by their first write timestamp (chronological processing order)
+    let mut sorted_blocks: Vec<(u64, u64, u64)> = block_write_times
         .iter()
-        .map(|(&block, &ts)| (ts, block))
+        .map(|(&block, &(first, last))| (first, last, block))
         .collect();
-    known_boundaries.sort_by_key(|(ts, _)| *ts);
+    sorted_blocks.sort_by_key(|(first, _, _)| *first);
 
-    // Step 4: Build attribution windows for ALL blocks in the range
-    // Strategy: Divide the trace time evenly across all blocks, respecting known timestamps
-    // as anchor points for more accurate attribution.
+    // Step 3: Build attribution windows for ONLY blocks with real data
+    // For each block, the window is:
+    // - Start: previous block's first_write (or trace_start for first block)
+    // - End: this block's last_write
     //
-    // We use a hybrid approach:
-    // 1. Blocks with known timestamps anchor the time divisions
-    // 2. Blocks without timestamps get proportional time slices between anchors
-    let total_blocks = max_block - min_block + 1;
-    let trace_duration = trace_end.saturating_sub(trace_start);
-
-    // Build sorted list of all blocks with their estimated timestamps
-    // For known blocks, use their actual timestamp
-    // For unknown blocks, interpolate based on position between known neighbors
-    let mut block_timestamps: Vec<(u64, u64)> = Vec::new(); // (block, timestamp)
-
-    // First pass: collect all known timestamps sorted by block number
-    let mut known_by_block: Vec<(u64, u64)> = first_write_per_block
-        .iter()
-        .map(|(&block, &ts)| (block, ts))
-        .collect();
-    known_by_block.sort_by_key(|(block, _)| *block);
-
-    // Second pass: interpolate timestamps for all blocks
-    for block in min_block..=max_block {
-        let timestamp = if let Some(&ts) = first_write_per_block.get(&block) {
-            ts
-        } else {
-            // Find enclosing known blocks
-            let prev = known_by_block.iter().filter(|(b, _)| *b < block).last();
-            let next = known_by_block.iter().filter(|(b, _)| *b > block).next();
-
-            match (prev, next) {
-                (Some(&(prev_block, prev_ts)), Some(&(next_block, next_ts))) => {
-                    // Linear interpolation
-                    let block_span = next_block - prev_block;
-                    let time_span = next_ts.saturating_sub(prev_ts);
-                    let offset = block - prev_block;
-                    prev_ts + (time_span * offset / block_span)
-                }
-                (Some(&(prev_block, prev_ts)), None) => {
-                    // After last known - extrapolate using average pace
-                    let offset = block - prev_block;
-                    let avg_time_per_block = trace_duration / total_blocks;
-                    prev_ts + avg_time_per_block * offset
-                }
-                (None, Some(&(next_block, next_ts))) => {
-                    // Before first known - extrapolate backwards
-                    let offset = next_block - block;
-                    let avg_time_per_block = trace_duration / total_blocks;
-                    next_ts.saturating_sub(avg_time_per_block * offset)
-                }
-                (None, None) => {
-                    // No known blocks at all - uniform distribution
-                    let offset = block - min_block;
-                    let avg_time_per_block = trace_duration / total_blocks;
-                    trace_start + avg_time_per_block * offset
-                }
-            }
-        };
-        block_timestamps.push((block, timestamp));
-    }
-
-    // Sort by timestamp, then by block number for stable ordering
-    // This ensures blocks with identical timestamps are processed in block order
-    block_timestamps.sort_by(|(block_a, ts_a), (block_b, ts_b)| {
-        ts_a.cmp(ts_b).then_with(|| block_a.cmp(block_b))
-    });
-
-    // Step 5: Build attribution windows for ALL blocks
-    // We divide the trace time proportionally among all blocks.
-    // For blocks with identical timestamps, we subdivide their shared time window.
-    let num_blocks = block_timestamps.len() as u64;
-    let total_duration = trace_end.saturating_sub(trace_start);
-    let time_per_block = total_duration / num_blocks.max(1);
+    // This captures both the read phase (before our writes) and write phase
+    let trace_start = page_faults.iter().map(|f| f.timestamp_ns).min().unwrap();
 
     // Format: (start_ts, end_ts, block_number)
     let mut attribution_windows: Vec<(u64, u64, u64)> = Vec::new();
 
-    for i in 0..block_timestamps.len() {
-        let (block_num, _block_ts) = block_timestamps[i];
-        // Simple approach: divide trace time evenly among all blocks
-        // This is more robust than trying to use interpolated timestamps
-        let window_start = trace_start + (i as u64) * time_per_block;
-        let window_end = if i + 1 < block_timestamps.len() {
-            trace_start + ((i + 1) as u64) * time_per_block
+    for (i, &(first_write, last_write, block_num)) in sorted_blocks.iter().enumerate() {
+        // Window start: previous block's first_write, or trace_start
+        let window_start = if i == 0 {
+            trace_start
         } else {
-            trace_end + 1
+            sorted_blocks[i - 1].0 // previous block's first_write
         };
 
-        attribution_windows.push((window_start, window_end, block_num));
+        // Window end: this block's last_write
+        // We use last_write (not next block's first_write) to avoid attributing
+        // faults between blocks to the wrong block
+        let window_end = last_write;
+
+        // Only add if window is valid
+        if window_end > window_start {
+            attribution_windows.push((window_start, window_end, block_num));
+        }
     }
 
     // Sort windows by start time for binary search
     attribution_windows.sort_by_key(|(start, _, _)| *start);
 
-    // Step 5: Attribute page faults to blocks using the windows
+    // Step 4: Attribute page faults to blocks using ONLY the known windows
     // Key: block_number, Value: (branch, leaf, overflow, major, io_time_us, tables)
     let mut block_stats: HashMap<
         u64,
         (u32, u32, u32, u32, u64, std::collections::HashSet<String>),
     > = HashMap::new();
 
-    // Estimate I/O time per major fault (average disk seek + read ~200μs)
+    let mut total_attributed: u64 = 0;
     const ESTIMATED_IO_TIME_PER_MAJOR_FAULT_US: u64 = 200;
 
     for fault in page_faults {
@@ -3635,7 +3690,7 @@ fn generate_block_analysis(
             .binary_search_by(|(start, end, _)| {
                 if fault_ts < *start {
                     std::cmp::Ordering::Greater
-                } else if fault_ts >= *end {
+                } else if fault_ts > *end {
                     std::cmp::Ordering::Less
                 } else {
                     std::cmp::Ordering::Equal
@@ -3671,7 +3726,10 @@ fn generate_block_analysis(
                 let table_name = dbi_to_table_name(fault.active_dbi).to_string();
                 entry.5.insert(table_name);
             }
+
+            total_attributed += 1;
         }
+        // Faults outside known windows are NOT attributed (no estimation)
     }
 
     // Convert to sorted list
@@ -3694,13 +3752,10 @@ fn generate_block_analysis(
         )
         .collect();
 
-    // Sort by total faults descending (most impactful blocks first)
-    block_analysis.sort_by(|a, b| b.total_faults.cmp(&a.total_faults));
+    // Sort by block number (chronological order)
+    block_analysis.sort_by_key(|b| b.block_number);
 
-    // Limit to top 100 blocks to avoid excessive data
-    block_analysis.truncate(100);
-
-    block_analysis
+    (block_analysis, total_attributed, blocks_with_data)
 }
 
 /// Generate operation-to-page-type breakdown.
