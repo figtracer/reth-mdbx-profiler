@@ -3380,11 +3380,8 @@ fn generate_batch_analysis(
     }
 
     // Step 4: Build batch windows and attribute faults
-    // Window for batch N = [commit(N-1), commit(N)]
-    // First batch starts at trace_start
+    // Each batch's window = [begin_ts, commit_ts] (the transaction's active period)
     let mut batches: Vec<BatchAnalysis> = Vec::new();
-
-    let mut prev_commit_ts = trace_start;
 
     for (batch_idx, &(begin_ts, commit_ts, latency_ns, txn_ptr)) in sorted_txns.iter().enumerate() {
         // Get blocks for this transaction
@@ -3402,8 +3399,9 @@ fn generate_batch_analysis(
             )
         };
 
-        // Attribution window: from previous commit to this commit
-        let window_start = prev_commit_ts;
+        // Attribution window: the transaction's active period (begin to commit)
+        // This attributes faults to the batch that was actively processing when they occurred
+        let window_start = begin_ts;
         let window_end = commit_ts;
 
         // Count faults in this window
@@ -3451,8 +3449,6 @@ fn generate_batch_analysis(
             end_time_ns: window_end.saturating_sub(trace_start),
             commit_latency_us: latency_ns / 1000,
         });
-
-        prev_commit_ts = commit_ts;
     }
 
     batches
