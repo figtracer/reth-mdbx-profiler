@@ -267,6 +267,21 @@ pub fn generate_html(data: &ViewerData) -> String {
                             <span class="card-hint">Each batch = 1 RW transaction (multiple blocks)</span>
                         </div>
                         <div class="card-body" style="padding: 16px;">
+                            <!-- Attribution stats banner -->
+                            <div id="batch-attribution-stats" class="attribution-stats-banner" style="display:none; margin-bottom: 16px; padding: 12px; background: #1a1a24; border-radius: 8px; border-left: 3px solid #3b82f6;">
+                                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
+                                    <div>
+                                        <span style="color: #a1a1aa; font-size: 12px;">Attribution Confidence:</span>
+                                        <span id="batch-attribution-pct" style="color: #3b82f6; font-weight: 600; font-size: 14px; margin-left: 8px;">0%</span>
+                                    </div>
+                                    <div style="display: flex; gap: 20px; font-size: 12px;">
+                                        <span><span style="color: #71717a;">RW Commits:</span> <span id="batch-rw-commits" style="color: #e4e4e7;">0</span></span>
+                                        <span><span style="color: #71717a;">Blocks with data:</span> <span id="batch-blocks-count" style="color: #e4e4e7;">0</span></span>
+                                        <span><span style="color: #71717a;">Attributed:</span> <span id="batch-attributed-faults" style="color: #22c55e;">0</span></span>
+                                        <span><span style="color: #71717a;">Unattributed:</span> <span id="batch-unattributed-faults" style="color: #f59e0b;">0</span></span>
+                                    </div>
+                                </div>
+                            </div>
                             <div id="block-histogram-container" style="height: 200px; position: relative;">
                                 <canvas id="block-histogram-canvas"></canvas>
                             </div>
@@ -1908,6 +1923,16 @@ document.getElementById('export-compact-btn').addEventListener('click', () => {
             traversal_efficiency_score: DATA.btree_viz.traversal_efficiency_score,
             tree_depth_estimates: DATA.btree_viz.tree_depth_estimates,
             operation_page_types: DATA.btree_viz.operation_page_types.slice(0, 10),
+            attribution_stats: DATA.btree_viz.attribution_stats ? {
+                total_faults: DATA.btree_viz.attribution_stats.total_faults,
+                batch_attributed_faults: DATA.btree_viz.attribution_stats.batch_attributed_faults,
+                block_attributed_faults: DATA.btree_viz.attribution_stats.block_attributed_faults,
+                unattributed_faults: DATA.btree_viz.attribution_stats.unattributed_faults,
+                batch_attribution_pct: DATA.btree_viz.attribution_stats.batch_attribution_pct,
+                block_attribution_pct: DATA.btree_viz.attribution_stats.block_attribution_pct,
+                rw_commits_detected: DATA.btree_viz.attribution_stats.rw_commits_detected,
+                blocks_with_writes: DATA.btree_viz.attribution_stats.blocks_with_writes
+            } : null,
             batch_analysis: DATA.btree_viz.batch_analysis ? DATA.btree_viz.batch_analysis.map(b => ({
                 batch_index: b.batch_index,
                 first_block: b.first_block,
@@ -2338,7 +2363,30 @@ function initBTree() {
     if (bv && bv.has_data && bv.batch_analysis && bv.batch_analysis.length) {
         document.getElementById('block-analysis-section').style.display = 'block';
         drawBatchAnalysis(bv.batch_analysis);
-    } else if (bv && bv.has_data && bv.block_analysis.length) {
+
+        // Show attribution stats if available
+        if (bv.attribution_stats) {
+            const stats = bv.attribution_stats;
+            document.getElementById('batch-attribution-stats').style.display = 'block';
+            document.getElementById('batch-attribution-pct').textContent = stats.batch_attribution_pct.toFixed(1) + '%';
+            document.getElementById('batch-rw-commits').textContent = stats.rw_commits_detected;
+            document.getElementById('batch-blocks-count').textContent = stats.blocks_with_writes;
+            document.getElementById('batch-attributed-faults').textContent = fmt(stats.batch_attributed_faults);
+            document.getElementById('batch-unattributed-faults').textContent = fmt(stats.unattributed_faults);
+
+            // Color code the attribution percentage
+            const pctEl = document.getElementById('batch-attribution-pct');
+            if (stats.batch_attribution_pct >= 90) {
+                pctEl.style.color = '#22c55e'; // green
+            } else if (stats.batch_attribution_pct >= 70) {
+                pctEl.style.color = '#3b82f6'; // blue
+            } else if (stats.batch_attribution_pct >= 50) {
+                pctEl.style.color = '#f59e0b'; // amber
+            } else {
+                pctEl.style.color = '#ef4444'; // red
+            }
+        }
+    } else if (bv && bv.has_data && bv.block_analysis && bv.block_analysis.length) {
         // Fallback to block analysis if no batch data
         document.getElementById('block-analysis-section').style.display = 'block';
         drawBlockAnalysis(bv.block_analysis);
