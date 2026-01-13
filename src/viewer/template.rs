@@ -2619,7 +2619,7 @@ function drawBlockAnalysis(blockAnalysis) {
 
         return `
             <tr>
-                <td>${fmt(block.block_number)}</td>
+                <td>${block.block_number.toLocaleString()}</td>
                 <td>${fmt(block.total_faults)}</td>
                 <td style="color: #f59e0b">${fmt(block.branch_faults)}</td>
                 <td style="color: #22c55e">${fmt(block.leaf_faults)}</td>
@@ -2693,8 +2693,8 @@ function drawBlockHistogram(blocks) {
     // X-axis labels
     ctx.textAlign = 'center';
     if (blocks.length > 0) {
-        ctx.fillText(fmt(blocks[0].block_number), padding.left, h - 10);
-        ctx.fillText(fmt(blocks[blocks.length - 1].block_number), w - padding.right, h - 10);
+        ctx.fillText(blocks[0].block_number.toLocaleString(), padding.left + 30, h - 10);
+        ctx.fillText(blocks[blocks.length - 1].block_number.toLocaleString(), w - padding.right - 30, h - 10);
     }
 }
 

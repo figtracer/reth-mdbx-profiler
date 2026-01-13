@@ -5,7 +5,7 @@
 
 mod template;
 
-use crate::event::{CursorEvent, PageFaultEvent, TxnEvent, dbi_to_table_name, is_pre_trace_cursor};
+use crate::event::{dbi_to_table_name, is_pre_trace_cursor, CursorEvent, PageFaultEvent, TxnEvent};
 use crate::mdbx_metadata::{PageAttribution, RethTable};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -3211,11 +3211,6 @@ fn generate_tree_traversal_viz(page_faults: &[&PageFaultEvent]) -> TreeTraversal
         tables,
     }
 }
-
-// =============================================================================
-// BTREE_VIZ_PLAN Phase 1: Comprehensive B+ Tree Visualization Generation
-// =============================================================================
-
 /// Generate comprehensive B+ tree visualization data.
 /// This includes per-block analysis, operation-to-page-type breakdown,
 /// tree depth estimates, and traversal efficiency scoring.
@@ -3259,16 +3254,30 @@ fn generate_btree_visualization(
 }
 
 /// Generate per-block analysis by correlating page faults with block numbers
-/// extracted from cursor event keys.
+/// using inter-block gap attribution.
+///
+/// This algorithm uses the insight that for sequential block processing at the tip:
+/// - Writes to changeset tables (AccountChangeSets, StorageChangeSets) happen at the END
+///   of block execution
+/// - The first write with block N's key marks the end of block N's execution
+/// - All page faults between first_write(N) and first_write(N+1) belong to block N+1's
+///   execution phase
+///
+/// This correctly attributes faults from the execution phase (reads from HashedAccounts,
+/// Tries, etc.) to the block being executed, not just faults during the write phase.
 fn generate_block_analysis(
     page_faults: &[&PageFaultEvent],
     cursor_events: &[CursorEvent],
 ) -> Vec<BlockAnalysis> {
     use crate::event::MdbxPageType;
 
-    // Build a map of timestamp ranges to block numbers from write operations
-    // Key: (start_ts, end_ts), Value: block_number
-    let mut block_time_ranges: Vec<(u64, u64, u64)> = Vec::new();
+    if page_faults.is_empty() {
+        return Vec::new();
+    }
+
+    // Step 1: Find the first write timestamp for each block number
+    // Key: block_number, Value: first_write_timestamp
+    let mut first_write_per_block: HashMap<u64, u64> = HashMap::new();
 
     for event in cursor_events {
         // Only consider write operations to block-keyed tables
@@ -3277,21 +3286,63 @@ fn generate_block_analysis(
         }
 
         if let Some(block) = extract_block_from_key(event.dbi, &event.key_data, event.key_size) {
-            let start_ts = event.timestamp_ns;
-            let end_ts = event.timestamp_ns + event.latency_ns;
-            block_time_ranges.push((start_ts, end_ts, block));
+            first_write_per_block
+                .entry(block)
+                .and_modify(|ts| *ts = (*ts).min(event.timestamp_ns))
+                .or_insert(event.timestamp_ns);
         }
     }
 
-    if block_time_ranges.is_empty() {
+    if first_write_per_block.is_empty() {
         return Vec::new();
     }
 
-    // Sort by start time for efficient lookup
-    block_time_ranges.sort_by_key(|(start, _, _)| *start);
+    // Step 2: Create sorted list of (first_write_timestamp, block_number)
+    let mut block_boundaries: Vec<(u64, u64)> = first_write_per_block
+        .into_iter()
+        .map(|(block, ts)| (ts, block))
+        .collect();
+    block_boundaries.sort_by_key(|(ts, _)| *ts);
 
-    // Group page faults by block number
-    // Key: block_number, Value: BlockAnalysis data
+    // Step 3: Determine trace time bounds
+    let trace_start = page_faults.iter().map(|f| f.timestamp_ns).min().unwrap();
+    let trace_end = page_faults.iter().map(|f| f.timestamp_ns).max().unwrap();
+
+    // Step 4: Build attribution windows using inter-block gaps
+    // Window for block N = [first_write(N-1), first_write(N))
+    // - Faults before first block's write → attributed to first block (execution phase)
+    // - Faults in [first_write(N), first_write(N+1)) → attributed to block N+1
+    // - Faults after last block's write → attributed to last block (write phase + tail)
+    //
+    // Format: (start_ts, end_ts, block_number)
+    let mut attribution_windows: Vec<(u64, u64, u64)> = Vec::new();
+
+    if !block_boundaries.is_empty() {
+        // First window: trace_start to first block's write → first block execution
+        let (first_write_ts, first_block) = block_boundaries[0];
+        if trace_start < first_write_ts {
+            attribution_windows.push((trace_start, first_write_ts, first_block));
+        }
+
+        // Middle windows: [first_write(N), first_write(N+1)) → block N+1 execution
+        for i in 0..block_boundaries.len() - 1 {
+            let (current_write_ts, _current_block) = block_boundaries[i];
+            let (next_write_ts, next_block) = block_boundaries[i + 1];
+            attribution_windows.push((current_write_ts, next_write_ts, next_block));
+        }
+
+        // Last window: last block's write to trace_end → last block (write phase + any tail)
+        let (last_write_ts, last_block) = block_boundaries[block_boundaries.len() - 1];
+        if last_write_ts < trace_end {
+            attribution_windows.push((last_write_ts, trace_end + 1, last_block));
+        }
+    }
+
+    // Sort windows by start time for binary search
+    attribution_windows.sort_by_key(|(start, _, _)| *start);
+
+    // Step 5: Attribute page faults to blocks using the windows
+    // Key: block_number, Value: (branch, leaf, overflow, major, io_time_us, tables)
     let mut block_stats: HashMap<
         u64,
         (u32, u32, u32, u32, u64, std::collections::HashSet<String>),
@@ -3303,27 +3354,21 @@ fn generate_block_analysis(
     for fault in page_faults {
         let fault_ts = fault.timestamp_ns;
 
-        // Find which block this fault belongs to (if any)
-        // Use binary search to find potential matching time ranges
-        let search_idx = block_time_ranges
-            .binary_search_by(|(start, _, _)| start.cmp(&fault_ts))
-            .unwrap_or_else(|i| i);
+        // Binary search to find the window containing this fault
+        let window_idx = attribution_windows
+            .binary_search_by(|(start, end, _)| {
+                if fault_ts < *start {
+                    std::cmp::Ordering::Greater
+                } else if fault_ts >= *end {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .ok();
 
-        // Check nearby ranges (fault could be during a block's processing window)
-        let check_start = search_idx.saturating_sub(10);
-        let check_end = (search_idx + 10).min(block_time_ranges.len());
-
-        let mut matched_block: Option<u64> = None;
-        for i in check_start..check_end {
-            let (start, end, block) = block_time_ranges[i];
-            if fault_ts >= start && fault_ts <= end {
-                matched_block = Some(block);
-                break;
-            }
-        }
-
-        // If we found a matching block, attribute this fault to it
-        if let Some(block_num) = matched_block {
+        if let Some(idx) = window_idx {
+            let (_, _, block_num) = attribution_windows[idx];
             let is_major = fault.is_major_fault();
             let page_type = fault.page_type();
 
