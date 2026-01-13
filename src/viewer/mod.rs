@@ -664,6 +664,10 @@ pub struct TreeDepthStats {
     pub depth_distribution: Vec<(u32, u64)>,
     /// Operations by depth bucket for histogram
     pub depth_histogram: Vec<DepthBucket>,
+    /// Per-table depth statistics
+    pub by_table: Vec<TableDepthStats>,
+    /// Per-operation type depth statistics
+    pub by_operation: Vec<OperationDepthStats>,
 }
 
 /// Bucket for depth histogram
@@ -674,6 +678,32 @@ pub struct DepthBucket {
     pub percentage: f64,
     pub avg_faults: f64,
     pub avg_latency_us: f64,
+}
+
+/// Per-table depth statistics
+#[derive(Debug, Serialize)]
+pub struct TableDepthStats {
+    pub table_name: String,
+    pub dbi: u32,
+    pub ops_count: u64,
+    pub max_depth: u32,
+    pub avg_depth: f64,
+    pub avg_faults: f64,
+    pub avg_latency_us: f64,
+    /// Distribution: how many ops at each depth level
+    pub depth_distribution: Vec<(u32, u64)>,
+}
+
+/// Per-operation type depth statistics
+#[derive(Debug, Serialize)]
+pub struct OperationDepthStats {
+    pub operation: String,
+    pub ops_count: u64,
+    pub max_depth: u32,
+    pub avg_depth: f64,
+    pub avg_faults: f64,
+    pub avg_latency_us: f64,
+    pub is_seek: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1572,12 +1602,101 @@ fn compute_tree_depth_stats(events: &[CursorEvent]) -> TreeDepthStats {
         .collect();
     depth_histogram.sort_by_key(|b| b.depth);
 
+    // Per-table depth statistics
+    // Key: dbi, Value: (count, total_depth, total_faults, total_latency_us, max_depth, depth_distribution)
+    let mut table_stats: HashMap<u32, (u64, u64, u64, u64, u32, HashMap<u32, u64>)> =
+        HashMap::new();
+    for event in &events_with_depth {
+        let entry = table_stats
+            .entry(event.dbi)
+            .or_insert((0, 0, 0, 0, 0, HashMap::new()));
+        entry.0 += 1; // count
+        entry.1 += event.max_tree_depth as u64; // total_depth
+        entry.2 += event.faults_during_op as u64; // total_faults
+        entry.3 += event.latency_ns / 1000; // total_latency_us
+        if event.max_tree_depth > entry.4 {
+            entry.4 = event.max_tree_depth; // max_depth
+        }
+        *entry.5.entry(event.max_tree_depth).or_insert(0) += 1; // depth_distribution
+    }
+
+    let mut by_table: Vec<TableDepthStats> = table_stats
+        .into_iter()
+        .map(
+            |(dbi, (count, total_depth, total_faults, total_latency_us, max_depth, dist))| {
+                let mut depth_distribution: Vec<_> = dist.into_iter().collect();
+                depth_distribution.sort_by_key(|(d, _)| *d);
+                TableDepthStats {
+                    table_name: dbi_to_table_name(dbi).to_string(),
+                    dbi,
+                    ops_count: count,
+                    max_depth,
+                    avg_depth: total_depth as f64 / count as f64,
+                    avg_faults: total_faults as f64 / count as f64,
+                    avg_latency_us: total_latency_us as f64 / count as f64,
+                    depth_distribution,
+                }
+            },
+        )
+        .collect();
+    // Sort by avg_depth descending (deepest tables first)
+    by_table.sort_by(|a, b| {
+        b.avg_depth
+            .partial_cmp(&a.avg_depth)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Per-operation type depth statistics
+    // Key: cursor_op name, Value: (count, total_depth, total_faults, total_latency_us, max_depth, is_seek)
+    let mut op_stats: HashMap<String, (u64, u64, u64, u64, u32, bool)> = HashMap::new();
+    for event in &events_with_depth {
+        let op = event.cursor_op();
+        let op_name = op.name().to_string();
+        let is_seek = op.is_seek();
+        let entry = op_stats.entry(op_name).or_insert((0, 0, 0, 0, 0, is_seek));
+        entry.0 += 1; // count
+        entry.1 += event.max_tree_depth as u64; // total_depth
+        entry.2 += event.faults_during_op as u64; // total_faults
+        entry.3 += event.latency_ns / 1000; // total_latency_us
+        if event.max_tree_depth > entry.4 {
+            entry.4 = event.max_tree_depth; // max_depth
+        }
+    }
+
+    let mut by_operation: Vec<OperationDepthStats> = op_stats
+        .into_iter()
+        .map(
+            |(
+                op_name,
+                (count, total_depth, total_faults, total_latency_us, max_depth, is_seek),
+            )| {
+                OperationDepthStats {
+                    operation: op_name,
+                    ops_count: count,
+                    max_depth,
+                    avg_depth: total_depth as f64 / count as f64,
+                    avg_faults: total_faults as f64 / count as f64,
+                    avg_latency_us: total_latency_us as f64 / count as f64,
+                    is_seek,
+                }
+            },
+        )
+        .collect();
+    // Sort by avg_depth descending (deepest operations first)
+    by_operation.sort_by(|a, b| {
+        b.avg_depth
+            .partial_cmp(&a.avg_depth)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
     TreeDepthStats {
         ops_with_depth_data,
         max_depth_observed,
         avg_depth,
         depth_distribution,
         depth_histogram,
+        by_table,
+        by_operation,
     }
 }
 

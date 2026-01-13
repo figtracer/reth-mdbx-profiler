@@ -270,6 +270,45 @@ pub fn generate_html(data: &ViewerData) -> String {
                                     </table>
                                 </div>
                             </div>
+                            <!-- Per-table and per-operation depth breakdown -->
+                            <div class="two-col" style="margin-top: 20px;">
+                                <div>
+                                    <h4 style="color: #e4e4e7; margin-bottom: 12px; font-size: 13px;">Depth by Table <span style="color: #71717a; font-weight: normal;">(sorted by avg depth)</span></h4>
+                                    <div style="max-height: 300px; overflow-y: auto;">
+                                        <table class="compact-table" id="depth-by-table">
+                                            <thead>
+                                                <tr>
+                                                    <th>Table</th>
+                                                    <th>Ops</th>
+                                                    <th>Max</th>
+                                                    <th>Avg Depth</th>
+                                                    <th>Avg Faults</th>
+                                                    <th>Avg Latency</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody></tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                                <div>
+                                    <h4 style="color: #e4e4e7; margin-bottom: 12px; font-size: 13px;">Depth by Operation <span style="color: #71717a; font-weight: normal;">(sorted by avg depth)</span></h4>
+                                    <div style="max-height: 300px; overflow-y: auto;">
+                                        <table class="compact-table" id="depth-by-operation">
+                                            <thead>
+                                                <tr>
+                                                    <th>Operation</th>
+                                                    <th>Type</th>
+                                                    <th>Ops</th>
+                                                    <th>Max</th>
+                                                    <th>Avg Depth</th>
+                                                    <th>Avg Faults</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody></tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
 
@@ -1971,7 +2010,25 @@ document.getElementById('export-compact-btn').addEventListener('click', () => {
                 ops_with_depth_data: DATA.cursor_data.summary.tree_depth_stats.ops_with_depth_data,
                 max_depth_observed: DATA.cursor_data.summary.tree_depth_stats.max_depth_observed,
                 avg_depth: DATA.cursor_data.summary.tree_depth_stats.avg_depth,
-                depth_histogram: DATA.cursor_data.summary.tree_depth_stats.depth_histogram
+                depth_histogram: DATA.cursor_data.summary.tree_depth_stats.depth_histogram,
+                // Per-table depth stats (sorted by avg depth descending)
+                by_table: DATA.cursor_data.summary.tree_depth_stats.by_table?.slice(0, 20).map(t => ({
+                    table: t.table_name,
+                    ops: t.ops_count,
+                    max_depth: t.max_depth,
+                    avg_depth: t.avg_depth,
+                    avg_faults: t.avg_faults,
+                    avg_latency_us: t.avg_latency_us
+                })) || [],
+                // Per-operation depth stats (sorted by avg depth descending)
+                by_operation: DATA.cursor_data.summary.tree_depth_stats.by_operation?.map(op => ({
+                    operation: op.operation,
+                    is_seek: op.is_seek,
+                    ops: op.ops_count,
+                    max_depth: op.max_depth,
+                    avg_depth: op.avg_depth,
+                    avg_faults: op.avg_faults
+                })) || []
             } : null
         } : null,
         transactions: DATA.txn_data.has_data ? {
@@ -2425,6 +2482,16 @@ function initBTree() {
         if (depthStats.depth_histogram && depthStats.depth_histogram.length > 0) {
             drawDepthHistogram(depthStats.depth_histogram);
             fillDepthTable(depthStats.depth_histogram);
+        }
+
+        // Fill per-table depth stats
+        if (depthStats.by_table && depthStats.by_table.length > 0) {
+            fillDepthByTable(depthStats.by_table);
+        }
+
+        // Fill per-operation depth stats
+        if (depthStats.by_operation && depthStats.by_operation.length > 0) {
+            fillDepthByOperation(depthStats.by_operation);
         }
     }
 
@@ -3167,6 +3234,49 @@ function fillDepthTable(histogram) {
             <td>${bucket.avg_latency_us.toFixed(0)}us</td>
         </tr>
     `).join('');
+}
+
+// Fill per-table depth stats table
+function fillDepthByTable(tables) {
+    const tbody = document.querySelector('#depth-by-table tbody');
+    if (!tbody) return;
+
+    tbody.innerHTML = tables.slice(0, 20).map(t => {
+        // Color code by avg depth
+        const depthColor = t.avg_depth >= 3 ? '#ef4444' : t.avg_depth >= 2 ? '#f59e0b' : '#22c55e';
+        return `
+            <tr>
+                <td>${t.table_name}</td>
+                <td>${fmt(t.ops_count)}</td>
+                <td>${t.max_depth}</td>
+                <td style="color: ${depthColor}; font-weight: 600;">${t.avg_depth.toFixed(2)}</td>
+                <td>${t.avg_faults.toFixed(1)}</td>
+                <td>${t.avg_latency_us.toFixed(0)}us</td>
+            </tr>
+        `;
+    }).join('');
+}
+
+// Fill per-operation depth stats table
+function fillDepthByOperation(operations) {
+    const tbody = document.querySelector('#depth-by-operation tbody');
+    if (!tbody) return;
+
+    tbody.innerHTML = operations.map(op => {
+        // Color code by avg depth
+        const depthColor = op.avg_depth >= 3 ? '#ef4444' : op.avg_depth >= 2 ? '#f59e0b' : '#22c55e';
+        const typeLabel = op.is_seek ? '<span style="color: #f59e0b;">seek</span>' : '<span style="color: #22c55e;">nav</span>';
+        return `
+            <tr>
+                <td>${op.operation}</td>
+                <td>${typeLabel}</td>
+                <td>${fmt(op.ops_count)}</td>
+                <td>${op.max_depth}</td>
+                <td style="color: ${depthColor}; font-weight: 600;">${op.avg_depth.toFixed(2)}</td>
+                <td>${op.avg_faults.toFixed(1)}</td>
+            </tr>
+        `;
+    }).join('');
 }
 
 // Helper: format large numbers with K suffix
