@@ -1246,16 +1246,28 @@ fn generate_unified_table_stats(
                 .or_else(|| slow_ops_breakdown.first().map(|o| o.operation.clone()))
                 .unwrap_or_default();
 
+            // Calculate severity based on fault percentage
+            let fault_pct = if total_faults > 0 {
+                *faults as f64 / total_faults as f64 * 100.0
+            } else {
+                0.0
+            };
+            let severity = if fault_pct > 30.0 {
+                "critical".to_string()
+            } else if fault_pct > 15.0 {
+                "high".to_string()
+            } else if fault_pct > 5.0 {
+                "medium".to_string()
+            } else {
+                "low".to_string()
+            };
+
             Some(UnifiedTableStats {
                 name: table_name.clone(),
                 dbi,
                 faults: *faults,
                 major_faults: *major_faults,
-                fault_percentage: if total_faults > 0 {
-                    *faults as f64 / total_faults as f64 * 100.0
-                } else {
-                    0.0
-                },
+                fault_percentage: fault_pct,
                 total_ops: cursor_stats.map(|s| s.ops).unwrap_or(0),
                 slow_ops: slow_data.map(|s| s.slow_op_count).unwrap_or(0),
                 slow_ops_percentage: slow_data.map(|s| s.slow_op_percentage).unwrap_or(0.0),
@@ -1263,6 +1275,12 @@ fn generate_unified_table_stats(
                 avg_latency_us: slow_data.map(|s| s.avg_slow_latency_us).unwrap_or(0.0),
                 max_latency_us: slow_data.map(|s| s.max_latency_us).unwrap_or(0.0),
                 top_operation,
+                // Page type fields - will be populated from tree_traversal data if available
+                branch_faults: 0,
+                leaf_faults: 0,
+                overflow_faults: 0,
+                severity,
+                reth_source: None,
                 details: TableDrillDown {
                     faults_by_op,
                     faults_by_cursor_op,
@@ -3089,7 +3107,7 @@ fn generate_tree_traversal_viz(page_faults: &[&PageFaultEvent]) -> TreeTraversal
             };
 
             TableTreeStats {
-                name: crate::event::dbi_to_table_name(dbi),
+                name: crate::event::dbi_to_table_name(dbi).to_string(),
                 dbi,
                 total_faults: total,
                 branch_faults: branch,
