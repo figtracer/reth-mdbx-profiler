@@ -2414,7 +2414,7 @@ function initBTree() {
     }
 
     // Measured tree depth stats (from BPF per-operation tracking)
-    const depthStats = window.PROCESSED?.cursor_ops?.tree_depth_stats;
+    const depthStats = DATA.cursor_data?.summary?.tree_depth_stats;
     if (depthStats && depthStats.ops_with_depth_data > 0) {
         document.getElementById('measured-depth-section').style.display = 'block';
         document.getElementById('measured-max-depth').textContent = depthStats.max_depth_observed;
