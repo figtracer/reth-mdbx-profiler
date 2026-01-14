@@ -983,21 +983,23 @@ impl StreamingAggregator {
             block_range: block_range.clone(),
         };
 
-        // Build timeline
-        let mut timeline: Vec<_> = self
-            .timeline_buckets
+        // Build timeline - take ownership to avoid borrow issues
+        let bucket_ms = self.config.bucket_ms;
+        let max_timeline_points = self.config.max_timeline_points;
+        let timeline_buckets = std::mem::take(&mut self.timeline_buckets);
+        let mut timeline: Vec<_> = timeline_buckets
             .into_iter()
             .map(|(bucket, (faults, major, pages))| TimelinePoint {
-                time_ms: bucket * self.config.bucket_ms,
+                time_ms: bucket * bucket_ms,
                 faults,
                 major_faults: major,
                 unique_pages: pages.len() as u32,
             })
             .collect();
         timeline.sort_by_key(|p| p.time_ms);
-        if timeline.len() > self.config.max_timeline_points {
+        if timeline.len() > max_timeline_points {
             // Downsample
-            let step = timeline.len() / self.config.max_timeline_points;
+            let step = timeline.len() / max_timeline_points;
             timeline = timeline.into_iter().step_by(step.max(1)).collect();
         }
 
@@ -1945,16 +1947,80 @@ fn op_type_name(op_type: u32) -> &'static str {
 }
 
 /// Process a trace file in streaming mode
+/// Progress information passed to the callback
+#[derive(Debug, Clone)]
+pub struct ProgressInfo {
+    /// Lines processed so far
+    pub lines: u64,
+    /// Bytes read so far
+    pub bytes_read: u64,
+    /// Total file size in bytes (if known)
+    pub total_bytes: Option<u64>,
+    /// Page faults processed
+    pub page_faults: u64,
+    /// Cursor events processed
+    pub cursor_events: u64,
+    /// Transaction events processed
+    pub txn_events: u64,
+    /// Elapsed time in seconds
+    pub elapsed_secs: f64,
+}
+
+impl ProgressInfo {
+    /// Calculate percentage complete (0-100)
+    pub fn percent_complete(&self) -> Option<f64> {
+        self.total_bytes
+            .map(|total| (self.bytes_read as f64 / total as f64 * 100.0).min(100.0))
+    }
+
+    /// Calculate processing speed in MB/s
+    pub fn speed_mbps(&self) -> f64 {
+        if self.elapsed_secs > 0.0 {
+            self.bytes_read as f64 / 1e6 / self.elapsed_secs
+        } else {
+            0.0
+        }
+    }
+
+    /// Estimate remaining time in seconds
+    pub fn eta_secs(&self) -> Option<f64> {
+        let speed = self.speed_mbps();
+        if speed > 0.0 {
+            self.total_bytes.map(|total| {
+                let remaining_bytes = total.saturating_sub(self.bytes_read);
+                remaining_bytes as f64 / 1e6 / speed
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Format ETA as human-readable string
+    pub fn eta_string(&self) -> String {
+        match self.eta_secs() {
+            Some(secs) if secs < 60.0 => format!("{:.0}s", secs),
+            Some(secs) if secs < 3600.0 => format!("{:.0}m {:.0}s", secs / 60.0, secs % 60.0),
+            Some(secs) => format!("{:.0}h {:.0}m", secs / 3600.0, (secs % 3600.0) / 60.0),
+            None => "??".to_string(),
+        }
+    }
+}
+
 pub fn process_trace_streaming<R: std::io::Read>(
     reader: R,
     config: StreamingConfig,
-    progress_callback: Option<Box<dyn Fn(u64, u64) + Send>>,
+    total_size: Option<u64>,
+    progress_callback: Option<Box<dyn Fn(&ProgressInfo) + Send>>,
 ) -> anyhow::Result<ViewerData> {
     let buf_reader = BufReader::with_capacity(64 * 1024 * 1024, reader); // 64MB buffer
     let mut aggregator = StreamingAggregator::new(config);
 
     let mut line_count = 0u64;
     let mut bytes_read = 0u64;
+    let mut page_fault_count = 0u64;
+    let mut cursor_event_count = 0u64;
+    let mut txn_event_count = 0u64;
+    let start_time = std::time::Instant::now();
 
     for line_result in buf_reader.lines() {
         let line = match line_result {
@@ -1968,16 +2034,25 @@ pub fn process_trace_streaming<R: std::io::Read>(
         bytes_read += line.len() as u64 + 1; // +1 for newline
         line_count += 1;
 
-        // Progress callback every 1M lines
-        if line_count % 1_000_000 == 0 {
+        // Progress callback every 500K lines for more responsive updates
+        if line_count % 500_000 == 0 {
             if let Some(ref cb) = progress_callback {
-                cb(line_count, bytes_read);
+                cb(&ProgressInfo {
+                    lines: line_count,
+                    bytes_read,
+                    total_bytes: total_size,
+                    page_faults: page_fault_count,
+                    cursor_events: cursor_event_count,
+                    txn_events: txn_event_count,
+                    elapsed_secs: start_time.elapsed().as_secs_f64(),
+                });
             }
         }
 
         // Try to parse as page fault
         if let Ok(event) = serde_json::from_str::<PageFaultEvent>(&line) {
             if event.event_type == 1 || event.event_type == 2 {
+                page_fault_count += 1;
                 aggregator.process_page_fault(&event);
                 continue;
             }
@@ -1986,6 +2061,7 @@ pub fn process_trace_streaming<R: std::io::Read>(
         // Try to parse as txn event
         if let Ok(event) = serde_json::from_str::<TxnEvent>(&line) {
             if event.event_type >= 7 && event.event_type <= 9 {
+                txn_event_count += 1;
                 aggregator.process_txn_event(&event);
                 continue;
             }
@@ -1993,6 +2069,7 @@ pub fn process_trace_streaming<R: std::io::Read>(
 
         // Try to parse as cursor event
         if let Ok(event) = serde_json::from_str::<CursorEvent>(&line) {
+            cursor_event_count += 1;
             aggregator.process_cursor_event(&event);
             continue;
         }
@@ -2000,10 +2077,18 @@ pub fn process_trace_streaming<R: std::io::Read>(
         aggregator.add_parse_error();
     }
 
+    let elapsed = start_time.elapsed();
     eprintln!(
-        "Processed {} lines, {} bytes, {} parse errors",
+        "\nProcessed {} lines ({} page faults, {} cursor ops, {} txns) in {:.1}s",
         line_count,
-        bytes_read,
+        page_fault_count,
+        cursor_event_count,
+        txn_event_count,
+        elapsed.as_secs_f64()
+    );
+    eprintln!(
+        "Average speed: {:.1} MB/s, {} parse errors",
+        bytes_read as f64 / 1e6 / elapsed.as_secs_f64(),
         aggregator.parse_errors()
     );
 

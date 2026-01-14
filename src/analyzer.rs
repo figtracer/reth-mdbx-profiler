@@ -193,28 +193,34 @@ fn run_streaming_mode(cli: &Cli) -> anyhow::Result<()> {
         ..Default::default()
     };
 
-    // Progress callback
-    let start_time = std::time::Instant::now();
-    let progress_callback: Option<Box<dyn Fn(u64, u64) + Send>> =
-        Some(Box::new(move |lines, bytes| {
-            let elapsed = start_time.elapsed().as_secs_f64();
-            let mb_processed = bytes as f64 / 1e6;
-            let rate = mb_processed / elapsed;
-            let eta_secs = if rate > 0.0 {
-                ((file_size as f64 / 1e6) - mb_processed) / rate
-            } else {
-                0.0
-            };
+    // Progress callback with detailed info
+    use streaming::ProgressInfo;
+    let progress_callback: Option<Box<dyn Fn(&ProgressInfo) + Send>> =
+        Some(Box::new(move |info: &ProgressInfo| {
+            let pct = info.percent_complete().unwrap_or(0.0);
+            let speed = info.speed_mbps();
+            let eta = info.eta_string();
+
+            // Create a simple progress bar
+            let bar_width = 30;
+            let filled = (pct / 100.0 * bar_width as f64) as usize;
+            let bar: String = "█".repeat(filled) + &"░".repeat(bar_width - filled);
+
             eprint!(
-                "\rProcessed: {}M lines, {:.1}GB ({:.0} MB/s, ETA: {:.0}s)   ",
-                lines / 1_000_000,
-                bytes as f64 / 1e9,
-                rate,
-                eta_secs
+                "\r[{}] {:5.1}% | {:.1}GB/{:.1}GB | {:.0} MB/s | ETA: {} | {}M faults, {}M ops   ",
+                bar,
+                pct,
+                info.bytes_read as f64 / 1e9,
+                info.total_bytes.unwrap_or(0) as f64 / 1e9,
+                speed,
+                eta,
+                info.page_faults / 1_000_000,
+                info.cursor_events / 1_000_000,
             );
         }));
 
-    let data = streaming::process_trace_streaming(file, config, progress_callback)?;
+    let data =
+        streaming::process_trace_streaming(file, config, Some(file_size), progress_callback)?;
 
     eprintln!("\n"); // Clear progress line
 
