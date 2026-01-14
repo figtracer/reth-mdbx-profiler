@@ -313,7 +313,7 @@ pub fn generate_html(data: &ViewerData) -> String {
                     </div>
 
                     <!-- Tree Structure Visualization (Phase 2) -->
-                    <div class="card full-width">
+                    <div class="card full-width" style="margin-top: 24px;">
                         <div class="card-header">B+ Tree Structure by Table <span class="card-hint">Hover for details</span></div>
                         <div class="card-body" style="padding: 16px;">
                             <div id="tree-structure-container" style="display: flex; flex-wrap: wrap; gap: 16px; justify-content: flex-start;">
@@ -323,7 +323,7 @@ pub fn generate_html(data: &ViewerData) -> String {
                     </div>
 
                     <!-- Operation to Page Type Mapping (Phase 3) -->
-                    <div class="two-col">
+                    <div class="two-col" style="margin-top: 24px;">
                         <div class="card">
                             <div class="card-header">Operation → Page Type Distribution</div>
                             <div class="card-body" style="padding: 16px;">

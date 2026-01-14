@@ -343,6 +343,8 @@ pub struct StreamingAggregator {
     // Faults by op type (global)
     faults_by_op_type: HashMap<u32, (u64, u64)>,
     faults_by_cursor_op: HashMap<u32, (u64, u64)>,
+    // cursor_op -> (branch, leaf, overflow, major, total_faults)
+    cursor_op_page_types: HashMap<u32, (u32, u32, u32, u32, u32)>,
 
     // Operation fault histogram (from cursor events)
     fault_histogram: HashMap<u32, u64>, // faults_per_op -> count
@@ -369,6 +371,7 @@ pub struct StreamingAggregator {
 
     // Heatmap
     heatmap_data: Vec<Vec<u32>>,
+    heatmap_raw_data: HashMap<u32, Vec<u64>>, // time_bucket -> list of file offsets
     heatmap_initialized: bool,
 
     // Parse errors
@@ -444,6 +447,7 @@ impl StreamingAggregator {
             directly_attributed: 0,
             faults_by_op_type: HashMap::new(),
             faults_by_cursor_op: HashMap::new(),
+            cursor_op_page_types: HashMap::new(),
             fault_histogram: HashMap::new(),
             max_faults_per_op: 0,
             depth_distribution: HashMap::new(),
@@ -457,6 +461,7 @@ impl StreamingAggregator {
             batch_analyses: Vec::new(),
             batch_index: 0,
             heatmap_data,
+            heatmap_raw_data: HashMap::new(),
             heatmap_initialized: false,
             parse_errors: 0,
         }
@@ -524,6 +529,13 @@ impl StreamingAggregator {
         }
         timeline_entry.2.insert(page);
 
+        // Track (time_bucket, offset) for heatmap - store offset directly
+        // We'll convert to offset buckets during finalization when we know min/max
+        self.heatmap_raw_data
+            .entry(bucket as u32)
+            .or_insert_with(Vec::new)
+            .push(event.file_offset);
+
         // Direct attribution
         if event.has_active_op() {
             self.directly_attributed += 1;
@@ -578,6 +590,22 @@ impl StreamingAggregator {
                 if is_major {
                     global_entry.1 += 1;
                 }
+
+                // Track page type per cursor op for Operation → Page Type breakdown
+                let page_type_entry = self
+                    .cursor_op_page_types
+                    .entry(cursor_op)
+                    .or_insert((0, 0, 0, 0, 0));
+                match MdbxPageType::from_raw(page_type) {
+                    MdbxPageType::Branch => page_type_entry.0 += 1,
+                    MdbxPageType::Leaf => page_type_entry.1 += 1,
+                    MdbxPageType::Overflow => page_type_entry.2 += 1,
+                    _ => {}
+                }
+                if is_major {
+                    page_type_entry.3 += 1;
+                }
+                page_type_entry.4 += 1; // total faults
             }
 
             // Track table for batch analysis
@@ -940,25 +968,36 @@ impl StreamingAggregator {
         } else {
             1
         };
-        let offset_bucket_size = if self.max_offset > self.min_offset {
-            (self.max_offset - self.min_offset) / self.config.heatmap_offset_buckets as u64
+        let offset_range = self.max_offset - self.min_offset;
+        let offset_bucket_size = if offset_range > 0 {
+            offset_range / self.config.heatmap_offset_buckets as u64
         } else {
             1
         };
 
-        // Reinitialize heatmap based on timeline buckets
-        for (&bucket, &(faults, _, _)) in &self.timeline_buckets {
-            let time_idx =
-                ((bucket * self.config.bucket_ms * 1_000_000) / time_bucket_size) as usize;
-            if time_idx < self.config.heatmap_time_buckets as usize {
-                // Distribute faults across offset buckets (approximation)
-                let faults_per_bucket = faults / self.config.heatmap_offset_buckets;
-                for offset_idx in 0..self.config.heatmap_offset_buckets as usize {
-                    if time_idx < self.heatmap_data.len()
-                        && offset_idx < self.heatmap_data[time_idx].len()
-                    {
-                        self.heatmap_data[time_idx][offset_idx] += faults_per_bucket;
-                    }
+        // Use raw offset data to build accurate heatmap
+        for (&time_bucket, offsets) in &self.heatmap_raw_data {
+            // Convert time bucket (in bucket_ms units) to heatmap time index
+            let time_idx = ((time_bucket as u64 * self.config.bucket_ms * 1_000_000)
+                / time_bucket_size) as usize;
+            if time_idx >= self.config.heatmap_time_buckets as usize {
+                continue;
+            }
+
+            for &offset in offsets {
+                // Calculate offset bucket index
+                let offset_idx = if offset >= self.min_offset && offset_bucket_size > 0 {
+                    ((offset - self.min_offset) / offset_bucket_size) as usize
+                } else {
+                    0
+                };
+                // Clamp to valid range
+                let offset_idx = offset_idx.min(self.config.heatmap_offset_buckets as usize - 1);
+
+                if time_idx < self.heatmap_data.len()
+                    && offset_idx < self.heatmap_data[time_idx].len()
+                {
+                    self.heatmap_data[time_idx][offset_idx] += 1;
                 }
             }
         }
@@ -1915,11 +1954,43 @@ impl StreamingAggregator {
             100.0
         };
 
+        // Build operation → page type breakdown
+        let total_op_faults: u32 = self
+            .cursor_op_page_types
+            .values()
+            .map(|(_, _, _, _, total)| total)
+            .sum();
+        let mut operation_page_types: Vec<OperationPageTypeBreakdown> = self
+            .cursor_op_page_types
+            .iter()
+            .map(|(&cursor_op, &(branch, leaf, overflow, major, total))| {
+                let op = CursorOp::from_raw(cursor_op);
+                OperationPageTypeBreakdown {
+                    cursor_op: op.name().to_string(),
+                    branch_faults: branch,
+                    leaf_faults: leaf,
+                    overflow_faults: overflow,
+                    total_ops: total, // This is total faults, not ops - we don't track ops here
+                    avg_faults_per_op: 0.0, // Can't calculate without op count
+                    major_faults: major,
+                    fault_percentage: if total_op_faults > 0 {
+                        total as f64 / total_op_faults as f64 * 100.0
+                    } else {
+                        0.0
+                    },
+                }
+            })
+            .collect();
+        operation_page_types.sort_by(|a, b| {
+            (b.branch_faults + b.leaf_faults + b.overflow_faults)
+                .cmp(&(a.branch_faults + a.leaf_faults + a.overflow_faults))
+        });
+
         BTreeVisualization {
-            has_data: !self.batch_analyses.is_empty(),
+            has_data: !self.batch_analyses.is_empty() || !operation_page_types.is_empty(),
             batch_analysis: self.batch_analyses.clone(),
             block_analysis: vec![], // Not tracked in streaming mode
-            operation_page_types: vec![],
+            operation_page_types,
             block_range,
             tree_depth_estimates,
             traversal_efficiency_score: traversal_efficiency,
