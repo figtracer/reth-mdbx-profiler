@@ -23,17 +23,15 @@ pub fn generate_html(data: &ViewerData) -> String {
 <body>
     <div id="app">
         <nav class="tabs">
-            <button class="tab active" data-tab="physical">Overview</button>
-            <button class="tab" data-tab="memory">Memory</button>
+            <button class="tab active" data-tab="overview">Overview</button>
             <button class="tab" data-tab="tables">Tables</button>
-            <button class="tab" data-tab="btree">Page Types</button>
-            <button class="tab" data-tab="transactions">MDBX Txns</button>
+            <button class="tab" data-tab="resources">Resources</button>
             <button class="export-btn" id="export-compact-btn" title="Download JSON for analysis">Export</button>
         </nav>
 
         <main>
-            <!-- PHYSICAL TAB -->
-            <section id="physical" class="panel active">
+            <!-- OVERVIEW TAB -->
+            <section id="overview" class="panel active">
                 <!-- Top metrics row -->
                 <div class="metrics-row">
                     <div class="metric">
@@ -110,108 +108,12 @@ pub fn generate_html(data: &ViewerData) -> String {
                         </div>
                     </div>
                     <div class="card">
-                        <div class="card-header">Top Threads by Page Faults</div>
-                        <div class="card-body">
-                            <div class="threads-section">
-                                <div id="threads-summary"></div>
+                        <div class="card-header">Page Type Distribution</div>
+                        <div class="card-body" style="padding: 16px;">
+                            <div class="donut-container" style="display: flex; align-items: center; gap: 24px;">
+                                <canvas id="overview-page-type-donut" width="180" height="180"></canvas>
+                                <div class="donut-legend" id="overview-page-type-legend"></div>
                             </div>
-                        </div>
-                    </div>
-                </div>
-            </section>
-
-            <!-- MEMORY TAB - Working Set Analysis -->
-            <section id="memory" class="panel">
-                <div id="memory-no-data" class="no-data" style="display:none;">
-                    No working set data available.
-                </div>
-
-                <div id="memory-content">
-                    <!-- Summary banner -->
-                    <div class="memory-summary-banner" id="memory-summary-banner">
-                        <span id="memory-summary-text"></span>
-                    </div>
-
-                    <!-- Key metrics -->
-                    <div class="metrics-row">
-                        <div class="metric">
-                            <span class="metric-value" id="mem-unique-pages">0</span>
-                            <span class="metric-label">Unique Pages</span>
-                        </div>
-                        <div class="metric">
-                            <span class="metric-value" id="mem-working-set">0 GB</span>
-                            <span class="metric-label">Working Set</span>
-                        </div>
-                        <div class="metric">
-                            <span class="metric-value" id="mem-reuse-ratio">0%</span>
-                            <span class="metric-label">Page Reuse</span>
-                        </div>
-                        <div class="metric">
-                            <span class="metric-value" id="mem-avg-accesses">0</span>
-                            <span class="metric-label">Avg Accesses/Page</span>
-                        </div>
-                    </div>
-
-                    <!-- Cache simulation and Pareto chart -->
-                    <div class="two-col">
-                        <div class="card">
-                            <div class="card-header">Cache Hit Rate by RAM Size</div>
-                            <div class="card-body">
-                                <div class="cache-sim-chart" id="cache-sim-chart"></div>
-                                <table class="data-table" id="cache-sim-table">
-                                    <thead>
-                                        <tr>
-                                            <th>RAM (GB)</th>
-                                            <th>Cache Pages</th>
-                                            <th>Hit Rate</th>
-                                            <th>Faults Avoided/s</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody></tbody>
-                                </table>
-                            </div>
-                        </div>
-                        <div class="card">
-                            <div class="card-header">Hot Page Distribution (Pareto)</div>
-                            <div class="card-body">
-                                <div class="pareto-chart" id="pareto-chart"></div>
-                                <div class="pareto-stats" id="pareto-stats"></div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Reuse distance and per-table working set -->
-                    <div class="two-col">
-                        <div class="card">
-                            <div class="card-header">Page Reuse Distance Distribution</div>
-                            <div class="card-body">
-                                <div class="reuse-distance-chart" id="reuse-distance-chart"></div>
-                            </div>
-                        </div>
-                        <div class="card">
-                            <div class="card-header">Working Set by Table</div>
-                            <div class="card-body table-scroll">
-                                <table class="data-table" id="table-wss-table">
-                                    <thead>
-                                        <tr>
-                                            <th>Table</th>
-                                            <th>Unique Pages</th>
-                                            <th>Working Set</th>
-                                            <th>Accesses</th>
-                                            <th>Reuse %</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody></tbody>
-                                </table>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Time-windowed WSS -->
-                    <div class="card" id="time-wss-card" style="display:none;">
-                        <div class="card-header">Working Set Size Over Time (1-minute windows)</div>
-                        <div class="card-body">
-                            <div class="time-wss-stats" id="time-wss-stats"></div>
                         </div>
                     </div>
                 </div>
@@ -275,8 +177,8 @@ pub fn generate_html(data: &ViewerData) -> String {
                     <!-- Detailed table with expandable rows showing top 5 operations -->
                     <div class="card full-width">
                         <div class="card-header">
-                            I/O Impact by Table
-                            <span class="card-hint">Click row to expand and see top operations</span>
+                            Tables
+                            <span class="card-hint">Click row to expand details</span>
                         </div>
                         <div class="card-body compact-table-container" style="max-height: none; padding: 0;">
                             <table class="compact-table expandable-table" id="unified-tables">
@@ -285,9 +187,10 @@ pub fn generate_html(data: &ViewerData) -> String {
                                         <th style="width:30px;"></th>
                                         <th>Table</th>
                                         <th>Faults</th>
-                                        <th>% of Total</th>
-                                        <th>Major</th>
-                                        <th>Slow Ops</th>
+                                        <th>Major %</th>
+                                        <th>B:L Ratio</th>
+                                        <th>Working Set</th>
+                                        <th>Reuse %</th>
                                         <th>I/O Time</th>
                                     </tr>
                                 </thead>
@@ -298,325 +201,199 @@ pub fn generate_html(data: &ViewerData) -> String {
                 </div>
             </section>
 
-            <!-- PAGE TYPES TAB (Enhanced B+ Tree Visualization) -->
-            <section id="btree" class="panel">
-                <div id="btree-no-data" class="no-data" style="display:none;">
-                    No page type data available. Page type detection requires BPF to read MDBX page headers after faults.
-                </div>
+            <!-- RESOURCES TAB - Memory, Transactions, Threads -->
+            <section id="resources" class="panel">
+                <div id="resources-content">
+                    <!-- Memory Section -->
+                    <div class="section-header">Memory & Working Set</div>
 
-                <div id="btree-content">
-                    <!-- Top Overview Metrics -->
-                    <div class="metrics-row">
-                        <div class="metric">
-                            <span class="metric-value" id="page-type-total">0</span>
-                            <span class="metric-label">Total Faults</span>
-                        </div>
-                        <div class="metric">
-                            <span class="metric-value" id="branch-faults">0</span>
-                            <span class="metric-label">Branch (Traversal)</span>
-                        </div>
-                        <div class="metric">
-                            <span class="metric-value" id="leaf-faults">0</span>
-                            <span class="metric-label">Leaf (Data)</span>
-                        </div>
-                        <div class="metric">
-                            <span class="metric-value" id="traversal-ratio">0.0</span>
-                            <span class="metric-label">Branch:Leaf Ratio</span>
-                        </div>
-                        <div class="metric">
-                            <span class="metric-value" id="traversal-efficiency">0%</span>
-                            <span class="metric-label">Traversal Efficiency</span>
-                        </div>
+                    <div id="memory-no-data" class="no-data" style="display:none;">
+                        No working set data available.
                     </div>
 
-                    <!-- Measured Tree Depth Stats (from BPF per-operation tracking) -->
-                    <div class="card full-width" id="measured-depth-section" style="display:none;">
-                        <div class="card-header">Measured B+ Tree Depth <span class="card-hint">Actual depth from BPF per-operation tracking</span></div>
-                        <div class="card-body" style="padding: 16px;">
-                            <div class="metrics-row" style="margin-bottom: 16px;">
-                                <div class="metric">
-                                    <span class="metric-value" id="measured-max-depth">-</span>
-                                    <span class="metric-label">Max Depth Observed</span>
-                                </div>
-                                <div class="metric">
-                                    <span class="metric-value" id="measured-avg-depth">-</span>
-                                    <span class="metric-label">Avg Depth</span>
-                                </div>
-                                <div class="metric">
-                                    <span class="metric-value" id="measured-ops-count">-</span>
-                                    <span class="metric-label">Ops with Depth Data</span>
-                                </div>
+                    <div id="memory-content">
+                        <!-- Memory summary banner -->
+                        <div class="memory-summary-banner" id="memory-summary-banner">
+                            <span id="memory-summary-text"></span>
+                        </div>
+
+                        <!-- Memory metrics -->
+                        <div class="metrics-row">
+                            <div class="metric">
+                                <span class="metric-value" id="mem-unique-pages">0</span>
+                                <span class="metric-label">Unique Pages</span>
                             </div>
-                            <div class="two-col">
-                                <div>
-                                    <h4 style="color: #e4e4e7; margin-bottom: 12px; font-size: 13px;">Depth Distribution</h4>
-                                    <canvas id="depth-histogram-chart" height="180"></canvas>
-                                </div>
-                                <div>
-                                    <h4 style="color: #e4e4e7; margin-bottom: 12px; font-size: 13px;">Operations by Depth</h4>
-                                    <table class="compact-table" id="depth-distribution-table">
+                            <div class="metric">
+                                <span class="metric-value" id="mem-working-set">0 GB</span>
+                                <span class="metric-label">Working Set</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-value" id="mem-reuse-ratio">0%</span>
+                                <span class="metric-label">Page Reuse</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-value" id="mem-avg-accesses">0</span>
+                                <span class="metric-label">Avg Accesses/Page</span>
+                            </div>
+                        </div>
+
+                        <!-- Cache simulation and Pareto chart -->
+                        <div class="two-col">
+                            <div class="card">
+                                <div class="card-header">Cache Hit Rate by RAM Size</div>
+                                <div class="card-body">
+                                    <div class="cache-sim-chart" id="cache-sim-chart"></div>
+                                    <table class="data-table" id="cache-sim-table">
                                         <thead>
                                             <tr>
-                                                <th>Depth</th>
-                                                <th>Operations</th>
-                                                <th>%</th>
-                                                <th>Avg Faults</th>
-                                                <th>Avg Latency</th>
+                                                <th>RAM (GB)</th>
+                                                <th>Cache Pages</th>
+                                                <th>Hit Rate</th>
+                                                <th>Faults Avoided/s</th>
                                             </tr>
                                         </thead>
                                         <tbody></tbody>
                                     </table>
                                 </div>
                             </div>
-                            <!-- Per-table and per-operation depth breakdown -->
-                            <div class="two-col" style="margin-top: 20px;">
-                                <div>
-                                    <h4 style="color: #e4e4e7; margin-bottom: 12px; font-size: 13px;">Depth by Table <span style="color: #71717a; font-weight: normal;">(sorted by avg depth)</span></h4>
-                                    <div style="max-height: 300px; overflow-y: auto;">
-                                        <table class="compact-table" id="depth-by-table">
-                                            <thead>
-                                                <tr>
-                                                    <th>Table</th>
-                                                    <th>Ops</th>
-                                                    <th>Max</th>
-                                                    <th>Avg Depth</th>
-                                                    <th>Avg Faults</th>
-                                                    <th>Avg Latency</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody></tbody>
-                                        </table>
-                                    </div>
-                                </div>
-                                <div>
-                                    <h4 style="color: #e4e4e7; margin-bottom: 12px; font-size: 13px;">Depth by Operation <span style="color: #71717a; font-weight: normal;">(sorted by avg depth)</span></h4>
-                                    <div style="max-height: 300px; overflow-y: auto;">
-                                        <table class="compact-table" id="depth-by-operation">
-                                            <thead>
-                                                <tr>
-                                                    <th>Operation</th>
-                                                    <th>Type</th>
-                                                    <th>Ops</th>
-                                                    <th>Max</th>
-                                                    <th>Avg Depth</th>
-                                                    <th>Avg Faults</th>
-                                                </tr>
-                                            </thead>
-                                            <tbody></tbody>
-                                        </table>
-                                    </div>
+                            <div class="card">
+                                <div class="card-header">Hot Page Distribution (Pareto)</div>
+                                <div class="card-body">
+                                    <div class="pareto-chart" id="pareto-chart"></div>
+                                    <div class="pareto-stats" id="pareto-stats"></div>
                                 </div>
                             </div>
                         </div>
-                    </div>
 
-                    <!-- Tree Structure Visualization (Phase 2) -->
-                    <div class="card full-width" style="margin-top: 24px;">
-                        <div class="card-header">B+ Tree Structure by Table <span class="card-hint">Hover for details</span></div>
-                        <div class="card-body" style="padding: 16px;">
-                            <div id="tree-structure-container" style="display: flex; flex-wrap: wrap; gap: 16px; justify-content: flex-start;">
-                                <!-- Mini tree diagrams will be rendered here -->
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Operation to Page Type Mapping (Phase 3) -->
-                    <div class="two-col" style="margin-top: 24px;">
+                        <!-- Reuse distance -->
                         <div class="card">
-                            <div class="card-header">Operation → Page Type Distribution</div>
-                            <div class="card-body" style="padding: 16px;">
-                                <canvas id="op-page-type-chart" height="250"></canvas>
+                            <div class="card-header">Page Reuse Distance Distribution</div>
+                            <div class="card-body">
+                                <div class="reuse-distance-chart" id="reuse-distance-chart"></div>
                             </div>
                         </div>
-                        <div class="card">
-                            <div class="card-header">Page Type Distribution</div>
-                            <div class="card-body" style="padding: 16px;">
-                                <div class="donut-container" style="display: flex; align-items: center; gap: 24px;">
-                                    <canvas id="page-type-donut" width="200" height="200"></canvas>
-                                    <div class="donut-legend" id="page-type-legend"></div>
+                    </div>
+
+                    <!-- Transactions Section -->
+                    <div class="section-header" style="margin-top: 24px;">Transactions</div>
+
+                    <div id="txn-no-data" class="no-data" style="display:none;">
+                        No transaction data available.
+                    </div>
+
+                    <div id="txn-content">
+                        <div class="metrics-row">
+                            <div class="metric">
+                                <span class="metric-value" id="txn-total"></span>
+                                <span class="metric-label">Total Txns</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-value" id="txn-rate"></span>
+                                <span class="metric-label">Txns/sec</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-value minor" id="txn-ro"></span>
+                                <span class="metric-label">Read-Only</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-value major" id="txn-rw"></span>
+                                <span class="metric-label">Read-Write</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-value" id="txn-commits"></span>
+                                <span class="metric-label">Commits</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-value" id="txn-aborts"></span>
+                                <span class="metric-label">Aborts</span>
+                            </div>
+                        </div>
+
+                        <div class="two-col">
+                            <div class="card">
+                                <div class="card-header">Concurrency</div>
+                                <div class="card-body">
+                                    <div class="concurrency-stats">
+                                        <div class="conc-stat">
+                                            <span class="conc-label">Max RO</span>
+                                            <span class="conc-value" id="txn-max-ro"></span>
+                                        </div>
+                                        <div class="conc-stat">
+                                            <span class="conc-label">Max RW</span>
+                                            <span class="conc-value" id="txn-max-rw"></span>
+                                        </div>
+                                        <div class="conc-stat">
+                                            <span class="conc-label">Avg RO</span>
+                                            <span class="conc-value" id="txn-avg-ro"></span>
+                                        </div>
+                                    </div>
+                                    <div class="uplot-container" id="txn-concurrency-chart">
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="card">
+                                <div class="card-header">RW Commit Latency (ms)</div>
+                                <div class="card-body">
+                                    <div class="latency-stats" style="margin-bottom: 16px;">
+                                        <div class="lat-stat">
+                                            <span class="lat-label">AVG</span>
+                                            <span class="lat-value" id="txn-avg-latency"></span>
+                                        </div>
+                                        <div class="lat-stat">
+                                            <span class="lat-label">P95</span>
+                                            <span class="lat-value" id="txn-p95-latency"></span>
+                                        </div>
+                                        <div class="lat-stat">
+                                            <span class="lat-label">P99</span>
+                                            <span class="lat-value major" id="txn-p99-latency"></span>
+                                        </div>
+                                        <div class="lat-stat">
+                                            <span class="lat-label">MAX</span>
+                                            <span class="lat-value major" id="txn-max-latency"></span>
+                                        </div>
+                                    </div>
+                                    <div class="uplot-container" id="txn-latency-chart" style="height: 180px;">
+                                    </div>
                                 </div>
                             </div>
                         </div>
                     </div>
 
-                    <!-- Per-Batch Analysis (Phase 4) -->
-                    <div class="card full-width" id="block-analysis-section" style="display:none;">
-                        <div class="card-header">
-                            Page Faults by Batch
-                            <span class="card-hint">Each batch = 1 RW transaction (multiple blocks)</span>
-                        </div>
-                        <div class="card-body" style="padding: 16px;">
-                            <!-- Attribution stats banner -->
-                            <div id="batch-attribution-stats" class="attribution-stats-banner" style="display:none; margin-bottom: 16px; padding: 12px; background: #1a1a24; border-radius: 8px; border-left: 3px solid #3b82f6;">
-                                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px;">
-                                    <div>
-                                        <span style="color: #a1a1aa; font-size: 12px;">Attribution Confidence:</span>
-                                        <span id="batch-attribution-pct" style="color: #3b82f6; font-weight: 600; font-size: 14px; margin-left: 8px;">0%</span>
-                                    </div>
-                                    <div style="display: flex; gap: 20px; font-size: 12px;">
-                                        <span><span style="color: #71717a;">RW Commits:</span> <span id="batch-rw-commits" style="color: #e4e4e7;">0</span></span>
-                                        <span><span style="color: #71717a;">Blocks with data:</span> <span id="batch-blocks-count" style="color: #e4e4e7;">0</span></span>
-                                        <span><span style="color: #71717a;">Attributed:</span> <span id="batch-attributed-faults" style="color: #22c55e;">0</span></span>
-                                        <span><span style="color: #71717a;">Unattributed:</span> <span id="batch-unattributed-faults" style="color: #f59e0b;">0</span></span>
-                                    </div>
-                                </div>
-                            </div>
-                            <div id="block-histogram-container" style="height: 200px; position: relative;">
-                                <canvas id="block-histogram-canvas"></canvas>
-                            </div>
-                            <div class="compact-table-container" style="max-height: 400px; margin-top: 16px;">
-                                <table class="compact-table" id="block-analysis-table">
+                    <!-- Threads Section -->
+                    <div class="section-header" style="margin-top: 24px;">Threads</div>
+
+                    <div class="two-col">
+                        <div class="card">
+                            <div class="card-header">Page Faults by Thread</div>
+                            <div class="card-body compact-table-container" style="max-height: 300px; padding: 0;">
+                                <table class="compact-table" id="threads-faults-table">
                                     <thead>
                                         <tr>
-                                            <th>Batch</th>
-                                            <th>Blocks</th>
-                                            <th>Total Faults</th>
-                                            <th>Branch</th>
-                                            <th>Leaf</th>
-                                            <th>Major %</th>
-                                            <th>I/O Time</th>
-                                            <th>Commit</th>
+                                            <th>Thread</th>
+                                            <th>Faults</th>
+                                            <th>% of Total</th>
                                         </tr>
                                     </thead>
                                     <tbody></tbody>
                                 </table>
                             </div>
                         </div>
-                    </div>
-
-                    <!-- Comparative Table View (Phase 5) -->
-                    <div class="card full-width">
-                        <div class="card-header">
-                            Table Comparison
-                            <div class="sort-controls" style="display: inline-flex; gap: 8px; margin-left: 16px;">
-                                <button class="sort-btn active" data-sort="faults">By Faults</button>
-                                <button class="sort-btn" data-sort="ratio">By B:L Ratio</button>
-                                <button class="sort-btn" data-sort="depth">By Est. Depth</button>
-                            </div>
-                        </div>
-                        <div class="card-body" style="padding: 0;">
-                            <table class="compact-table" id="table-comparison">
-                                <thead>
-                                    <tr>
-                                        <th>Table</th>
-                                        <th>B:L Ratio</th>
-                                        <th>Est. Depth</th>
-                                        <th>Total Faults</th>
-                                        <th>Branch</th>
-                                        <th>Leaf</th>
-                                        <th>Major %</th>
-                                        <th style="width: 150px;">Distribution</th>
-                                    </tr>
-                                </thead>
-                                <tbody></tbody>
-                            </table>
-                        </div>
-                    </div>
-                </div>
-            </section>
-
-            <!-- MDBX TRANSACTIONS TAB -->
-            <section id="transactions" class="panel">
-                <div id="txn-no-data" class="no-data">
-                    No transaction data. Run with <code>--trace-cursors</code>
-                </div>
-                <div id="txn-content">
-                    <div class="metrics-row">
-                        <div class="metric">
-                            <span class="metric-value" id="txn-total"></span>
-                            <span class="metric-label">Total Txns</span>
-                        </div>
-                        <div class="metric">
-                            <span class="metric-value" id="txn-rate"></span>
-                            <span class="metric-label">Txns/sec</span>
-                        </div>
-                        <div class="metric">
-                            <span class="metric-value minor" id="txn-ro"></span>
-                            <span class="metric-label">Read-Only</span>
-                        </div>
-                        <div class="metric">
-                            <span class="metric-value major" id="txn-rw"></span>
-                            <span class="metric-label">Read-Write</span>
-                        </div>
-                        <div class="metric">
-                            <span class="metric-value" id="txn-commits"></span>
-                            <span class="metric-label">Commits</span>
-                        </div>
-                        <div class="metric">
-                            <span class="metric-value" id="txn-aborts"></span>
-                            <span class="metric-label">Aborts</span>
-                        </div>
-                    </div>
-
-                    <div class="two-col">
                         <div class="card">
-                            <div class="card-header">Concurrency</div>
-                            <div class="card-body">
-                                <div class="concurrency-stats">
-                                    <div class="conc-stat">
-                                        <span class="conc-label">Max RO</span>
-                                        <span class="conc-value" id="txn-max-ro"></span>
-                                    </div>
-                                    <div class="conc-stat">
-                                        <span class="conc-label">Max RW</span>
-                                        <span class="conc-value" id="txn-max-rw"></span>
-                                    </div>
-                                    <div class="conc-stat">
-                                        <span class="conc-label">Avg RO</span>
-                                        <span class="conc-value" id="txn-avg-ro"></span>
-                                    </div>
-                                </div>
-                                <div class="uplot-container" id="txn-concurrency-chart">
-                                </div>
+                            <div class="card-header">Transactions by Thread</div>
+                            <div class="card-body compact-table-container" style="max-height: 300px; padding: 0;">
+                                <table class="compact-table" id="threads-txn-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Thread</th>
+                                            <th>Total</th>
+                                            <th>RO</th>
+                                            <th>RW</th>
+                                            <th>Commits</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody></tbody>
+                                </table>
                             </div>
-                        </div>
-                        <div class="card">
-                            <div class="card-header">RW Commit Latency (ms) <span class="axis-hint">(drag to zoom, dbl-click to reset)</span></div>
-                            <div class="card-body">
-                                <div class="latency-stats" style="margin-bottom: 16px;">
-                                    <div class="lat-stat">
-                                        <span class="lat-label">AVG</span>
-                                        <span class="lat-value" id="txn-avg-latency"></span>
-                                    </div>
-                                    <div class="lat-stat">
-                                        <span class="lat-label">P50</span>
-                                        <span class="lat-value" id="txn-p50-latency"></span>
-                                    </div>
-                                    <div class="lat-stat">
-                                        <span class="lat-label">P95</span>
-                                        <span class="lat-value" id="txn-p95-latency"></span>
-                                    </div>
-                                    <div class="lat-stat">
-                                        <span class="lat-label">P99</span>
-                                        <span class="lat-value major" id="txn-p99-latency"></span>
-                                    </div>
-                                    <div class="lat-stat">
-                                        <span class="lat-label">MAX</span>
-                                        <span class="lat-value major" id="txn-max-latency"></span>
-                                    </div>
-                                </div>
-                                <div class="uplot-container" id="txn-latency-chart" style="height: 180px;">
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="card full-width">
-                        <div class="card-header">Thread Distribution</div>
-                        <div class="card-body compact-table-container" style="max-height: 300px; padding: 0;">
-                            <table class="compact-table" id="txn-threads-table">
-                                <thead>
-                                    <tr>
-                                        <th>Thread</th>
-                                        <th>Total</th>
-                                        <th>RO</th>
-                                        <th>RW</th>
-                                        <th>Commits</th>
-                                        <th>Aborts</th>
-                                    </tr>
-                                </thead>
-                                <tbody></tbody>
-                            </table>
                         </div>
                     </div>
                 </div>
@@ -729,6 +506,18 @@ body {
     text-transform: uppercase;
     margin-top: 4px;
     letter-spacing: 0.5px;
+}
+
+/* Section headers for Resources tab */
+.section-header {
+    font-size: 14px;
+    font-weight: 600;
+    color: #3b82f6;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #1e1e2a;
 }
 
 /* Two column layout */
@@ -2333,14 +2122,12 @@ function initTab(name) {
     if (initialized[name]) return;
     initialized[name] = true;
 
-    if (name === 'physical') initPhysical();
-    else if (name === 'memory') initMemory();
+    if (name === 'overview') initOverview();
     else if (name === 'tables') initTables();
-    else if (name === 'btree') initBTree();
-    else if (name === 'transactions') initTxns();
+    else if (name === 'resources') initResources();
 }
 
-function initPhysical() {
+function initOverview() {
     const s = DATA.summary;
 
     // Metrics
@@ -2455,14 +2242,52 @@ function initPhysical() {
         document.getElementById('stride-section').style.display = 'none';
     }
 
-    // Threads summary
-    const threadsDiv = document.getElementById('threads-summary');
-    DATA.threads.slice(0, 5).forEach(t => {
-        const div = document.createElement('div');
-        div.className = 'thread-item';
-        div.innerHTML = `<span>TID ${t.tid}</span><span>${fmt(t.faults)} (${t.percentage.toFixed(1)}%)</span>`;
-        threadsDiv.appendChild(div);
-    });
+    // Page type donut in overview
+    const pt = DATA.page_types;
+    if (pt && pt.by_type && pt.by_type.length > 0) {
+        const canvas = document.getElementById('overview-page-type-donut');
+        const ctx = canvas.getContext('2d');
+        const colors = {
+            'Branch': '#f59e0b',
+            'Leaf': '#22c55e',
+            'Overflow': '#8b5cf6',
+            'Meta': '#6366f1',
+            'Unknown': '#71717a'
+        };
+
+        const total = pt.by_type.reduce((sum, t) => sum + t.total_faults, 0);
+        let startAngle = -Math.PI / 2;
+        const cx = canvas.width / 2;
+        const cy = canvas.height / 2;
+        const outerR = Math.min(cx, cy) - 10;
+        const innerR = outerR * 0.6;
+
+        pt.by_type.forEach(t => {
+            if (t.total_faults === 0) return;
+            const sliceAngle = (t.total_faults / total) * Math.PI * 2;
+            ctx.beginPath();
+            ctx.arc(cx, cy, outerR, startAngle, startAngle + sliceAngle);
+            ctx.arc(cx, cy, innerR, startAngle + sliceAngle, startAngle, true);
+            ctx.closePath();
+            ctx.fillStyle = colors[t.page_type] || colors['Unknown'];
+            ctx.fill();
+            startAngle += sliceAngle;
+        });
+
+        // Legend
+        const legend = document.getElementById('overview-page-type-legend');
+        pt.by_type.filter(t => t.total_faults > 0).forEach(t => {
+            const row = document.createElement('div');
+            row.className = 'legend-row';
+            row.innerHTML = `
+                <span class="legend-dot" style="background: ${colors[t.page_type] || colors['Unknown']}"></span>
+                <span class="legend-name">${t.page_type}</span>
+                <span class="legend-value">${fmt(t.total_faults)}</span>
+                <span class="legend-pct">${t.percentage.toFixed(1)}%</span>
+            `;
+            legend.appendChild(row);
+        });
+    }
 }
 
 // Reth table source links for navigation
@@ -2495,7 +2320,18 @@ const RETH_TABLE_SOURCES = {
     'StageCheckpointProgresses': { github_url: 'https://github.com/paradigmxyz/reth/blob/main/crates/storage/db-api/src/models/mod.rs' },
 };
 
-function initMemory() {
+function initResources() {
+    // Initialize Memory section
+    initResourcesMemory();
+
+    // Initialize Transactions section
+    initResourcesTxns();
+
+    // Initialize Threads section
+    initResourcesThreads();
+}
+
+function initResourcesMemory() {
     const ws = DATA.working_set;
 
     if (!ws || !ws.has_data) {
@@ -3663,9 +3499,9 @@ function fmtK(n) {
     return n.toString();
 }
 
-function initTxns() {
+function initResourcesTxns() {
     const t = DATA.txn_data;
-    if (!t.has_data) {
+    if (!t || !t.has_data) {
         document.getElementById('txn-no-data').style.display = 'block';
         document.getElementById('txn-content').style.display = 'none';
         return;
@@ -3699,7 +3535,6 @@ function initTxns() {
 
     // Latency
     document.getElementById('txn-avg-latency').textContent = fmtLat(s.avg_commit_latency_us);
-    document.getElementById('txn-p50-latency').textContent = fmtLat(s.p50_commit_latency_us);
     document.getElementById('txn-p95-latency').textContent = fmtLat(s.p95_commit_latency_us);
     document.getElementById('txn-p99-latency').textContent = fmtLat(s.p99_commit_latency_us);
     document.getElementById('txn-max-latency').textContent = fmtLat(s.max_commit_latency_us);
@@ -3710,18 +3545,36 @@ function initTxns() {
             color: '#3b82f6'
         });
     }
+}
 
-    // Threads
-    const tbody = document.querySelector('#txn-threads-table tbody');
-    t.thread_stats.slice(0, 20).forEach(th => {
-        const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${th.tid}</td><td>${fmt(th.total_txns)}</td><td>${fmt(th.ro_txns)}</td><td>${fmt(th.rw_txns)}</td><td>${fmt(th.commits)}</td><td>${fmt(th.aborts)}</td>`;
-        tbody.appendChild(tr);
-    });
+function initResourcesThreads() {
+    // Page faults by thread
+    const faultsByThread = DATA.thread_stats;
+    if (faultsByThread && faultsByThread.length > 0) {
+        const tbody = document.querySelector('#threads-faults-table tbody');
+        const totalFaults = faultsByThread.reduce((sum, t) => sum + t.total_faults, 0);
+        faultsByThread.slice(0, 20).forEach(th => {
+            const tr = document.createElement('tr');
+            const pct = totalFaults > 0 ? (th.total_faults / totalFaults * 100).toFixed(1) : '0';
+            tr.innerHTML = `<td>${th.tid}</td><td>${fmt(th.total_faults)}</td><td>${pct}%</td>`;
+            tbody.appendChild(tr);
+        });
+    }
+
+    // Transactions by thread
+    const t = DATA.txn_data;
+    if (t && t.has_data && t.thread_stats) {
+        const tbody = document.querySelector('#threads-txn-table tbody');
+        t.thread_stats.slice(0, 20).forEach(th => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `<td>${th.tid}</td><td>${fmt(th.total_txns)}</td><td>${fmt(th.ro_txns)}</td><td>${fmt(th.rw_txns)}</td><td>${fmt(th.commits)}</td>`;
+            tbody.appendChild(tr);
+        });
+    }
 }
 
 // Init overview on load
-initTab('physical');
+initTab('overview');
 
 // Resize charts after initial render (ensure proper sizing)
 setTimeout(() => {
