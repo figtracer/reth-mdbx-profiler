@@ -350,11 +350,14 @@ pub struct StreamingAggregator {
     max_faults_per_op: u32,
 
     // Tree depth stats
-    depth_distribution: HashMap<u32, u64>,
+    // depth -> (count, total_faults, total_latency_us)
+    depth_distribution: HashMap<u32, (u64, u64, u64)>,
     max_depth_observed: u32,
     ops_with_depth_data: u64,
-    depth_by_table: HashMap<u32, (u64, u64, u32)>, // dbi -> (ops, total_depth, max_depth)
-    depth_by_op: HashMap<u32, (u64, u64, u32)>,    // cursor_op -> (ops, total_depth, max_depth)
+    // dbi -> (ops, total_depth, total_faults, total_latency_us, max_depth, depth_distribution)
+    depth_by_table: HashMap<u32, (u64, u64, u64, u64, u32, HashMap<u32, u64>)>,
+    // cursor_op -> (ops, total_depth, total_faults, total_latency_us, max_depth)
+    depth_by_op: HashMap<u32, (u64, u64, u64, u64, u32)>,
 
     // Block range
     min_block: Option<u64>,
@@ -716,20 +719,41 @@ impl StreamingAggregator {
         if event.max_tree_depth > 0 {
             self.ops_with_depth_data += 1;
             self.max_depth_observed = self.max_depth_observed.max(event.max_tree_depth);
-            *self
+
+            let latency_us = event.latency_ns / 1000;
+            let faults = event.faults_during_op as u64;
+
+            // depth -> (count, total_faults, total_latency_us)
+            let depth_entry = self
                 .depth_distribution
                 .entry(event.max_tree_depth)
-                .or_insert(0) += 1;
+                .or_insert((0, 0, 0));
+            depth_entry.0 += 1;
+            depth_entry.1 += faults;
+            depth_entry.2 += latency_us;
 
-            let table_entry = self.depth_by_table.entry(dbi).or_insert((0, 0, 0));
+            // dbi -> (ops, total_depth, total_faults, total_latency_us, max_depth, depth_distribution)
+            let table_entry =
+                self.depth_by_table
+                    .entry(dbi)
+                    .or_insert((0, 0, 0, 0, 0, HashMap::new()));
             table_entry.0 += 1;
             table_entry.1 += event.max_tree_depth as u64;
-            table_entry.2 = table_entry.2.max(event.max_tree_depth);
+            table_entry.2 += faults;
+            table_entry.3 += latency_us;
+            table_entry.4 = table_entry.4.max(event.max_tree_depth);
+            *table_entry.5.entry(event.max_tree_depth).or_insert(0) += 1;
 
-            let op_entry = self.depth_by_op.entry(event.cursor_op).or_insert((0, 0, 0));
+            // cursor_op -> (ops, total_depth, total_faults, total_latency_us, max_depth)
+            let op_entry = self
+                .depth_by_op
+                .entry(event.cursor_op)
+                .or_insert((0, 0, 0, 0, 0));
             op_entry.0 += 1;
             op_entry.1 += event.max_tree_depth as u64;
-            op_entry.2 = op_entry.2.max(event.max_tree_depth);
+            op_entry.2 += faults;
+            op_entry.3 += latency_us;
+            op_entry.4 = op_entry.4.max(event.max_tree_depth);
         }
 
         // Block range extraction (from write operations)
@@ -1215,64 +1239,114 @@ impl StreamingAggregator {
             return TreeDepthStats::default();
         }
 
+        // depth_distribution is now: depth -> (count, total_faults, total_latency_us)
         let total_depth: u64 = self
             .depth_distribution
             .iter()
-            .map(|(&d, &c)| d as u64 * c)
+            .map(|(&d, &(count, _, _))| d as u64 * count)
             .sum();
 
         let mut depth_histogram: Vec<_> = self
             .depth_distribution
             .iter()
-            .map(|(&depth, &count)| DepthBucket {
-                depth,
-                count,
-                percentage: count as f64 / self.ops_with_depth_data as f64 * 100.0,
-                avg_faults: 0.0, // Would need per-depth fault tracking
-                avg_latency_us: 0.0,
-            })
-            .collect();
-        depth_histogram.sort_by_key(|b| b.depth);
-
-        let by_table: Vec<_> = self
-            .depth_by_table
-            .iter()
-            .map(|(&dbi, &(ops, total_depth, max_depth))| TableDepthStats {
-                table_name: dbi_to_table_name(dbi).to_string(),
-                dbi,
-                ops_count: ops,
-                max_depth,
-                avg_depth: if ops > 0 {
-                    total_depth as f64 / ops as f64
-                } else {
-                    0.0
-                },
-                avg_faults: 0.0,
-                avg_latency_us: 0.0,
-                depth_distribution: vec![],
-            })
-            .collect();
-
-        let by_operation: Vec<_> = self
-            .depth_by_op
-            .iter()
-            .map(|(&op, &(ops, total_depth, max_depth))| {
-                let cursor_op = CursorOp::from_raw(op);
-                OperationDepthStats {
-                    operation: cursor_op.name().to_string(),
-                    ops_count: ops,
-                    max_depth,
-                    avg_depth: if ops > 0 {
-                        total_depth as f64 / ops as f64
+            .map(
+                |(&depth, &(count, total_faults, total_latency_us))| DepthBucket {
+                    depth,
+                    count,
+                    percentage: count as f64 / self.ops_with_depth_data as f64 * 100.0,
+                    avg_faults: if count > 0 {
+                        total_faults as f64 / count as f64
                     } else {
                         0.0
                     },
-                    avg_faults: 0.0,
-                    avg_latency_us: 0.0,
-                    is_seek: cursor_op.is_seek(),
-                }
-            })
+                    avg_latency_us: if count > 0 {
+                        total_latency_us as f64 / count as f64
+                    } else {
+                        0.0
+                    },
+                },
+            )
             .collect();
+        depth_histogram.sort_by_key(|b| b.depth);
+
+        // depth_by_table is now: dbi -> (ops, total_depth, total_faults, total_latency_us, max_depth, depth_distribution)
+        let mut by_table: Vec<_> = self
+            .depth_by_table
+            .iter()
+            .map(
+                |(&dbi, (ops, total_depth, total_faults, total_latency_us, max_depth, dist))| {
+                    let mut depth_distribution: Vec<_> =
+                        dist.iter().map(|(&d, &c)| (d, c)).collect();
+                    depth_distribution.sort_by_key(|(d, _)| *d);
+                    TableDepthStats {
+                        table_name: dbi_to_table_name(dbi).to_string(),
+                        dbi,
+                        ops_count: *ops,
+                        max_depth: *max_depth,
+                        avg_depth: if *ops > 0 {
+                            *total_depth as f64 / *ops as f64
+                        } else {
+                            0.0
+                        },
+                        avg_faults: if *ops > 0 {
+                            *total_faults as f64 / *ops as f64
+                        } else {
+                            0.0
+                        },
+                        avg_latency_us: if *ops > 0 {
+                            *total_latency_us as f64 / *ops as f64
+                        } else {
+                            0.0
+                        },
+                        depth_distribution,
+                    }
+                },
+            )
+            .collect();
+        // Sort by avg_depth descending (deepest tables first)
+        by_table.sort_by(|a, b| {
+            b.avg_depth
+                .partial_cmp(&a.avg_depth)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // depth_by_op is now: cursor_op -> (ops, total_depth, total_faults, total_latency_us, max_depth)
+        let mut by_operation: Vec<_> = self
+            .depth_by_op
+            .iter()
+            .map(
+                |(&op, &(ops, total_depth, total_faults, total_latency_us, max_depth))| {
+                    let cursor_op = CursorOp::from_raw(op);
+                    OperationDepthStats {
+                        operation: cursor_op.name().to_string(),
+                        ops_count: ops,
+                        max_depth,
+                        avg_depth: if ops > 0 {
+                            total_depth as f64 / ops as f64
+                        } else {
+                            0.0
+                        },
+                        avg_faults: if ops > 0 {
+                            total_faults as f64 / ops as f64
+                        } else {
+                            0.0
+                        },
+                        avg_latency_us: if ops > 0 {
+                            total_latency_us as f64 / ops as f64
+                        } else {
+                            0.0
+                        },
+                        is_seek: cursor_op.is_seek(),
+                    }
+                },
+            )
+            .collect();
+        // Sort by avg_depth descending (deepest operations first)
+        by_operation.sort_by(|a, b| {
+            b.avg_depth
+                .partial_cmp(&a.avg_depth)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         TreeDepthStats {
             ops_with_depth_data: self.ops_with_depth_data,
@@ -1285,7 +1359,7 @@ impl StreamingAggregator {
             depth_distribution: self
                 .depth_distribution
                 .iter()
-                .map(|(&d, &c)| (d, c))
+                .map(|(&d, &(count, _, _))| (d, count))
                 .collect(),
             depth_histogram,
             by_table,

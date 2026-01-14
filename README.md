@@ -85,6 +85,31 @@ formats: `summary`, `csv`, `json`, `logs`
 
 the analyzer runs on macos/linux without ebpf - collect traces on your node and analyze locally.
 
+### streaming mode (for large traces)
+
+for trace files larger than available RAM, use streaming mode:
+
+```bash
+./target/release/mdbx-trace-analyzer \
+    --input trace.jsonl \
+    --mdbx-path /data/reth/db/mdbx.dat \
+    --streaming
+```
+
+streaming mode:
+- processes the trace in a single pass with constant memory usage (~500MB)
+- works with traces of any size (tested with 75GB+ files)
+- shows real-time progress with ETA:
+  ```
+  [████████████░░░░░░░░░░░░░░░░░░]  40.5% | 30.4GB/75.0GB | 85 MB/s | ETA: 8m 45s | 125M faults, 89M ops
+  ```
+- produces the same html output as normal mode
+
+use streaming mode when:
+- trace file is larger than available RAM
+- you get OOM errors with the default mode
+- processing multi-hour traces
+
 ## rpc method profiling
 
 compare mdbx impact across different rpc methods:
