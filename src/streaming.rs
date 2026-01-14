@@ -9,16 +9,17 @@ use crate::event::{
     dbi_to_table_name, is_pre_trace_cursor,
 };
 use crate::viewer::{
-    BTreeVisualization, BatchAnalysis, BlockRange, BurstStats, CacheSimulationPoint, CursorData,
-    CursorOpSample, CursorSummary, CursorTableStats, CursorTimelinePoint, DepthBucket,
-    DirectFaultAttribution, FaultsByCursorOp, FaultsByOpType, HeatmapData, HistogramBucket,
-    HotPageAnalysis, OpFaultCount, OperationDepthStats, OperationFaultHistogram,
-    OperationPageTypeBreakdown, OperationStats, PageTypeFaultCount, PageTypeStats, ParetoPoint,
-    PatternAnalysis, ReuseDistanceBucket, RwCommitPoint, SlowKeyStats, SlowOpBreakdown,
-    SlowOpsTableStats, StrideInfo, TableDepthStats, TableDrillDown, TableSourceLink,
-    TableTreeStats, TableWorkingSet, ThreadStats, TimeWindowedWSS, TimelinePoint, TraceSummary,
-    TreeDepthEstimate, TreeDepthStats, TreeTraversalViz, TxnConcurrencyStats, TxnData, TxnSummary,
-    TxnThreadStats, TxnTimelineEntry, UnifiedTableStats, ViewerData, WorkingSetAnalysis,
+    BTreeVisualization, BatchAnalysis, BlockRange, BurstStats, CacheSimulationPoint,
+    CpuProfileSummary, CpuTableEntry, CursorData, CursorOpSample, CursorSummary, CursorTableStats,
+    CursorTimelinePoint, DepthBucket, DirectFaultAttribution, FaultsByCursorOp, FaultsByOpType,
+    HeatmapData, HistogramBucket, HotPageAnalysis, OpFaultCount, OperationDepthStats,
+    OperationFaultHistogram, OperationPageTypeBreakdown, OperationStats, PageTypeFaultCount,
+    PageTypeStats, ParetoPoint, PatternAnalysis, ReuseDistanceBucket, RwCommitPoint, SlowKeyStats,
+    SlowOpBreakdown, SlowOpsTableStats, StrideInfo, TableDepthStats, TableDrillDown,
+    TableSourceLink, TableTreeStats, TableWorkingSet, ThreadStats, TimeWindowedWSS, TimelinePoint,
+    TraceSummary, TreeDepthEstimate, TreeDepthStats, TreeTraversalViz, TxnConcurrencyStats,
+    TxnData, TxnSummary, TxnThreadStats, TxnTimelineEntry, UnifiedTableStats, ViewerData,
+    WorkingSetAnalysis,
 };
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::io::{BufRead, BufReader};
@@ -176,6 +177,8 @@ struct TableStreamStats {
     slow_ops: u64,
     total_latency_ns: u64,
     max_latency_ns: u64,
+    // CPU profiling: time spent in fault handlers (I/O wait)
+    total_fault_latency_ns: u64,
     // Fault attribution by op type
     faults_by_op_type: HashMap<u32, (u64, u64)>, // op_type -> (total, major)
     faults_by_cursor_op: HashMap<u32, (u64, u64)>, // cursor_op -> (total, major)
@@ -924,6 +927,7 @@ impl StreamingAggregator {
         let table_stats = self.table_stats.entry(dbi).or_default();
         table_stats.total_ops += 1;
         table_stats.total_latency_ns += event.latency_ns;
+        table_stats.total_fault_latency_ns += event.fault_latency_ns;
         table_stats.max_latency_ns = table_stats.max_latency_ns.max(event.latency_ns);
 
         if cursor_op.is_seek() {
@@ -1384,6 +1388,9 @@ impl StreamingAggregator {
         // Build working set analysis
         let working_set = self.build_working_set(duration_secs);
 
+        // Build CPU profile summary
+        let cpu_profile = self.build_cpu_profile();
+
         ViewerData {
             summary,
             timeline,
@@ -1401,6 +1408,7 @@ impl StreamingAggregator {
             tree_traversal,
             btree_viz,
             working_set,
+            cpu_profile,
         }
     }
 
@@ -2081,6 +2089,16 @@ impl StreamingAggregator {
                     "low"
                 };
 
+                // CPU profiling: calculate CPU time as wall time minus fault latency
+                let total_wall_time_ms = stats.total_latency_ns as f64 / 1_000_000.0;
+                let total_fault_time_ms = stats.total_fault_latency_ns as f64 / 1_000_000.0;
+                let total_cpu_time_ms = (total_wall_time_ms - total_fault_time_ms).max(0.0);
+                let cpu_efficiency = if total_wall_time_ms > 0.0 {
+                    total_cpu_time_ms / total_wall_time_ms
+                } else {
+                    1.0 // No data, assume CPU bound
+                };
+
                 UnifiedTableStats {
                     name: dbi_to_table_name(dbi).to_string(),
                     dbi,
@@ -2105,6 +2123,11 @@ impl StreamingAggregator {
                         0.0
                     },
                     max_latency_us: stats.max_latency_ns as f64 / 1000.0,
+                    // CPU profiling fields
+                    total_wall_time_ms,
+                    total_cpu_time_ms,
+                    cpu_efficiency,
+                    is_io_bound: cpu_efficiency < 0.5,
                     top_operation,
                     details: TableDrillDown {
                         faults_by_op,
@@ -2653,6 +2676,105 @@ impl StreamingAggregator {
     /// Increment parse error count
     pub fn add_parse_error(&mut self) {
         self.parse_errors += 1;
+    }
+
+    /// Build CPU profile summary from table stats
+    fn build_cpu_profile(&self) -> CpuProfileSummary {
+        // Aggregate CPU time data across all tables
+        let mut total_wall_time_ns: u64 = 0;
+        let mut total_fault_latency_ns: u64 = 0;
+
+        for stats in self.table_stats.values() {
+            total_wall_time_ns += stats.total_latency_ns;
+            total_fault_latency_ns += stats.total_fault_latency_ns;
+        }
+
+        let total_wall_time_ms = total_wall_time_ns as f64 / 1_000_000.0;
+        let total_io_wait_ms = total_fault_latency_ns as f64 / 1_000_000.0;
+        let total_cpu_time_ms = (total_wall_time_ms - total_io_wait_ms).max(0.0);
+
+        let cpu_efficiency = if total_wall_time_ms > 0.0 {
+            total_cpu_time_ms / total_wall_time_ms
+        } else {
+            1.0
+        };
+
+        let bottleneck = if total_wall_time_ms == 0.0 {
+            "No data".to_string()
+        } else if cpu_efficiency < 0.2 {
+            "Heavily I/O bound".to_string()
+        } else if cpu_efficiency < 0.5 {
+            "I/O bound".to_string()
+        } else if cpu_efficiency > 0.8 {
+            "CPU bound".to_string()
+        } else {
+            "Balanced".to_string()
+        };
+
+        // Build per-table CPU entries for ranking
+        let mut table_entries: Vec<_> = self
+            .table_stats
+            .iter()
+            .filter(|(_, stats)| stats.total_latency_ns > 0)
+            .map(|(&dbi, stats)| {
+                let wall_time_ms = stats.total_latency_ns as f64 / 1_000_000.0;
+                let fault_time_ms = stats.total_fault_latency_ns as f64 / 1_000_000.0;
+                let cpu_time_ms = (wall_time_ms - fault_time_ms).max(0.0);
+                let efficiency = if wall_time_ms > 0.0 {
+                    cpu_time_ms / wall_time_ms
+                } else {
+                    1.0
+                };
+                (dbi, wall_time_ms, cpu_time_ms, efficiency)
+            })
+            .collect();
+
+        // Top I/O bound: low efficiency, sorted by wall time descending
+        let mut io_bound: Vec<_> = table_entries
+            .iter()
+            .filter(|(_, _, _, eff)| *eff < 0.5)
+            .cloned()
+            .collect();
+        io_bound.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let top_io_bound_tables: Vec<_> = io_bound
+            .iter()
+            .take(5)
+            .map(|(dbi, wall, cpu, eff)| CpuTableEntry {
+                name: dbi_to_table_name(*dbi).to_string(),
+                wall_time_ms: *wall,
+                cpu_time_ms: *cpu,
+                cpu_efficiency: *eff,
+            })
+            .collect();
+
+        // Top CPU bound: high efficiency, sorted by wall time descending
+        let mut cpu_bound: Vec<_> = table_entries
+            .iter()
+            .filter(|(_, _, _, eff)| *eff > 0.8)
+            .cloned()
+            .collect();
+        cpu_bound.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let top_cpu_bound_tables: Vec<_> = cpu_bound
+            .iter()
+            .take(5)
+            .map(|(dbi, wall, cpu, eff)| CpuTableEntry {
+                name: dbi_to_table_name(*dbi).to_string(),
+                wall_time_ms: *wall,
+                cpu_time_ms: *cpu,
+                cpu_efficiency: *eff,
+            })
+            .collect();
+
+        CpuProfileSummary {
+            has_data: total_wall_time_ms > 0.0,
+            total_wall_time_ms,
+            total_cpu_time_ms,
+            total_io_wait_ms,
+            cpu_efficiency,
+            bottleneck,
+            top_io_bound_tables,
+            top_cpu_bound_tables,
+        }
     }
 }
 

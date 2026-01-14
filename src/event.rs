@@ -216,11 +216,7 @@ impl TxnFlags {
     }
 
     pub fn name(&self) -> &'static str {
-        if self.is_read_only() {
-            "RO"
-        } else {
-            "RW"
-        }
+        if self.is_read_only() { "RO" } else { "RW" }
     }
 }
 

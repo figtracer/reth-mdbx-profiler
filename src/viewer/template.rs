@@ -152,6 +152,18 @@ pub fn generate_html(data: &ViewerData) -> String {
                         <span class="attribution-summary" id="tables-attribution-summary"></span>
                     </div>
 
+                    <!-- CPU Profile Summary -->
+                    <div class="cpu-profile-banner" id="cpu-profile-banner" style="display:none;">
+                        <div class="cpu-profile-main">
+                            <span class="cpu-profile-bottleneck" id="cpu-bottleneck">-</span>
+                            <span class="cpu-profile-detail">
+                                CPU: <span id="cpu-time-total">-</span> ·
+                                I/O Wait: <span id="io-wait-total">-</span> ·
+                                Efficiency: <span id="cpu-efficiency-total">-</span>
+                            </span>
+                        </div>
+                    </div>
+
                     <!-- Fault distribution and I/O breakdown side by side -->
                     <div class="two-col" id="fault-dist-row" style="display:none;">
                         <div class="card" id="fault-dist-card">
@@ -192,6 +204,7 @@ pub fn generate_html(data: &ViewerData) -> String {
                                         <th>Working Set</th>
                                         <th>Reuse %</th>
                                         <th>I/O Time</th>
+                                        <th>CPU %</th>
                                     </tr>
                                 </thead>
                                 <tbody></tbody>
@@ -234,34 +247,6 @@ pub fn generate_html(data: &ViewerData) -> String {
                             <div class="metric">
                                 <span class="metric-value" id="mem-avg-accesses">0</span>
                                 <span class="metric-label">Avg Accesses/Page</span>
-                            </div>
-                        </div>
-
-                        <!-- Cache simulation and Pareto chart -->
-                        <div class="two-col">
-                            <div class="card">
-                                <div class="card-header">Cache Hit Rate by RAM Size</div>
-                                <div class="card-body">
-                                    <div class="cache-sim-chart" id="cache-sim-chart"></div>
-                                    <table class="data-table" id="cache-sim-table">
-                                        <thead>
-                                            <tr>
-                                                <th>RAM (GB)</th>
-                                                <th>Cache Pages</th>
-                                                <th>Hit Rate</th>
-                                                <th>Faults Avoided/s</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody></tbody>
-                                    </table>
-                                </div>
-                            </div>
-                            <div class="card">
-                                <div class="card-header">Hot Page Distribution (Pareto)</div>
-                                <div class="card-body">
-                                    <div class="pareto-chart" id="pareto-chart"></div>
-                                    <div class="pareto-stats" id="pareto-stats"></div>
-                                </div>
                             </div>
                         </div>
 
@@ -706,6 +691,55 @@ body {
 
 .io-time {
     color: #60a5fa;
+    font-weight: 500;
+}
+
+/* CPU efficiency coloring: I/O bound (low CPU%) = blue, CPU bound (high CPU%) = orange */
+.io-bound {
+    color: #60a5fa;
+    font-weight: 500;
+}
+.cpu-bound {
+    color: #f59e0b;
+    font-weight: 500;
+}
+
+/* CPU Profile banner */
+.cpu-profile-banner {
+    background: linear-gradient(135deg, #1e1b4b 0%, #312e81 100%);
+    border: 1px solid #4338ca;
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 16px;
+}
+.cpu-profile-main {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+.cpu-profile-bottleneck {
+    font-size: 14px;
+    font-weight: 600;
+    padding: 4px 10px;
+    border-radius: 4px;
+    background: rgba(99, 102, 241, 0.3);
+    color: #a5b4fc;
+}
+.cpu-profile-bottleneck.io-bound {
+    background: rgba(59, 130, 246, 0.3);
+    color: #93c5fd;
+}
+.cpu-profile-bottleneck.cpu-bound {
+    background: rgba(245, 158, 11, 0.3);
+    color: #fcd34d;
+}
+.cpu-profile-detail {
+    font-size: 13px;
+    color: #a1a1aa;
+}
+.cpu-profile-detail span {
+    color: #e4e4e7;
     font-weight: 500;
 }
 
@@ -1320,33 +1354,9 @@ body {
     color: #93c5fd;
 }
 
-.cache-sim-chart, .pareto-chart, .reuse-distance-chart {
+.reuse-distance-chart {
     min-height: 200px;
     margin-bottom: 16px;
-}
-
-.pareto-stats {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 12px;
-    padding: 12px;
-    background: #0a0a0f;
-    border-radius: 6px;
-}
-
-.pareto-stat {
-    text-align: center;
-}
-
-.pareto-stat-value {
-    font-size: 18px;
-    font-weight: 700;
-    color: #f59e0b;
-}
-
-.pareto-stat-label {
-    font-size: 12px;
-    color: #71717a;
 }
 
 .time-wss-stats {
@@ -1405,9 +1415,7 @@ body {
     transition: width 0.3s ease;
 }
 
-.bar-chart-bar.cache { background: linear-gradient(90deg, #3b82f6, #60a5fa); }
 .bar-chart-bar.reuse { background: linear-gradient(90deg, #8b5cf6, #a78bfa); }
-.bar-chart-bar.pareto { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
 
 .bar-chart-value {
     width: 70px;
@@ -2355,96 +2363,6 @@ function initResourcesMemory() {
     document.getElementById('mem-reuse-ratio').textContent = (ws.reuse_ratio * 100).toFixed(1) + '%';
     document.getElementById('mem-avg-accesses').textContent = ws.avg_accesses_per_page.toFixed(2);
 
-    // Cache simulation chart (bar chart)
-    if (ws.cache_simulation && ws.cache_simulation.length > 0) {
-        const chartEl = document.getElementById('cache-sim-chart');
-        let html = '<div class="bar-chart-container">';
-        ws.cache_simulation.forEach(pt => {
-            const pct = (pt.hit_rate * 100).toFixed(1);
-            html += `
-                <div class="bar-chart-row">
-                    <span class="bar-chart-label">${pt.cache_size_gb} GB</span>
-                    <div class="bar-chart-bar-container">
-                        <div class="bar-chart-bar cache" style="width: ${pct}%"></div>
-                    </div>
-                    <span class="bar-chart-value">${pct}%</span>
-                </div>
-            `;
-        });
-        html += '</div>';
-        chartEl.innerHTML = html;
-
-        // Table
-        const tbody = document.querySelector('#cache-sim-table tbody');
-        ws.cache_simulation.forEach(pt => {
-            const tr = document.createElement('tr');
-            tr.innerHTML = `
-                <td>${pt.cache_size_gb}</td>
-                <td>${fmt(pt.cache_size_pages)}</td>
-                <td>${(pt.hit_rate * 100).toFixed(1)}%</td>
-                <td>${pt.faults_avoided_per_sec.toFixed(1)}</td>
-            `;
-            tbody.appendChild(tr);
-        });
-    }
-
-    // Pareto / hot page chart
-    if (ws.hot_page_analysis) {
-        const hp = ws.hot_page_analysis;
-
-        // Pareto curve visualization
-        if (hp.distribution_curve && hp.distribution_curve.length > 0) {
-            const chartEl = document.getElementById('pareto-chart');
-            let html = '<div class="bar-chart-container">';
-
-            // Show key milestones
-            const milestones = [
-                { label: '50% accesses', pages: hp.pages_for_50pct, pct: 50 },
-                { label: '80% accesses', pages: hp.pages_for_80pct, pct: 80 },
-                { label: '90% accesses', pages: hp.pages_for_90pct, pct: 90 },
-                { label: '95% accesses', pages: hp.pages_for_95pct, pct: 95 },
-            ];
-
-            const totalPages = ws.total_unique_pages;
-            milestones.forEach(m => {
-                const pagesPct = totalPages > 0 ? (m.pages / totalPages * 100).toFixed(2) : 0;
-                html += `
-                    <div class="bar-chart-row">
-                        <span class="bar-chart-label">${m.label}</span>
-                        <div class="bar-chart-bar-container">
-                            <div class="bar-chart-bar pareto" style="width: ${pagesPct}%"></div>
-                        </div>
-                        <span class="bar-chart-value">${pagesPct}% pages</span>
-                    </div>
-                `;
-            });
-            html += '</div>';
-            chartEl.innerHTML = html;
-        }
-
-        // Stats
-        const statsEl = document.getElementById('pareto-stats');
-        const totalPages = ws.total_unique_pages;
-        statsEl.innerHTML = `
-            <div class="pareto-stat">
-                <div class="pareto-stat-value">${fmt(hp.pages_for_80pct)}</div>
-                <div class="pareto-stat-label">Pages for 80% accesses</div>
-            </div>
-            <div class="pareto-stat">
-                <div class="pareto-stat-value">${(hp.pareto_ratio * 100).toFixed(1)}%</div>
-                <div class="pareto-stat-label">Hot set ratio</div>
-            </div>
-            <div class="pareto-stat">
-                <div class="pareto-stat-value">${(hp.pages_for_80pct * 4096 / 1e9).toFixed(2)} GB</div>
-                <div class="pareto-stat-label">Hot set size</div>
-            </div>
-            <div class="pareto-stat">
-                <div class="pareto-stat-value">${fmt(hp.pages_for_90pct)}</div>
-                <div class="pareto-stat-label">Pages for 90% accesses</div>
-            </div>
-        `;
-    }
-
     // Reuse distance histogram
     if (ws.reuse_distance_histogram && ws.reuse_distance_histogram.length > 0) {
         const chartEl = document.getElementById('reuse-distance-chart');
@@ -2498,6 +2416,22 @@ function initTables() {
         document.getElementById('tables-attribution-summary').innerHTML =
             `<strong>${fmt(dfa.directly_attributed_count)}</strong> directly attributed (${directPct}%) · ` +
             `${fmt(dfa.uncorrelated_count)} uncorrelated`;
+    }
+
+    // CPU Profile summary
+    const cpu = DATA.cpu_profile;
+    if (cpu && cpu.has_data) {
+        document.getElementById('cpu-profile-banner').style.display = 'block';
+
+        const bottleneckEl = document.getElementById('cpu-bottleneck');
+        bottleneckEl.textContent = cpu.bottleneck;
+        bottleneckEl.className = 'cpu-profile-bottleneck' +
+            (cpu.cpu_efficiency < 0.5 ? ' io-bound' : (cpu.cpu_efficiency > 0.8 ? ' cpu-bound' : ''));
+
+        const fmtTime = (ms) => ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : ms.toFixed(0) + 'ms';
+        document.getElementById('cpu-time-total').textContent = fmtTime(cpu.total_cpu_time_ms);
+        document.getElementById('io-wait-total').textContent = fmtTime(cpu.total_io_wait_ms);
+        document.getElementById('cpu-efficiency-total').textContent = (cpu.cpu_efficiency * 100).toFixed(1) + '%';
     }
 
     // Draw fault distribution and I/O time charts
@@ -2561,6 +2495,10 @@ function initTables() {
         const workingSet = wsTable ? fmt(wsTable.unique_pages) : '-';
         const reusePct = wsTable ? (wsTable.reuse_ratio * 100).toFixed(1) + '%' : '-';
 
+        // CPU efficiency: higher = more CPU bound, lower = more I/O bound
+        const cpuPct = (t.cpu_efficiency * 100).toFixed(1);
+        const cpuClass = t.is_io_bound ? 'io-bound' : (t.cpu_efficiency > 0.8 ? 'cpu-bound' : '');
+
         tr.innerHTML = `
             <td><span class="expand-icon">▶</span></td>
             <td>${t.name}</td>
@@ -2570,6 +2508,7 @@ function initTables() {
             <td>${workingSet}</td>
             <td>${reusePct}</td>
             <td class="io-time">${t.time_lost_ms > 0 ? ioTime : '-'}</td>
+            <td class="${cpuClass}">${t.total_wall_time_ms > 0 ? cpuPct + '%' : '-'}</td>
         `;
         tbody.appendChild(tr);
 
@@ -2578,7 +2517,7 @@ function initTables() {
         detailsTr.className = 'details-row hidden';
         detailsTr.dataset.idx = idx;
 
-        let detailsHtml = '<td colspan="8"><div class="details-content">';
+        let detailsHtml = '<td colspan="9"><div class="details-content">';
 
         // Top 5 Operations by Faults - Primary section
         detailsHtml += '<div class="details-section"><div class="details-section-title">Top Operations by Page Faults</div><div class="details-list">';

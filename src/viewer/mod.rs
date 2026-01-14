@@ -45,6 +45,8 @@ pub struct ViewerData {
     pub btree_viz: BTreeVisualization,
     /// Working set analysis for memory requirement estimation
     pub working_set: WorkingSetAnalysis,
+    /// CPU profiling summary
+    pub cpu_profile: CpuProfileSummary,
 }
 
 // ============================================================================
@@ -732,6 +734,36 @@ pub struct TraceSummary {
     pub block_range: Option<BlockRange>,
 }
 
+/// CPU profiling summary - shows time spent on CPU vs waiting for I/O
+#[derive(Debug, Serialize, Default)]
+pub struct CpuProfileSummary {
+    /// Whether CPU profiling data is available
+    pub has_data: bool,
+    /// Total wall clock time across all operations (ms)
+    pub total_wall_time_ms: f64,
+    /// Estimated CPU time (wall time - fault handler time) (ms)
+    pub total_cpu_time_ms: f64,
+    /// Time spent waiting in page fault handlers (I/O) (ms)
+    pub total_io_wait_ms: f64,
+    /// Overall CPU efficiency (0.0-1.0, higher = more CPU bound)
+    pub cpu_efficiency: f64,
+    /// Bottleneck classification
+    pub bottleneck: String,
+    /// Top I/O bound tables (by wall time with low CPU efficiency)
+    pub top_io_bound_tables: Vec<CpuTableEntry>,
+    /// Top CPU bound tables (by wall time with high CPU efficiency)
+    pub top_cpu_bound_tables: Vec<CpuTableEntry>,
+}
+
+/// Entry for CPU profile table rankings
+#[derive(Debug, Serialize)]
+pub struct CpuTableEntry {
+    pub name: String,
+    pub wall_time_ms: f64,
+    pub cpu_time_ms: f64,
+    pub cpu_efficiency: f64,
+}
+
 /// Block range information extracted from trace
 #[derive(Debug, Serialize, Clone)]
 pub struct BlockRange {
@@ -779,6 +811,15 @@ pub struct UnifiedTableStats {
     pub time_lost_ms: f64,
     pub avg_latency_us: f64,
     pub max_latency_us: f64,
+    // CPU profiling data
+    /// Total wall time for all operations (ms)
+    pub total_wall_time_ms: f64,
+    /// Estimated CPU time (wall time - fault latency) (ms)
+    pub total_cpu_time_ms: f64,
+    /// CPU efficiency: cpu_time / wall_time (0.0-1.0, higher = more CPU bound)
+    pub cpu_efficiency: f64,
+    /// Whether this table is I/O bound (cpu_efficiency < 0.5)
+    pub is_io_bound: bool,
     // Top operation causing faults/slowness
     pub top_operation: String,
     // Drill-down details
