@@ -76,8 +76,6 @@ pub struct WorkingSetAnalysis {
     pub hot_page_analysis: HotPageAnalysis,
     /// Summary text for quick understanding
     pub summary_text: String,
-    /// Recommended RAM size based on analysis
-    pub recommended_ram_gb: f64,
 }
 
 /// Cache simulation result at a specific cache size

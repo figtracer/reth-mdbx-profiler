@@ -2303,18 +2303,13 @@ impl StreamingAggregator {
         // Build hot page analysis
         let hot_page_analysis = self.build_hot_page_analysis();
 
-        // Calculate recommended RAM
-        let recommended_ram_gb = self.calculate_recommended_ram(&cache_simulation);
-
         // Generate summary text
         let summary_text = format!(
             "Traced {} unique pages ({:.1} GB) with {:.1}% reuse. \
-             For 90% cache hit rate, recommend {:.0} GB RAM. \
              Hot set ({:.1}% of pages) accounts for 80% of accesses.",
             total_unique_pages,
             total_unique_pages as f64 * 4096.0 / 1e9,
             reuse_ratio * 100.0,
-            recommended_ram_gb,
             hot_page_analysis.pareto_ratio * 100.0
         );
 
@@ -2330,7 +2325,6 @@ impl StreamingAggregator {
             time_windowed,
             hot_page_analysis,
             summary_text,
-            recommended_ram_gb,
         }
     }
 
@@ -2418,17 +2412,15 @@ impl StreamingAggregator {
             }
 
             // Calculate hit rate from sampled data
-            // Scale the sample to represent full dataset
-            let scale_factor = if sampled_unique > 0 {
-                total_unique as f64 / sampled_unique as f64
-            } else {
-                1.0
-            };
+            // We use the proportion of pages that fit in cache
+            let cache_coverage = cache_pages as f64 / total_unique as f64;
 
-            // How many sampled pages would fit in cache (proportionally)
-            let sampled_cache_pages = (cache_pages as f64 / scale_factor) as usize;
+            // How many of our sampled pages would be in cache (proportionally)
+            let sampled_cache_pages =
+                (cache_coverage * sampled_unique as f64).min(sampled_unique as f64) as usize;
 
             // Sum accesses for top N sampled pages that fit in cache
+            // sorted_counts is sorted descending (hottest pages first)
             let mut cached_accesses = 0u64;
             for (i, &count) in sorted_counts.iter().enumerate() {
                 if i >= sampled_cache_pages {
@@ -2438,7 +2430,7 @@ impl StreamingAggregator {
                 cached_accesses += count.saturating_sub(1) as u64;
             }
 
-            // Scale up to full dataset
+            // Calculate hit rate from sampled data
             let total_sampled_accesses: u64 = sorted_counts.iter().map(|&c| c as u64).sum();
             let hit_rate = if total_sampled_accesses > 0 {
                 cached_accesses as f64 / total_sampled_accesses as f64
@@ -2620,17 +2612,6 @@ impl StreamingAggregator {
             pareto_ratio,
             distribution_curve,
         }
-    }
-
-    fn calculate_recommended_ram(&self, cache_sim: &[CacheSimulationPoint]) -> f64 {
-        // Find the smallest cache size that gives >= 90% hit rate
-        for point in cache_sim {
-            if point.hit_rate >= 0.90 {
-                return point.cache_size_gb;
-            }
-        }
-        // If none reach 90%, recommend the largest simulated
-        cache_sim.last().map(|p| p.cache_size_gb).unwrap_or(64.0)
     }
 
     fn build_heatmap(&self) -> HeatmapData {

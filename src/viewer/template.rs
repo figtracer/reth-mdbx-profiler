@@ -150,10 +150,6 @@ pub fn generate_html(data: &ViewerData) -> String {
                             <span class="metric-value" id="mem-avg-accesses">0</span>
                             <span class="metric-label">Avg Accesses/Page</span>
                         </div>
-                        <div class="metric">
-                            <span class="metric-value major" id="mem-recommended-ram">0 GB</span>
-                            <span class="metric-label">Recommended RAM</span>
-                        </div>
                     </div>
 
                     <!-- Cache simulation and Pareto chart -->
@@ -1536,7 +1532,7 @@ body {
 }
 
 .cache-sim-chart, .pareto-chart, .reuse-distance-chart {
-    height: 200px;
+    min-height: 200px;
     margin-bottom: 16px;
 }
 
@@ -2517,7 +2513,6 @@ function initMemory() {
     document.getElementById('mem-working-set').textContent = workingSetGB + ' GB';
     document.getElementById('mem-reuse-ratio').textContent = (ws.reuse_ratio * 100).toFixed(1) + '%';
     document.getElementById('mem-avg-accesses').textContent = ws.avg_accesses_per_page.toFixed(2);
-    document.getElementById('mem-recommended-ram').textContent = ws.recommended_ram_gb.toFixed(0) + ' GB';
 
     // Cache simulation chart (bar chart)
     if (ws.cache_simulation && ws.cache_simulation.length > 0) {
