@@ -2243,8 +2243,8 @@ function initOverview() {
     }
 
     // Page type donut in overview
-    const pt = DATA.page_types;
-    if (pt && pt.by_type && pt.by_type.length > 0) {
+    const pt = DATA.page_type_stats;
+    if (pt && pt.has_data && pt.by_type && pt.by_type.length > 0) {
         const canvas = document.getElementById('overview-page-type-donut');
         const ctx = canvas.getContext('2d');
         const colors = {
@@ -2536,27 +2536,30 @@ function initTables() {
     if (unified.length > 0) {
         document.getElementById('fault-dist-row').style.display = 'grid';
 
-        // Fault distribution chart (top 8 by faults)
-        const faultCanvas = document.getElementById('fault-dist-chart');
-        const topByFaults = unified.slice(0, 8);
-        drawFaultDistChart(faultCanvas,
-            topByFaults.map(t => t.name),
-            topByFaults.map(t => t.faults),
-            topByFaults.map(t => t.major_faults)
-        );
-
-        // I/O time chart (top 8 by time lost, filtered to those with actual I/O time)
-        const ioCanvas = document.getElementById('io-time-chart');
-        const topByIO = unified.filter(t => t.time_lost_ms > 0)
-            .sort((a, b) => b.time_lost_ms - a.time_lost_ms)
-            .slice(0, 8);
-        if (topByIO.length > 0) {
-            drawIOTimeChart(ioCanvas,
-                topByIO.map(t => t.name),
-                topByIO.map(t => t.time_lost_ms),
-                topByIO.map(t => t.slow_ops)
+        // Use requestAnimationFrame to ensure DOM has updated before measuring canvas size
+        requestAnimationFrame(() => {
+            // Fault distribution chart (top 8 by faults)
+            const faultCanvas = document.getElementById('fault-dist-chart');
+            const topByFaults = unified.slice(0, 8);
+            drawFaultDistChart(faultCanvas,
+                topByFaults.map(t => t.name),
+                topByFaults.map(t => t.faults),
+                topByFaults.map(t => t.major_faults)
             );
-        }
+
+            // I/O time chart (top 8 by time lost, filtered to those with actual I/O time)
+            const ioCanvas = document.getElementById('io-time-chart');
+            const topByIO = unified.filter(t => t.time_lost_ms > 0)
+                .sort((a, b) => b.time_lost_ms - a.time_lost_ms)
+                .slice(0, 8);
+            if (topByIO.length > 0) {
+                drawIOTimeChart(ioCanvas,
+                    topByIO.map(t => t.name),
+                    topByIO.map(t => t.time_lost_ms),
+                    topByIO.map(t => t.slow_ops)
+                );
+            }
+        });
     }
 
     // Build unified table with expandable rows
@@ -3549,14 +3552,12 @@ function initResourcesTxns() {
 
 function initResourcesThreads() {
     // Page faults by thread
-    const faultsByThread = DATA.thread_stats;
+    const faultsByThread = DATA.threads;
     if (faultsByThread && faultsByThread.length > 0) {
         const tbody = document.querySelector('#threads-faults-table tbody');
-        const totalFaults = faultsByThread.reduce((sum, t) => sum + t.total_faults, 0);
         faultsByThread.slice(0, 20).forEach(th => {
             const tr = document.createElement('tr');
-            const pct = totalFaults > 0 ? (th.total_faults / totalFaults * 100).toFixed(1) : '0';
-            tr.innerHTML = `<td>${th.tid}</td><td>${fmt(th.total_faults)}</td><td>${pct}%</td>`;
+            tr.innerHTML = `<td>${th.tid}</td><td>${fmt(th.faults)}</td><td>${th.percentage.toFixed(1)}%</td>`;
             tbody.appendChild(tr);
         });
     }
