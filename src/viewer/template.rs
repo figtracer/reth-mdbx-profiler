@@ -1780,9 +1780,10 @@ class Chart {
 function drawFaultDistChart(canvas, labels, totalFaults, majorFaults) {
     const ctx = canvas.getContext('2d');
     const container = canvas.parentElement;
-    const containerWidth = container ? container.offsetWidth : 400;
+    const containerWidth = container ? container.offsetWidth : 0;
     const rect = canvas.getBoundingClientRect();
-    const w = rect.width > 0 ? rect.width : (containerWidth > 0 ? containerWidth : 400);
+    // Use container width, fallback to rect width, minimum 500px to fit labels
+    const w = Math.max(500, containerWidth > 0 ? containerWidth : (rect.width > 0 ? rect.width : 500));
 
     // Dynamic height based on number of bars
     const barHeight = 22;
@@ -1838,9 +1839,10 @@ function drawFaultDistChart(canvas, labels, totalFaults, majorFaults) {
 function drawIOTimeChart(canvas, labels, timeMs, slowOps) {
     const ctx = canvas.getContext('2d');
     const container = canvas.parentElement;
-    const containerWidth = container ? container.offsetWidth : 400;
+    const containerWidth = container ? container.offsetWidth : 0;
     const rect = canvas.getBoundingClientRect();
-    const w = rect.width > 0 ? rect.width : (containerWidth > 0 ? containerWidth : 400);
+    // Use container width, fallback to rect width, minimum 500px to fit labels
+    const w = Math.max(500, containerWidth > 0 ? containerWidth : (rect.width > 0 ? rect.width : 500));
 
     // Dynamic height based on number of bars
     const barHeight = 22;
@@ -2503,29 +2505,36 @@ function initTables() {
         document.getElementById('fault-dist-row').style.display = 'grid';
 
         // Defer chart drawing to ensure panel is visible and has dimensions
-        setTimeout(() => {
-            // Fault distribution chart (top 8 by faults)
-            const faultCanvas = document.getElementById('fault-dist-chart');
-            const topByFaults = unified.slice(0, 8);
-            drawFaultDistChart(faultCanvas,
-                topByFaults.map(t => t.name),
-                topByFaults.map(t => t.faults),
-                topByFaults.map(t => t.major_faults)
-            );
+        // Use requestAnimationFrame to wait for layout, then draw
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                // Fault distribution chart (top 8 by faults)
+                const faultCanvas = document.getElementById('fault-dist-chart');
+                if (faultCanvas) {
+                    const topByFaults = unified.slice(0, 8);
+                    drawFaultDistChart(faultCanvas,
+                        topByFaults.map(t => t.name),
+                        topByFaults.map(t => t.faults),
+                        topByFaults.map(t => t.major_faults)
+                    );
+                }
 
-            // I/O time chart (top 8 by time lost, filtered to those with actual I/O time)
-            const ioCanvas = document.getElementById('io-time-chart');
-            const topByIO = unified.filter(t => t.time_lost_ms > 0)
-                .sort((a, b) => b.time_lost_ms - a.time_lost_ms)
-                .slice(0, 8);
-            if (topByIO.length > 0) {
-                drawIOTimeChart(ioCanvas,
-                    topByIO.map(t => t.name),
-                    topByIO.map(t => t.time_lost_ms),
-                    topByIO.map(t => t.slow_ops)
-                );
-            }
-        }, 50);
+                // I/O time chart (top 8 by time lost, filtered to those with actual I/O time)
+                const ioCanvas = document.getElementById('io-time-chart');
+                if (ioCanvas) {
+                    const topByIO = unified.filter(t => t.time_lost_ms > 0)
+                        .sort((a, b) => b.time_lost_ms - a.time_lost_ms)
+                        .slice(0, 8);
+                    if (topByIO.length > 0) {
+                        drawIOTimeChart(ioCanvas,
+                            topByIO.map(t => t.name),
+                            topByIO.map(t => t.time_lost_ms),
+                            topByIO.map(t => t.slow_ops)
+                        );
+                    }
+                }
+            });
+        });
     }
 
     // Build unified table with expandable rows
@@ -2541,14 +2550,25 @@ function initTables() {
             ? (t.time_lost_ms / 1000).toFixed(1) + 's'
             : t.time_lost_ms.toFixed(0) + 'ms';
 
-        const pct = totalFaults > 0 ? (t.faults / totalFaults) * 100 : 0;
+        const majorPct = t.faults > 0 ? (t.major_faults / t.faults * 100).toFixed(1) : '0.0';
+
+        // Get B:L ratio from tree_traversal data
+        const treeTable = DATA.tree_traversal?.tables?.find(tt => tt.name === t.name);
+        const blRatio = treeTable ? treeTable.branch_leaf_ratio.toFixed(2) : '-';
+
+        // Get working set from working_set data
+        const wsTable = DATA.working_set?.per_table?.find(wt => wt.name === t.name);
+        const workingSet = wsTable ? fmt(wsTable.unique_pages) : '-';
+        const reusePct = wsTable ? (wsTable.reuse_ratio * 100).toFixed(1) + '%' : '-';
+
         tr.innerHTML = `
             <td><span class="expand-icon">▶</span></td>
             <td>${t.name}</td>
             <td>${fmt(t.faults)}</td>
-            <td>${pct.toFixed(1)}%</td>
-            <td class="major">${fmt(t.major_faults)}</td>
-            <td>${t.slow_ops > 0 ? fmt(t.slow_ops) : '-'}</td>
+            <td>${majorPct}%</td>
+            <td>${blRatio}</td>
+            <td>${workingSet}</td>
+            <td>${reusePct}</td>
             <td class="io-time">${t.time_lost_ms > 0 ? ioTime : '-'}</td>
         `;
         tbody.appendChild(tr);
@@ -2558,7 +2578,7 @@ function initTables() {
         detailsTr.className = 'details-row hidden';
         detailsTr.dataset.idx = idx;
 
-        let detailsHtml = '<td colspan="7"><div class="details-content">';
+        let detailsHtml = '<td colspan="8"><div class="details-content">';
 
         // Top 5 Operations by Faults - Primary section
         detailsHtml += '<div class="details-section"><div class="details-section-title">Top Operations by Page Faults</div><div class="details-list">';
