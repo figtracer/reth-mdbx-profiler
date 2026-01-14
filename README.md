@@ -86,12 +86,6 @@ options:
 - `--label`: label for compact export (used in comparisons)
 - `--bucket-ms`: time bucket size for pattern analysis (default: 100)
 
-the analyzer processes traces in streaming mode with constant memory usage (~500MB), so it can handle traces of any size (tested with 75GB+ files). progress is shown during analysis:
-
-```
-[████████████░░░░░░░░░░░░░░░░░░]  40.5% | 30.4GB/75.0GB | 85 MB/s | ETA: 8m 45s | 125M faults, 89M ops
-```
-
 ## rpc method profiling
 
 compare mdbx impact across different rpc methods:
@@ -128,15 +122,6 @@ generates an interactive html comparison report showing:
 - page fault counts and rates per method
 - delta from baseline (idle) measurements
 - table access breakdown by method
-
-
-## how it works
-
-see [docs/INTERNALS.md](docs/INTERNALS.md) for the full technical details on:
-- ebpf probe architecture
-- active operation tracking
-- page fault enrichment
-- viewer visualizations
 
 ## license
 
