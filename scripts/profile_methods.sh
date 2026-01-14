@@ -20,6 +20,7 @@
 #   --output-dir DIR    Output directory (default: ./method_profiles)
 #   --settle-time SECS  Time to wait between tests for system to settle (default: 30)
 #   --flush-caches      Flush OS page caches before each test (requires root)
+#   --skip-baseline     Skip baseline (idle) capture, useful for A/B comparisons
 #   --quick             Quick mode: ~1 hour total (4 min/test, 10s settle)
 #
 # Available methods:
@@ -49,6 +50,7 @@ METRICS_URL="http://localhost:9001"
 OUTPUT_DIR="./method_profiles"
 SETTLE_TIME=30
 FLUSH_CACHES=false
+SKIP_BASELINE=false
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROFILER="$SCRIPT_DIR/../target/release/mdbx-profiler"
@@ -75,6 +77,7 @@ while [[ $# -gt 0 ]]; do
         --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
         --settle-time) SETTLE_TIME="$2"; shift 2 ;;
         --flush-caches) FLUSH_CACHES=true; shift ;;
+        --skip-baseline) SKIP_BASELINE=true; shift ;;
         --quick) QUICK=true; shift ;;
         --help|-h)
             head -40 "$0" | grep "^#" | cut -c3-
@@ -506,15 +509,20 @@ flush_and_settle() {
 # Capture baseline profile (idle, no load)
 # ============================================================================
 
-echo ""
-echo -e "${YELLOW}[0/${#METHOD_LIST[@]}] Capturing baseline profile (no load)${NC}"
+if [ "$SKIP_BASELINE" = false ]; then
+    echo ""
+    echo -e "${YELLOW}[0/${#METHOD_LIST[@]}] Capturing baseline profile (no load)${NC}"
 
-flush_and_settle "baseline"
+    flush_and_settle "baseline"
 
-echo "  Profiling for ${DURATION}s..."
-$PROFILER_CMD --output "$SESSION_DIR/baseline.jsonl" 2>&1 | tee "$SESSION_DIR/baseline_profiler.log"
+    echo "  Profiling for ${DURATION}s..."
+    $PROFILER_CMD --output "$SESSION_DIR/baseline.jsonl" 2>&1 | tee "$SESSION_DIR/baseline_profiler.log"
 
-echo -e "${GREEN}Baseline complete${NC}"
+    echo -e "${GREEN}Baseline complete${NC}"
+else
+    echo ""
+    echo -e "${YELLOW}Skipping baseline (--skip-baseline)${NC}"
+fi
 
 # ============================================================================
 # Profile each method
