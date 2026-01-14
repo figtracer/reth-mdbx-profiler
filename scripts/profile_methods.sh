@@ -21,6 +21,7 @@
 #   --settle-time SECS  Time to wait between tests for system to settle (default: 30)
 #   --flush-caches      Flush OS page caches before each test (requires root)
 #   --skip-baseline     Skip baseline (idle) capture, useful for A/B comparisons
+#   --compare-with DIR  Include results from a previous run for A/B comparison
 #   --quick             Quick mode: ~1 hour total (4 min/test, 10s settle)
 #
 # Available methods:
@@ -51,6 +52,7 @@ OUTPUT_DIR="./method_profiles"
 SETTLE_TIME=30
 FLUSH_CACHES=false
 SKIP_BASELINE=false
+COMPARE_WITH=""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROFILER="$SCRIPT_DIR/../target/release/mdbx-profiler"
@@ -78,6 +80,7 @@ while [[ $# -gt 0 ]]; do
         --settle-time) SETTLE_TIME="$2"; shift 2 ;;
         --flush-caches) FLUSH_CACHES=true; shift ;;
         --skip-baseline) SKIP_BASELINE=true; shift ;;
+        --compare-with) COMPARE_WITH="$2"; shift 2 ;;
         --quick) QUICK=true; shift ;;
         --help|-h)
             head -40 "$0" | grep "^#" | cut -c3-
@@ -641,7 +644,7 @@ done
 
 echo "Generating comparison report..."
 
-# Collect all compact JSONs (baseline first, then methods)
+# Collect all compact JSONs (baseline first, then compare-with, then current methods)
 COMPARISON_JSON="$SESSION_DIR/comparison_data.json"
 echo "[" > "$COMPARISON_JSON"
 first=true
@@ -652,7 +655,22 @@ if [ -f "$SESSION_DIR/baseline.json" ] && [ -s "$SESSION_DIR/baseline.json" ]; t
     cat "$SESSION_DIR/baseline.json" >> "$COMPARISON_JSON"
 fi
 
-# Add all methods
+# Add results from --compare-with directory (previous run)
+if [ -n "$COMPARE_WITH" ] && [ -d "$COMPARE_WITH" ]; then
+    echo "  Including results from: $COMPARE_WITH"
+    for json in "$COMPARE_WITH"/*.json; do
+        if [ -f "$json" ] && [ -s "$json" ] && [[ "$(basename "$json")" != "comparison_data.json" ]]; then
+            if [ "$first" = true ]; then
+                first=false
+            else
+                echo "," >> "$COMPARISON_JSON"
+            fi
+            cat "$json" >> "$COMPARISON_JSON"
+        fi
+    done
+fi
+
+# Add all methods from current run
 for method in "${METHOD_LIST[@]}"; do
     json="$SESSION_DIR/${method}.json"
     if [ -f "$json" ] && [ -s "$json" ]; then
