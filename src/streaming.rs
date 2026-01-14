@@ -9,12 +9,12 @@ use crate::event::{
     dbi_to_table_name, is_pre_trace_cursor,
 };
 use crate::viewer::{
-    BTreeVisualization, BatchAnalysis, BlockRange, BurstStats, CacheSimulationPoint,
-    CpuProfileSummary, CpuTableEntry, CursorData, CursorOpSample, CursorSummary, CursorTableStats,
-    CursorTimelinePoint, DepthBucket, DirectFaultAttribution, FaultsByCursorOp, FaultsByOpType,
-    HeatmapData, HistogramBucket, HotPageAnalysis, OpFaultCount, OperationDepthStats,
-    OperationFaultHistogram, OperationPageTypeBreakdown, OperationStats, PageTypeFaultCount,
-    PageTypeStats, ParetoPoint, PatternAnalysis, ReuseDistanceBucket, RwCommitPoint, SlowKeyStats,
+    AccessCountBucket, BTreeVisualization, BatchAnalysis, BlockRange, BurstStats,
+    CacheSimulationPoint, CpuProfileSummary, CpuTableEntry, CursorData, CursorOpSample,
+    CursorSummary, CursorTableStats, CursorTimelinePoint, DepthBucket, DirectFaultAttribution,
+    FaultsByCursorOp, FaultsByOpType, HeatmapData, HistogramBucket, HotPageAnalysis, OpFaultCount,
+    OperationDepthStats, OperationFaultHistogram, OperationPageTypeBreakdown, OperationStats,
+    PageTypeFaultCount, PageTypeStats, ParetoPoint, PatternAnalysis, RwCommitPoint, SlowKeyStats,
     SlowOpBreakdown, SlowOpsTableStats, StrideInfo, TableDepthStats, TableDrillDown,
     TableSourceLink, TableTreeStats, TableWorkingSet, ThreadStats, TimeWindowedWSS, TimelinePoint,
     TraceSummary, TreeDepthEstimate, TreeDepthStats, TreeTraversalViz, TxnConcurrencyStats,
@@ -464,6 +464,21 @@ impl HotKeyTracker {
         entries.sort_by(|a, b| b.1.0.cmp(&a.1.0));
         entries.truncate(self.max_keys);
         self.keys = entries.into_iter().collect();
+    }
+
+    /// Get top hot keys for a specific table (dbi), sorted by slow_count descending
+    fn get_for_table(&self, dbi: u32, limit: usize) -> Vec<(String, u64, u64, u64, u64)> {
+        let mut entries: Vec<_> = self
+            .keys
+            .iter()
+            .filter(|((d, _), _)| *d == dbi)
+            .map(|((_, key), &(slow, total, total_lat, max_lat))| {
+                (key.clone(), slow, total, total_lat, max_lat)
+            })
+            .collect();
+        entries.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by slow_count descending
+        entries.truncate(limit);
+        entries
     }
 }
 
@@ -2133,7 +2148,25 @@ impl StreamingAggregator {
                         faults_by_op,
                         faults_by_cursor_op,
                         slow_ops_breakdown,
-                        hot_keys: vec![], // Would need per-table hot key tracking
+                        hot_keys: self
+                            .hot_keys
+                            .get_for_table(dbi, 10)
+                            .into_iter()
+                            .filter(|(_, slow, _, _, _)| *slow > 0)
+                            .map(|(key_hex, slow_count, total_count, total_lat, max_lat)| {
+                                TableHotKey {
+                                    key_hex,
+                                    slow_count,
+                                    total_count,
+                                    avg_latency_us: if total_count > 0 {
+                                        total_lat as f64 / total_count as f64 / 1000.0
+                                    } else {
+                                        0.0
+                                    },
+                                    max_latency_us: max_lat as f64 / 1000.0,
+                                }
+                            })
+                            .collect(),
                     },
                     branch_faults: stats.branch_faults,
                     leaf_faults: stats.leaf_faults,
@@ -2311,8 +2344,8 @@ impl StreamingAggregator {
             0.0
         };
 
-        // Build reuse distance histogram
-        let reuse_distance_histogram = self.build_reuse_distance_histogram();
+        // Build access count distribution
+        let access_count_distribution = self.build_access_count_distribution();
 
         // Build cache simulation
         let cache_simulation = self.build_cache_simulation(duration_secs);
@@ -2343,7 +2376,7 @@ impl StreamingAggregator {
             reuse_ratio,
             avg_accesses_per_page,
             cache_simulation,
-            reuse_distance_histogram,
+            access_count_distribution,
             per_table,
             time_windowed,
             hot_page_analysis,
@@ -2351,48 +2384,38 @@ impl StreamingAggregator {
         }
     }
 
-    fn build_reuse_distance_histogram(&mut self) -> Vec<ReuseDistanceBucket> {
-        // Define buckets for reuse distance
-        let bucket_defs = [
-            ("immediate (0-100)", 0u64, 100u64),
-            ("short (100-1K)", 100, 1_000),
-            ("medium (1K-10K)", 1_000, 10_000),
-            ("long (10K-100K)", 10_000, 100_000),
-            ("very long (100K-1M)", 100_000, 1_000_000),
-            ("extreme (>1M)", 1_000_000, u64::MAX),
-        ];
+    fn build_access_count_distribution(&self) -> Vec<AccessCountBucket> {
+        // Get access counts from sampled pages
+        let counts: Vec<u32> = self.sampled_page_counts.samples.values().copied().collect();
 
-        // Sort the samples to count per bucket
-        let mut samples = std::mem::take(&mut self.reuse_distance_sampler.samples);
-        samples.sort_unstable();
-
-        let total_samples = samples.len() as u64;
-        if total_samples == 0 {
+        if counts.is_empty() {
             return vec![];
         }
 
+        let total_pages = counts.len() as u64;
+
+        // Define buckets: 1x, 2x, 3-5x, 6-10x, 11-50x, 50+x
+        let bucket_defs: &[(&str, u32, u32)] = &[
+            ("1x (single access)", 1, 1),
+            ("2x", 2, 2),
+            ("3-5x", 3, 5),
+            ("6-10x", 6, 10),
+            ("11-50x", 11, 50),
+            ("50+x (hot pages)", 51, u32::MAX),
+        ];
+
         let mut buckets = Vec::new();
-        let mut cumulative = 0u64;
 
         for (label, min, max) in bucket_defs.iter() {
-            let count = samples.iter().filter(|&&d| d >= *min && d < *max).count() as u64;
-            cumulative += count;
+            let page_count = counts.iter().filter(|&&c| c >= *min && c <= *max).count() as u64;
+            let percentage = page_count as f64 / total_pages as f64 * 100.0;
 
-            let percentage = count as f64 / total_samples as f64 * 100.0;
-            let cumulative_percentage = cumulative as f64 / total_samples as f64 * 100.0;
-
-            buckets.push(ReuseDistanceBucket {
+            buckets.push(AccessCountBucket {
                 label: label.to_string(),
-                min_distance: *min,
-                max_distance: *max,
-                count,
+                page_count,
                 percentage,
-                cumulative_percentage,
             });
         }
-
-        // Restore samples for potential reuse
-        self.reuse_distance_sampler.samples = samples;
 
         buckets
     }

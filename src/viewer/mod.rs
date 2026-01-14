@@ -68,8 +68,8 @@ pub struct WorkingSetAnalysis {
     pub avg_accesses_per_page: f64,
     /// Cache hit rate simulation at various cache sizes
     pub cache_simulation: Vec<CacheSimulationPoint>,
-    /// Reuse distance histogram (how many unique pages between repeated accesses)
-    pub reuse_distance_histogram: Vec<ReuseDistanceBucket>,
+    /// Access count distribution (how many pages have 1x, 2x, 3-5x, etc. accesses)
+    pub access_count_distribution: Vec<AccessCountBucket>,
     /// Per-table working set statistics
     pub per_table: Vec<TableWorkingSet>,
     /// Time-windowed working set sizes
@@ -93,21 +93,15 @@ pub struct CacheSimulationPoint {
     pub faults_avoided_per_sec: f64,
 }
 
-/// Reuse distance histogram bucket
+/// Access count distribution bucket (how many pages have N accesses)
 #[derive(Debug, Serialize, Clone)]
-pub struct ReuseDistanceBucket {
-    /// Bucket label (e.g., "immediate (0-100)")
+pub struct AccessCountBucket {
+    /// Bucket label (e.g., "1x", "2x", "3-5x")
     pub label: String,
-    /// Minimum distance in this bucket
-    pub min_distance: u64,
-    /// Maximum distance in this bucket
-    pub max_distance: u64,
-    /// Number of reuses in this bucket
-    pub count: u64,
-    /// Percentage of total reuses
+    /// Number of pages in this bucket
+    pub page_count: u64,
+    /// Percentage of sampled pages
     pub percentage: f64,
-    /// Cumulative percentage (for CDF)
-    pub cumulative_percentage: f64,
 }
 
 /// Per-table working set statistics

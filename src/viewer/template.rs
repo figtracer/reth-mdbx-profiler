@@ -244,11 +244,11 @@ pub fn generate_html(data: &ViewerData) -> String {
                             </div>
                         </div>
 
-                        <!-- Reuse distance -->
+                        <!-- Access count distribution -->
                         <div class="card">
-                            <div class="card-header">Page Reuse Distance Distribution</div>
+                            <div class="card-header">Pages by Access Count</div>
                             <div class="card-body">
-                                <div class="reuse-distance-chart" id="reuse-distance-chart"></div>
+                                <div class="access-count-chart" id="access-count-chart"></div>
                             </div>
                         </div>
                     </div>
@@ -1341,7 +1341,7 @@ body {
     color: #d4d4d8;
 }
 
-.reuse-distance-chart {
+.access-count-chart {
     min-height: 200px;
     margin-bottom: 16px;
 }
@@ -1402,7 +1402,7 @@ body {
     transition: width 0.3s ease;
 }
 
-.bar-chart-bar.reuse { background: linear-gradient(90deg, #8b5cf6, #a78bfa); }
+.bar-chart-bar.access-count { background: linear-gradient(90deg, #06b6d4, #22d3ee); }
 
 .bar-chart-value {
     width: 70px;
@@ -2350,19 +2350,19 @@ function initResourcesMemory() {
     document.getElementById('mem-reuse-ratio').textContent = (ws.reuse_ratio * 100).toFixed(1) + '%';
     document.getElementById('mem-avg-accesses').textContent = ws.avg_accesses_per_page.toFixed(2);
 
-    // Reuse distance histogram
-    if (ws.reuse_distance_histogram && ws.reuse_distance_histogram.length > 0) {
-        const chartEl = document.getElementById('reuse-distance-chart');
+    // Access count distribution (how many pages have 1x, 2x, etc. accesses)
+    if (ws.access_count_distribution && ws.access_count_distribution.length > 0) {
+        const chartEl = document.getElementById('access-count-chart');
         let html = '<div class="bar-chart-container">';
 
-        const maxPct = Math.max(...ws.reuse_distance_histogram.map(b => b.percentage));
-        ws.reuse_distance_histogram.forEach(bucket => {
+        const maxPct = Math.max(...ws.access_count_distribution.map(b => b.percentage));
+        ws.access_count_distribution.forEach(bucket => {
             const barWidth = maxPct > 0 ? (bucket.percentage / maxPct * 100) : 0;
             html += `
                 <div class="bar-chart-row">
                     <span class="bar-chart-label">${bucket.label}</span>
                     <div class="bar-chart-bar-container">
-                        <div class="bar-chart-bar reuse" style="width: ${barWidth}%"></div>
+                        <div class="bar-chart-bar access-count" style="width: ${barWidth}%"></div>
                     </div>
                     <span class="bar-chart-value">${bucket.percentage.toFixed(1)}%</span>
                 </div>
