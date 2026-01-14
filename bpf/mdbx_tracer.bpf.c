@@ -615,28 +615,40 @@ int BPF_KRETPROBE(trace_page_fault_ret, vm_fault_t ret)
         // Try to read the page flags from the mapped page
         __u64 page_start = fctx->address & ~0xFFFULL;  // Align to 4KB page boundary
         __u16 flags = 0;
+        int read_ok = 0;
 
-        // Use bpf_probe_read_user to safely read from user space
+        // Try bpf_probe_read_user first (for user-mapped pages)
         // The page should be mapped now since the fault handler completed
         // Flags are at offset 10 (after txnid[8] + dupfix_ksize[2])
         if (bpf_probe_read_user(&flags, sizeof(flags), (void *)(page_start + MDBX_PAGE_FLAGS_OFFSET)) == 0) {
+            read_ok = 1;
+        } else {
+            // Fallback: try bpf_probe_read which can read both kernel and user memory
+            // This may work in cases where the page is in a transitional state
+            if (bpf_probe_read(&flags, sizeof(flags), (void *)(page_start + MDBX_PAGE_FLAGS_OFFSET)) == 0) {
+                read_ok = 1;
+            }
+        }
+
+        if (read_ok && flags != 0) {
             // Determine page type from flags
-            // Check in order of specificity (META is rare, check first)
+            // MDBX page types can be combined, check in order of specificity
             if (flags & MDBX_P_META) {
                 page_type = PAGE_TYPE_META;
             } else if (flags & MDBX_P_LARGE) {
                 page_type = PAGE_TYPE_OVERFLOW;
             } else if (flags & MDBX_P_BRANCH) {
                 page_type = PAGE_TYPE_BRANCH;
-            } else if (flags & (MDBX_P_LEAF | MDBX_P_DUPFIX)) {
-                // Both P_LEAF and P_DUPFIX pages contain actual data (leaf-level)
-                // P_DUPFIX is used for MDBX_DUPFIXED sorted duplicates
+            } else if (flags & (MDBX_P_LEAF | MDBX_P_DUPFIX | MDBX_P_SUBP)) {
+                // P_LEAF: regular leaf pages with data
+                // P_DUPFIX: MDBX_DUPFIXED leaf pages for sorted duplicates  
+                // P_SUBP: sub-pages for DUPSORT tables (also contain data)
+                // All of these are data-level pages, classify as LEAF
                 page_type = PAGE_TYPE_LEAF;
             }
-            // If flags is 0 or doesn't match any known type, stays as UNKNOWN
-            // This can happen for sub-pages (P_SUBP) or internal states
+            // If flags doesn't match any known type, stays as UNKNOWN
         }
-        // If read fails, page_type stays as PAGE_TYPE_UNKNOWN
+        // If both reads fail or flags is 0, page_type stays as PAGE_TYPE_UNKNOWN
     }
 
     e->page_type = page_type;
