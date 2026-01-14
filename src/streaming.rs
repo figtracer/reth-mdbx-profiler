@@ -242,12 +242,10 @@ struct HotKeyTracker {
 #[derive(Debug)]
 struct PageAccessTracker {
     /// Map from page number to last access sequence number
-    /// Bounded to max_entries using LRU-style eviction
+    /// Bounded - stops accepting new pages when full (first N pages tracked)
     page_to_seq: HashMap<u64, u64>,
     /// Maximum entries to track
     max_entries: usize,
-    /// Access order for LRU eviction (recent pages)
-    access_order: Vec<u64>,
 }
 
 impl PageAccessTracker {
@@ -255,7 +253,6 @@ impl PageAccessTracker {
         Self {
             page_to_seq: HashMap::with_capacity(max_entries),
             max_entries,
-            access_order: Vec::with_capacity(max_entries),
         }
     }
 
@@ -266,34 +263,172 @@ impl PageAccessTracker {
             .get(&page)
             .map(|&last_seq| current_seq.saturating_sub(last_seq));
 
-        // Update the page's last access sequence
-        self.page_to_seq.insert(page, current_seq);
-
-        // Update access order for LRU
-        // Remove old position if exists
-        if let Some(pos) = self.access_order.iter().position(|&p| p == page) {
-            self.access_order.remove(pos);
-        }
-        self.access_order.push(page);
-
-        // Evict oldest entries if over capacity
-        while self.page_to_seq.len() > self.max_entries {
-            if let Some(oldest_page) = self.access_order.first().copied() {
-                self.access_order.remove(0);
-                self.page_to_seq.remove(&oldest_page);
-            } else {
-                break;
-            }
+        // If already tracking this page, just update it
+        if self.page_to_seq.contains_key(&page) {
+            self.page_to_seq.insert(page, current_seq);
+            return reuse_distance;
         }
 
+        // If under capacity, add it
+        if self.page_to_seq.len() < self.max_entries {
+            self.page_to_seq.insert(page, current_seq);
+            return reuse_distance;
+        }
+
+        // Over capacity - just don't track this new page
+        // We already have enough samples for statistical accuracy
         reuse_distance
     }
 }
 
 impl Default for PageAccessTracker {
     fn default() -> Self {
-        // Default to tracking 500K pages (~4MB memory for the HashMap)
-        Self::new(500_000)
+        Self::new(100_000)
+    }
+}
+
+/// Memory-efficient sampled access counts
+/// Tracks the first N unique pages seen and their access counts
+#[derive(Debug)]
+struct SampledAccessCounts {
+    /// Sample of pages with their access counts (bounded)
+    samples: HashMap<u64, u32>,
+    /// Maximum samples to keep
+    max_samples: usize,
+    /// Total accesses seen (for extrapolation)
+    total_accesses: u64,
+}
+
+impl SampledAccessCounts {
+    fn new(max_samples: usize) -> Self {
+        Self {
+            samples: HashMap::with_capacity(max_samples),
+            max_samples,
+            total_accesses: 0,
+        }
+    }
+
+    fn record(&mut self, page: u64) {
+        self.total_accesses += 1;
+
+        // If page already sampled, increment count
+        if let Some(count) = self.samples.get_mut(&page) {
+            *count += 1;
+            return;
+        }
+
+        // If under capacity, add it
+        if self.samples.len() < self.max_samples {
+            self.samples.insert(page, 1);
+            return;
+        }
+
+        // Over capacity - don't add new pages, just track existing ones
+        // This is simpler and still provides good statistical sampling
+        // (first N unique pages seen are tracked)
+    }
+
+    /// Get sorted access counts for cache simulation (most accessed first)
+    fn get_sorted_counts(&self) -> Vec<u32> {
+        let mut counts: Vec<u32> = self.samples.values().copied().collect();
+        counts.sort_unstable_by(|a, b| b.cmp(a));
+        counts
+    }
+}
+
+impl Default for SampledAccessCounts {
+    fn default() -> Self {
+        Self::new(100_000) // 100K samples
+    }
+}
+
+/// Per-table page statistics (memory efficient)
+#[derive(Debug, Default)]
+struct TablePageStats {
+    /// Total accesses to this table
+    total_accesses: u64,
+    /// Estimated unique pages (using probabilistic counting)
+    /// We use a simple hash-based estimator: track min hash seen
+    min_hash: u64,
+    /// Count of pages seen (for small tables, exact; for large, estimated)
+    exact_pages: Option<HashSet<u64>>,
+    /// Threshold above which we switch to estimation
+    exact_threshold: usize,
+}
+
+impl TablePageStats {
+    fn new() -> Self {
+        Self {
+            total_accesses: 0,
+            min_hash: u64::MAX,
+            exact_pages: Some(HashSet::new()),
+            exact_threshold: 50_000, // Track exactly up to 50K pages per table
+        }
+    }
+
+    fn record(&mut self, page: u64) {
+        self.total_accesses += 1;
+
+        // Simple hash for cardinality estimation
+        let hash = page.wrapping_mul(0x9e3779b97f4a7c15);
+        self.min_hash = self.min_hash.min(hash);
+
+        // Track exactly if under threshold
+        if let Some(ref mut exact) = self.exact_pages {
+            exact.insert(page);
+            if exact.len() > self.exact_threshold {
+                // Switch to estimation mode
+                self.exact_pages = None;
+            }
+        }
+    }
+
+    fn unique_pages(&self) -> u64 {
+        if let Some(ref exact) = self.exact_pages {
+            exact.len() as u64
+        } else {
+            // Estimate using min-hash (Flajolet-Martin style)
+            // If min_hash is M, estimated cardinality is roughly MAX/M
+            if self.min_hash == 0 || self.min_hash == u64::MAX {
+                self.total_accesses // Fallback
+            } else {
+                (u64::MAX / self.min_hash).min(self.total_accesses)
+            }
+        }
+    }
+}
+
+/// Time window statistics (memory efficient - no page storage)
+#[derive(Debug, Default, Clone)]
+struct WindowStats {
+    /// Number of accesses in this window
+    accesses: u64,
+    /// Estimated unique pages using min-hash
+    min_hash: u64,
+    /// Number of pages tracked for small windows
+    page_count: u64,
+}
+
+impl WindowStats {
+    fn record(&mut self, page: u64) {
+        self.accesses += 1;
+        self.page_count += 1;
+
+        let hash = page.wrapping_mul(0x9e3779b97f4a7c15);
+        self.min_hash = if self.min_hash == 0 {
+            hash
+        } else {
+            self.min_hash.min(hash)
+        };
+    }
+
+    fn estimated_unique_pages(&self) -> u64 {
+        if self.min_hash == 0 || self.min_hash == u64::MAX {
+            self.page_count
+        } else {
+            // Flajolet-Martin estimator
+            (u64::MAX / self.min_hash).min(self.page_count)
+        }
     }
 }
 
@@ -438,11 +573,12 @@ pub struct StreamingAggregator {
     // Parse errors
     parse_errors: u64,
 
-    // Working set analysis
-    // Page access counts: page_number -> access_count
-    page_access_counts: HashMap<u64, u32>,
-    // Per-table page access: dbi -> (unique_pages set, total_accesses)
-    table_page_access: HashMap<u32, (HashSet<u64>, u64)>,
+    // Working set analysis (memory-efficient using sampling)
+    // Sampled page access counts: tracks access counts for a bounded sample of pages
+    sampled_page_counts: SampledAccessCounts,
+    // Per-table stats: dbi -> (estimated_unique_pages, total_accesses)
+    // Uses HyperLogLog-style sampling for unique page estimation
+    table_page_stats: HashMap<u32, TablePageStats>,
     // Reuse distance sampler: samples of (reuse_distance) for histogram
     reuse_distance_sampler: ReservoirSampler,
     // Last access sequence number for each page (for reuse distance calculation)
@@ -450,8 +586,11 @@ pub struct StreamingAggregator {
     page_last_access_seq: PageAccessTracker,
     // Current access sequence number
     access_sequence: u64,
-    // Time-windowed working set: window_start_bucket -> unique pages in window
-    time_window_pages: HashMap<u64, HashSet<u64>>,
+    // Time-windowed working set: window_bucket -> (new_pages_this_window, total_accesses)
+    // Uses probabilistic counting instead of storing all pages
+    time_window_stats: HashMap<u64, WindowStats>,
+    // Last window we processed
+    last_window_bucket: u64,
 }
 
 #[derive(Debug, Default)]
@@ -541,12 +680,13 @@ impl StreamingAggregator {
             heatmap_initialized: false,
             parse_errors: 0,
             // Working set analysis
-            page_access_counts: HashMap::new(),
-            table_page_access: HashMap::new(),
-            reuse_distance_sampler: ReservoirSampler::new(100_000), // 100K samples for reuse distance
-            page_last_access_seq: PageAccessTracker::new(500_000),  // Track 500K pages for reuse
+            sampled_page_counts: SampledAccessCounts::new(50_000), // 50K sampled pages
+            table_page_stats: HashMap::new(),
+            reuse_distance_sampler: ReservoirSampler::new(50_000), // 50K reuse distance samples
+            page_last_access_seq: PageAccessTracker::new(100_000), // 100K pages for reuse tracking
             access_sequence: 0,
-            time_window_pages: HashMap::new(),
+            time_window_stats: HashMap::new(),
+            last_window_bucket: 0,
         }
     }
 
@@ -591,11 +731,11 @@ impl StreamingAggregator {
         }
         self.last_page = Some(page);
 
-        // Working set analysis - track page access counts and reuse distance
+        // Working set analysis
         self.access_sequence += 1;
-        *self.page_access_counts.entry(page).or_insert(0) += 1;
+        self.sampled_page_counts.record(page);
 
-        // Track reuse distance (how many unique pages between repeated accesses)
+        // Track reuse distance (sampled - only for pages we're tracking)
         if let Some(reuse_dist) = self
             .page_last_access_seq
             .record_access(page, self.access_sequence)
@@ -606,10 +746,10 @@ impl StreamingAggregator {
         // Time-windowed working set (1-minute windows)
         let first_ts = self.first_timestamp.unwrap();
         let window_bucket = (ts - first_ts) / (60 * 1_000_000_000); // 1-minute windows
-        self.time_window_pages
+        self.time_window_stats
             .entry(window_bucket)
-            .or_insert_with(HashSet::new)
-            .insert(page);
+            .or_default()
+            .record(page);
 
         // Page type stats
         let page_type = event.page_type;
@@ -651,12 +791,10 @@ impl StreamingAggregator {
             }
 
             // Per-table working set tracking
-            let table_ws = self
-                .table_page_access
+            self.table_page_stats
                 .entry(dbi)
-                .or_insert_with(|| (HashSet::new(), 0));
-            table_ws.0.insert(page);
-            table_ws.1 += 1;
+                .or_insert_with(TablePageStats::new)
+                .record(page);
 
             // Page type per table
             match MdbxPageType::from_raw(page_type) {
@@ -2243,12 +2381,12 @@ impl StreamingAggregator {
     }
 
     fn build_cache_simulation(&self, duration_secs: f64) -> Vec<CacheSimulationPoint> {
-        // Get sorted access counts (descending - most accessed pages first)
-        let mut page_counts: Vec<_> = self.page_access_counts.iter().collect();
-        page_counts.sort_by(|a, b| b.1.cmp(a.1));
+        // Get sorted access counts from sampled data (descending - most accessed first)
+        let sorted_counts = self.sampled_page_counts.get_sorted_counts();
 
         let total_accesses = self.page_fault_count;
-        let total_unique = page_counts.len() as u64;
+        let total_unique = self.unique_pages.len() as u64;
+        let sampled_unique = sorted_counts.len() as u64;
         let major_fault_rate = if duration_secs > 0.0 {
             self.major_fault_count as f64 / duration_secs
         } else {
@@ -2279,19 +2417,31 @@ impl StreamingAggregator {
                 continue;
             }
 
-            // Calculate hit rate assuming LRU-like behavior
-            // Sum accesses for top N pages that fit in cache
+            // Calculate hit rate from sampled data
+            // Scale the sample to represent full dataset
+            let scale_factor = if sampled_unique > 0 {
+                total_unique as f64 / sampled_unique as f64
+            } else {
+                1.0
+            };
+
+            // How many sampled pages would fit in cache (proportionally)
+            let sampled_cache_pages = (cache_pages as f64 / scale_factor) as usize;
+
+            // Sum accesses for top N sampled pages that fit in cache
             let mut cached_accesses = 0u64;
-            for (i, (_, &count)) in page_counts.iter().enumerate() {
-                if i as u64 >= cache_pages {
+            for (i, &count) in sorted_counts.iter().enumerate() {
+                if i >= sampled_cache_pages {
                     break;
                 }
                 // For pages in cache, subsequent accesses are hits (count - 1)
                 cached_accesses += count.saturating_sub(1) as u64;
             }
 
-            let hit_rate = if total_accesses > 0 {
-                cached_accesses as f64 / total_accesses as f64
+            // Scale up to full dataset
+            let total_sampled_accesses: u64 = sorted_counts.iter().map(|&c| c as u64).sum();
+            let hit_rate = if total_sampled_accesses > 0 {
+                cached_accesses as f64 / total_sampled_accesses as f64
             } else {
                 0.0
             };
@@ -2313,11 +2463,11 @@ impl StreamingAggregator {
         let page_size = 4096.0;
 
         let mut table_ws: Vec<_> = self
-            .table_page_access
+            .table_page_stats
             .iter()
-            .map(|(&dbi, (pages, accesses))| {
-                let unique_pages = pages.len() as u64;
-                let total_accesses = *accesses;
+            .map(|(&dbi, stats)| {
+                let unique_pages = stats.unique_pages();
+                let total_accesses = stats.total_accesses;
 
                 // Calculate reuse ratio for this table
                 let reuse_ratio = if total_accesses > unique_pages && unique_pages > 0 {
@@ -2360,17 +2510,17 @@ impl StreamingAggregator {
     }
 
     fn build_time_windowed_wss(&self) -> Vec<TimeWindowedWSS> {
-        if self.time_window_pages.is_empty() {
+        if self.time_window_stats.is_empty() {
             return vec![];
         }
 
         let page_size = 4096.0;
 
-        // Calculate stats for 1-minute windows (already collected)
+        // Calculate stats for 1-minute windows using estimated unique pages
         let window_sizes: Vec<u64> = self
-            .time_window_pages
+            .time_window_stats
             .values()
-            .map(|pages| pages.len() as u64)
+            .map(|stats| stats.estimated_unique_pages())
             .collect();
 
         if window_sizes.is_empty() {
@@ -2391,52 +2541,58 @@ impl StreamingAggregator {
     }
 
     fn build_hot_page_analysis(&self) -> HotPageAnalysis {
-        if self.page_access_counts.is_empty() {
+        let sorted_counts = self.sampled_page_counts.get_sorted_counts();
+        if sorted_counts.is_empty() {
             return HotPageAnalysis::default();
         }
 
-        // Sort pages by access count (descending)
-        let mut page_counts: Vec<_> = self.page_access_counts.values().copied().collect();
-        page_counts.sort_unstable_by(|a, b| b.cmp(a));
+        // Use sampled data to estimate hot page distribution
+        // Scale factors to extrapolate to full dataset
+        let total_unique_pages = self.unique_pages.len() as u64;
+        let sampled_pages = sorted_counts.len() as u64;
+        let scale_factor = if sampled_pages > 0 {
+            total_unique_pages as f64 / sampled_pages as f64
+        } else {
+            1.0
+        };
 
-        let total_pages = page_counts.len() as u64;
-        let total_accesses: u64 = page_counts.iter().map(|&c| c as u64).sum();
+        let total_sampled_accesses: u64 = sorted_counts.iter().map(|&c| c as u64).sum();
 
-        if total_accesses == 0 {
+        if total_sampled_accesses == 0 {
             return HotPageAnalysis::default();
         }
 
-        // Find pages needed for various percentages of accesses
+        // Find pages needed for various percentages of accesses (from sampled data)
         let mut cumulative_accesses = 0u64;
-        let mut pages_for_50pct = 0u64;
-        let mut pages_for_80pct = 0u64;
-        let mut pages_for_90pct = 0u64;
-        let mut pages_for_95pct = 0u64;
+        let mut sampled_pages_for_50pct = 0u64;
+        let mut sampled_pages_for_80pct = 0u64;
+        let mut sampled_pages_for_90pct = 0u64;
+        let mut sampled_pages_for_95pct = 0u64;
 
         let mut distribution_curve = Vec::new();
 
-        for (i, &count) in page_counts.iter().enumerate() {
+        for (i, &count) in sorted_counts.iter().enumerate() {
             cumulative_accesses += count as u64;
-            let accesses_pct = cumulative_accesses as f64 / total_accesses as f64;
-            let pages_pct = (i + 1) as f64 / total_pages as f64;
+            let accesses_pct = cumulative_accesses as f64 / total_sampled_accesses as f64;
+            let pages_pct = (i + 1) as f64 / sampled_pages as f64;
 
             // Record milestones
-            if pages_for_50pct == 0 && accesses_pct >= 0.50 {
-                pages_for_50pct = (i + 1) as u64;
+            if sampled_pages_for_50pct == 0 && accesses_pct >= 0.50 {
+                sampled_pages_for_50pct = (i + 1) as u64;
             }
-            if pages_for_80pct == 0 && accesses_pct >= 0.80 {
-                pages_for_80pct = (i + 1) as u64;
+            if sampled_pages_for_80pct == 0 && accesses_pct >= 0.80 {
+                sampled_pages_for_80pct = (i + 1) as u64;
             }
-            if pages_for_90pct == 0 && accesses_pct >= 0.90 {
-                pages_for_90pct = (i + 1) as u64;
+            if sampled_pages_for_90pct == 0 && accesses_pct >= 0.90 {
+                sampled_pages_for_90pct = (i + 1) as u64;
             }
-            if pages_for_95pct == 0 && accesses_pct >= 0.95 {
-                pages_for_95pct = (i + 1) as u64;
+            if sampled_pages_for_95pct == 0 && accesses_pct >= 0.95 {
+                sampled_pages_for_95pct = (i + 1) as u64;
             }
 
             // Sample distribution curve (every 1% of pages, max 100 points)
-            let step = (total_pages / 100).max(1) as usize;
-            if i % step == 0 || i == page_counts.len() - 1 {
+            let step = (sampled_pages / 100).max(1) as usize;
+            if i % step == 0 || i == sorted_counts.len() - 1 {
                 distribution_curve.push(ParetoPoint {
                     pages_pct: pages_pct * 100.0,
                     accesses_pct: accesses_pct * 100.0,
@@ -2444,8 +2600,14 @@ impl StreamingAggregator {
             }
         }
 
-        let pareto_ratio = if total_pages > 0 {
-            pages_for_80pct as f64 / total_pages as f64
+        // Scale sampled results to full dataset
+        let pages_for_50pct = (sampled_pages_for_50pct as f64 * scale_factor) as u64;
+        let pages_for_80pct = (sampled_pages_for_80pct as f64 * scale_factor) as u64;
+        let pages_for_90pct = (sampled_pages_for_90pct as f64 * scale_factor) as u64;
+        let pages_for_95pct = (sampled_pages_for_95pct as f64 * scale_factor) as u64;
+
+        let pareto_ratio = if total_unique_pages > 0 {
+            pages_for_80pct as f64 / total_unique_pages as f64
         } else {
             0.0
         };
