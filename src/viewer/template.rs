@@ -1779,8 +1779,10 @@ class Chart {
 // Horizontal bar chart for fault distribution (dynamically sized)
 function drawFaultDistChart(canvas, labels, totalFaults, majorFaults) {
     const ctx = canvas.getContext('2d');
+    const container = canvas.parentElement;
+    const containerWidth = container ? container.offsetWidth : 400;
     const rect = canvas.getBoundingClientRect();
-    if (rect.width === 0) return;
+    const w = rect.width > 0 ? rect.width : (containerWidth > 0 ? containerWidth : 400);
 
     // Dynamic height based on number of bars
     const barHeight = 22;
@@ -1790,12 +1792,11 @@ function drawFaultDistChart(canvas, labels, totalFaults, majorFaults) {
     const totalH = chartH + pad.t + pad.b;
 
     // Set canvas size
+    canvas.style.width = w + 'px';
     canvas.style.height = totalH + 'px';
-    canvas.width = rect.width * 2;
+    canvas.width = w * 2;
     canvas.height = totalH * 2;
     ctx.scale(2, 2);
-
-    const w = rect.width;
     const chartW = w - pad.l - pad.r;
 
     const max = Math.max(...totalFaults) * 1.1 || 1;
@@ -1836,8 +1837,10 @@ function drawFaultDistChart(canvas, labels, totalFaults, majorFaults) {
 // Horizontal bar chart for I/O time breakdown (dynamically sized)
 function drawIOTimeChart(canvas, labels, timeMs, slowOps) {
     const ctx = canvas.getContext('2d');
+    const container = canvas.parentElement;
+    const containerWidth = container ? container.offsetWidth : 400;
     const rect = canvas.getBoundingClientRect();
-    if (rect.width === 0) return;
+    const w = rect.width > 0 ? rect.width : (containerWidth > 0 ? containerWidth : 400);
 
     // Dynamic height based on number of bars
     const barHeight = 22;
@@ -1847,12 +1850,12 @@ function drawIOTimeChart(canvas, labels, timeMs, slowOps) {
     const totalH = chartH + pad.t + pad.b;
 
     // Set canvas size
+    canvas.style.width = w + 'px';
     canvas.style.height = totalH + 'px';
-    canvas.width = rect.width * 2;
+    canvas.width = w * 2;
     canvas.height = totalH * 2;
     ctx.scale(2, 2);
 
-    const w = rect.width;
     const chartW = w - pad.l - pad.r;
 
     const max = Math.max(...timeMs) * 1.1 || 1;
@@ -2462,43 +2465,6 @@ function initResourcesMemory() {
         chartEl.innerHTML = html;
     }
 
-    // Per-table working set
-    if (ws.per_table && ws.per_table.length > 0) {
-        const tbody = document.querySelector('#table-wss-table tbody');
-        ws.per_table.forEach(t => {
-            const tr = document.createElement('tr');
-            tr.innerHTML = `
-                <td>${t.name}</td>
-                <td>${fmt(t.unique_pages)}</td>
-                <td>${t.working_set_mb.toFixed(1)} MB</td>
-                <td>${fmt(t.total_accesses)}</td>
-                <td>${(t.reuse_ratio * 100).toFixed(1)}%</td>
-            `;
-            tbody.appendChild(tr);
-        });
-    }
-
-    // Time-windowed WSS
-    if (ws.time_windowed && ws.time_windowed.length > 0) {
-        document.getElementById('time-wss-card').style.display = 'block';
-        const tw = ws.time_windowed[0]; // Just 1-minute windows for now
-
-        const statsEl = document.getElementById('time-wss-stats');
-        statsEl.innerHTML = `
-            <div class="time-wss-stat">
-                <div class="time-wss-stat-value">${tw.avg_wss_mb.toFixed(1)} MB</div>
-                <div class="time-wss-stat-label">Avg WSS / minute</div>
-            </div>
-            <div class="time-wss-stat">
-                <div class="time-wss-stat-value">${fmt(tw.max_wss_pages)}</div>
-                <div class="time-wss-stat-label">Max pages / minute</div>
-            </div>
-            <div class="time-wss-stat">
-                <div class="time-wss-stat-value">${fmt(tw.min_wss_pages)}</div>
-                <div class="time-wss-stat-label">Min pages / minute</div>
-            </div>
-        `;
-    }
 }
 
 function initTables() {
@@ -2536,30 +2502,27 @@ function initTables() {
     if (unified.length > 0) {
         document.getElementById('fault-dist-row').style.display = 'grid';
 
-        // Use requestAnimationFrame to ensure DOM has updated before measuring canvas size
-        requestAnimationFrame(() => {
-            // Fault distribution chart (top 8 by faults)
-            const faultCanvas = document.getElementById('fault-dist-chart');
-            const topByFaults = unified.slice(0, 8);
-            drawFaultDistChart(faultCanvas,
-                topByFaults.map(t => t.name),
-                topByFaults.map(t => t.faults),
-                topByFaults.map(t => t.major_faults)
-            );
+        // Fault distribution chart (top 8 by faults)
+        const faultCanvas = document.getElementById('fault-dist-chart');
+        const topByFaults = unified.slice(0, 8);
+        drawFaultDistChart(faultCanvas,
+            topByFaults.map(t => t.name),
+            topByFaults.map(t => t.faults),
+            topByFaults.map(t => t.major_faults)
+        );
 
-            // I/O time chart (top 8 by time lost, filtered to those with actual I/O time)
-            const ioCanvas = document.getElementById('io-time-chart');
-            const topByIO = unified.filter(t => t.time_lost_ms > 0)
-                .sort((a, b) => b.time_lost_ms - a.time_lost_ms)
-                .slice(0, 8);
-            if (topByIO.length > 0) {
-                drawIOTimeChart(ioCanvas,
-                    topByIO.map(t => t.name),
-                    topByIO.map(t => t.time_lost_ms),
-                    topByIO.map(t => t.slow_ops)
-                );
-            }
-        });
+        // I/O time chart (top 8 by time lost, filtered to those with actual I/O time)
+        const ioCanvas = document.getElementById('io-time-chart');
+        const topByIO = unified.filter(t => t.time_lost_ms > 0)
+            .sort((a, b) => b.time_lost_ms - a.time_lost_ms)
+            .slice(0, 8);
+        if (topByIO.length > 0) {
+            drawIOTimeChart(ioCanvas,
+                topByIO.map(t => t.name),
+                topByIO.map(t => t.time_lost_ms),
+                topByIO.map(t => t.slow_ops)
+            );
+        }
     }
 
     // Build unified table with expandable rows
@@ -3504,7 +3467,8 @@ function fmtK(n) {
 
 function initResourcesTxns() {
     const t = DATA.txn_data;
-    if (!t || !t.has_data) {
+    // Check both has_data flag and actual transaction count
+    if (!t || !t.has_data || !t.summary || t.summary.begin_count === 0) {
         document.getElementById('txn-no-data').style.display = 'block';
         document.getElementById('txn-content').style.display = 'none';
         return;
