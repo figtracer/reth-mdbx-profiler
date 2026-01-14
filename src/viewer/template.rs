@@ -154,14 +154,8 @@ pub fn generate_html(data: &ViewerData) -> String {
 
                     <!-- CPU Profile Summary -->
                     <div class="cpu-profile-banner" id="cpu-profile-banner" style="display:none;">
-                        <div class="cpu-profile-main">
-                            <span class="cpu-profile-bottleneck" id="cpu-bottleneck">-</span>
-                            <span class="cpu-profile-detail">
-                                CPU: <span id="cpu-time-total">-</span> ·
-                                I/O Wait: <span id="io-wait-total">-</span> ·
-                                Efficiency: <span id="cpu-efficiency-total">-</span>
-                            </span>
-                        </div>
+                        <span class="cpu-profile-bottleneck" id="cpu-bottleneck">-</span>
+                        <span class="cpu-profile-detail" id="cpu-profile-detail"></span>
                     </div>
 
                     <!-- Fault distribution and I/O breakdown side by side -->
@@ -704,43 +698,37 @@ body {
     font-weight: 500;
 }
 
-/* CPU Profile banner */
+/* CPU Profile banner - matches attribution-header style */
 .cpu-profile-banner {
-    background: linear-gradient(135deg, #1e1b4b 0%, #312e81 100%);
-    border: 1px solid #4338ca;
-    border-radius: 8px;
-    padding: 12px 16px;
-    margin-bottom: 16px;
-}
-.cpu-profile-main {
     display: flex;
     align-items: center;
-    gap: 16px;
-    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 16px;
+    padding: 12px 16px;
+    background: #12121a;
+    border-radius: 8px;
 }
 .cpu-profile-bottleneck {
-    font-size: 14px;
+    font-size: 11px;
     font-weight: 600;
-    padding: 4px 10px;
+    padding: 4px 8px;
     border-radius: 4px;
-    background: rgba(99, 102, 241, 0.3);
-    color: #a5b4fc;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    background: #3b82f620;
+    color: #3b82f6;
 }
 .cpu-profile-bottleneck.io-bound {
-    background: rgba(59, 130, 246, 0.3);
-    color: #93c5fd;
+    background: #3b82f620;
+    color: #3b82f6;
 }
 .cpu-profile-bottleneck.cpu-bound {
-    background: rgba(245, 158, 11, 0.3);
-    color: #fcd34d;
+    background: #f59e0b20;
+    color: #f59e0b;
 }
 .cpu-profile-detail {
     font-size: 13px;
-    color: #a1a1aa;
-}
-.cpu-profile-detail span {
-    color: #e4e4e7;
-    font-weight: 500;
+    color: #d4d4d8;
 }
 
 .axis-hint {
@@ -1344,14 +1332,13 @@ body {
 
 /* Memory tab styles */
 .memory-summary-banner {
-    background: linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%);
-    border: 1px solid #3b82f6;
+    background: #12121a;
     border-radius: 8px;
-    padding: 16px 20px;
+    padding: 12px 16px;
     margin-bottom: 16px;
-    font-size: 15px;
+    font-size: 13px;
     line-height: 1.6;
-    color: #93c5fd;
+    color: #d4d4d8;
 }
 
 .reuse-distance-chart {
@@ -2421,7 +2408,7 @@ function initTables() {
     // CPU Profile summary
     const cpu = DATA.cpu_profile;
     if (cpu && cpu.has_data) {
-        document.getElementById('cpu-profile-banner').style.display = 'block';
+        document.getElementById('cpu-profile-banner').style.display = 'flex';
 
         const bottleneckEl = document.getElementById('cpu-bottleneck');
         bottleneckEl.textContent = cpu.bottleneck;
@@ -2429,9 +2416,8 @@ function initTables() {
             (cpu.cpu_efficiency < 0.5 ? ' io-bound' : (cpu.cpu_efficiency > 0.8 ? ' cpu-bound' : ''));
 
         const fmtTime = (ms) => ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : ms.toFixed(0) + 'ms';
-        document.getElementById('cpu-time-total').textContent = fmtTime(cpu.total_cpu_time_ms);
-        document.getElementById('io-wait-total').textContent = fmtTime(cpu.total_io_wait_ms);
-        document.getElementById('cpu-efficiency-total').textContent = (cpu.cpu_efficiency * 100).toFixed(1) + '%';
+        document.getElementById('cpu-profile-detail').textContent =
+            `CPU: ${fmtTime(cpu.total_cpu_time_ms)} · I/O Wait: ${fmtTime(cpu.total_io_wait_ms)} · Efficiency: ${(cpu.cpu_efficiency * 100).toFixed(1)}%`;
     }
 
     // Draw fault distribution and I/O time charts
@@ -2442,10 +2428,12 @@ function initTables() {
         // Use requestAnimationFrame to wait for layout, then draw
         requestAnimationFrame(() => {
             requestAnimationFrame(() => {
-                // Fault distribution chart (top 8 by faults)
+                // Fault distribution chart (top 8 by faults, sorted descending)
                 const faultCanvas = document.getElementById('fault-dist-chart');
                 if (faultCanvas) {
-                    const topByFaults = unified.slice(0, 8);
+                    const topByFaults = [...unified]
+                        .sort((a, b) => b.faults - a.faults)
+                        .slice(0, 8);
                     drawFaultDistChart(faultCanvas,
                         topByFaults.map(t => t.name),
                         topByFaults.map(t => t.faults),
