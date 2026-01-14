@@ -5,10 +5,12 @@ use std::{io::BufRead, path::PathBuf};
 
 mod event;
 mod mdbx_metadata;
+mod streaming;
 mod viewer;
 
 use event::{CursorEvent, PageFaultEvent, TxnEvent};
 use mdbx_metadata::PageAttribution;
+use streaming::StreamingConfig;
 
 /// Analyze MDBX page fault traces and generate interactive visualizations
 #[derive(Parser)]
@@ -38,11 +40,33 @@ struct Cli {
     /// Time bucket size in milliseconds (for pattern analysis)
     #[arg(long, default_value = "100")]
     bucket_ms: u64,
+
+    /// Use streaming mode for large files (constant memory usage)
+    /// Recommended for trace files larger than available RAM
+    #[arg(long)]
+    streaming: bool,
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    // Check file size to recommend streaming mode
+    let file_size = std::fs::metadata(&cli.input)?.len();
+    let file_size_gb = file_size as f64 / 1e9;
+
+    if file_size_gb > 10.0 && !cli.streaming {
+        eprintln!(
+            "WARNING: Trace file is {:.1}GB. Consider using --streaming mode to avoid OOM.",
+            file_size_gb
+        );
+        eprintln!("         Run with --streaming for constant memory usage.\n");
+    }
+
+    if cli.streaming {
+        return run_streaming_mode(&cli);
+    }
+
+    // Original in-memory mode
     eprintln!("Loading trace from {:?}...", cli.input);
 
     let file = std::fs::File::open(&cli.input)?;
@@ -151,31 +175,86 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn generate_html_viewer(
-    events: &[PageFaultEvent],
-    cursor_events: &[CursorEvent],
-    txn_events: &[TxnEvent],
-    attribution: Option<&PageAttribution>,
-    cli: &Cli,
-) -> anyhow::Result<()> {
-    eprintln!("Generating viewer data...");
+/// Run the analyzer in streaming mode for large files
+fn run_streaming_mode(cli: &Cli) -> anyhow::Result<()> {
+    let file_size = std::fs::metadata(&cli.input)?.len();
+    let file_size_gb = file_size as f64 / 1e9;
 
-    let data = viewer::generate_viewer_data(events, cursor_events, txn_events, attribution);
+    eprintln!(
+        "Streaming mode: Processing {:.2}GB trace file...",
+        file_size_gb
+    );
+    eprintln!("Memory usage will remain constant regardless of file size.\n");
 
-    // Determine output path
-    let output_path = cli.output.clone().unwrap_or_else(|| {
-        let input_stem = cli
-            .input
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("trace");
-        PathBuf::from(format!("{}-viewer.html", input_stem))
-    });
+    let file = std::fs::File::open(&cli.input)?;
 
-    eprintln!("Writing HTML viewer to {:?}...", output_path);
-    viewer::write_html(&data, &output_path)?;
+    let config = StreamingConfig {
+        bucket_ms: cli.bucket_ms,
+        ..Default::default()
+    };
 
-    // Print summary to stderr
+    // Progress callback
+    let start_time = std::time::Instant::now();
+    let progress_callback: Option<Box<dyn Fn(u64, u64) + Send>> =
+        Some(Box::new(move |lines, bytes| {
+            let elapsed = start_time.elapsed().as_secs_f64();
+            let mb_processed = bytes as f64 / 1e6;
+            let rate = mb_processed / elapsed;
+            let eta_secs = if rate > 0.0 {
+                ((file_size as f64 / 1e6) - mb_processed) / rate
+            } else {
+                0.0
+            };
+            eprint!(
+                "\rProcessed: {}M lines, {:.1}GB ({:.0} MB/s, ETA: {:.0}s)   ",
+                lines / 1_000_000,
+                bytes as f64 / 1e9,
+                rate,
+                eta_secs
+            );
+        }));
+
+    let data = streaming::process_trace_streaming(file, config, progress_callback)?;
+
+    eprintln!("\n"); // Clear progress line
+
+    match cli.format.as_str() {
+        "html" => {
+            let output_path = cli.output.clone().unwrap_or_else(|| {
+                let input_stem = cli
+                    .input
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("trace");
+                PathBuf::from(format!("{}-viewer.html", input_stem))
+            });
+
+            eprintln!("Writing HTML viewer to {:?}...", output_path);
+            viewer::write_html(&data, &output_path)?;
+            print_summary(&data);
+            eprintln!("\nViewer written to: {}", output_path.display());
+        }
+        "json" => {
+            println!("{}", serde_json::to_string_pretty(&data)?);
+        }
+        "compact" => {
+            let compact = generate_compact_export(&data, cli.label.as_deref());
+            println!("{}", serde_json::to_string_pretty(&compact)?);
+        }
+        "csv" => {
+            eprintln!("CSV format not supported in streaming mode (events not stored)");
+            std::process::exit(1);
+        }
+        _ => {
+            eprintln!("Unknown format: {}. Use: html, json, compact", cli.format);
+            std::process::exit(1);
+        }
+    }
+
+    Ok(())
+}
+
+fn print_summary(data: &viewer::ViewerData) {
     eprintln!("\n=== Trace Summary ===");
     eprintln!("Duration:        {:.2}s", data.summary.duration_secs);
     eprintln!("Total faults:    {}", data.summary.page_faults);
@@ -192,7 +271,6 @@ fn generate_html_viewer(
         data.patterns.sequential_ratio * 100.0
     );
 
-    // Print cursor stats if available
     if data.cursor_data.has_data {
         eprintln!("\n=== Cursor Operations ===");
         eprintln!("Total ops:       {}", data.cursor_data.summary.total_ops);
@@ -214,7 +292,6 @@ fn generate_html_viewer(
         );
     }
 
-    // Print transaction stats if available
     if data.txn_data.has_data {
         eprintln!("\n=== Transactions ===");
         eprintln!("Total txns:      {}", data.txn_data.summary.begin_count);
@@ -240,6 +317,33 @@ fn generate_html_viewer(
             data.txn_data.concurrency.max_concurrent_rw
         );
     }
+}
+
+fn generate_html_viewer(
+    events: &[PageFaultEvent],
+    cursor_events: &[CursorEvent],
+    txn_events: &[TxnEvent],
+    attribution: Option<&PageAttribution>,
+    cli: &Cli,
+) -> anyhow::Result<()> {
+    eprintln!("Generating viewer data...");
+
+    let data = viewer::generate_viewer_data(events, cursor_events, txn_events, attribution);
+
+    // Determine output path
+    let output_path = cli.output.clone().unwrap_or_else(|| {
+        let input_stem = cli
+            .input
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("trace");
+        PathBuf::from(format!("{}-viewer.html", input_stem))
+    });
+
+    eprintln!("Writing HTML viewer to {:?}...", output_path);
+    viewer::write_html(&data, &output_path)?;
+
+    print_summary(&data);
 
     eprintln!("\nViewer written to: {}", output_path.display());
 
