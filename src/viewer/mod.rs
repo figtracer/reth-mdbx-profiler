@@ -43,6 +43,135 @@ pub struct ViewerData {
     /// Comprehensive B+ tree visualization data including per-block analysis,
     /// operation-to-page-type breakdown, and tree depth estimates
     pub btree_viz: BTreeVisualization,
+    /// Working set analysis for memory requirement estimation
+    pub working_set: WorkingSetAnalysis,
+}
+
+// ============================================================================
+// Working Set Analysis Types
+// ============================================================================
+
+/// Working set analysis for understanding memory requirements
+#[derive(Debug, Serialize, Default)]
+pub struct WorkingSetAnalysis {
+    /// Whether working set data is available
+    pub has_data: bool,
+    /// Total unique pages accessed during trace
+    pub total_unique_pages: u64,
+    /// Total page accesses (including repeats)
+    pub total_accesses: u64,
+    /// Ratio of accesses to previously-seen pages (0.0-1.0)
+    pub reuse_ratio: f64,
+    /// Average accesses per unique page
+    pub avg_accesses_per_page: f64,
+    /// Cache hit rate simulation at various cache sizes
+    pub cache_simulation: Vec<CacheSimulationPoint>,
+    /// Reuse distance histogram (how many unique pages between repeated accesses)
+    pub reuse_distance_histogram: Vec<ReuseDistanceBucket>,
+    /// Per-table working set statistics
+    pub per_table: Vec<TableWorkingSet>,
+    /// Time-windowed working set sizes
+    pub time_windowed: Vec<TimeWindowedWSS>,
+    /// Hot page analysis (Pareto distribution)
+    pub hot_page_analysis: HotPageAnalysis,
+    /// Summary text for quick understanding
+    pub summary_text: String,
+    /// Recommended RAM size based on analysis
+    pub recommended_ram_gb: f64,
+}
+
+/// Cache simulation result at a specific cache size
+#[derive(Debug, Serialize, Clone)]
+pub struct CacheSimulationPoint {
+    /// Cache size in GB
+    pub cache_size_gb: f64,
+    /// Cache size in pages
+    pub cache_size_pages: u64,
+    /// Estimated hit rate (0.0-1.0)
+    pub hit_rate: f64,
+    /// Estimated major faults avoided per second
+    pub faults_avoided_per_sec: f64,
+}
+
+/// Reuse distance histogram bucket
+#[derive(Debug, Serialize, Clone)]
+pub struct ReuseDistanceBucket {
+    /// Bucket label (e.g., "immediate (0-100)")
+    pub label: String,
+    /// Minimum distance in this bucket
+    pub min_distance: u64,
+    /// Maximum distance in this bucket
+    pub max_distance: u64,
+    /// Number of reuses in this bucket
+    pub count: u64,
+    /// Percentage of total reuses
+    pub percentage: f64,
+    /// Cumulative percentage (for CDF)
+    pub cumulative_percentage: f64,
+}
+
+/// Per-table working set statistics
+#[derive(Debug, Serialize, Clone)]
+pub struct TableWorkingSet {
+    /// Table name
+    pub name: String,
+    /// DBI index
+    pub dbi: u32,
+    /// Unique pages accessed
+    pub unique_pages: u64,
+    /// Total accesses to this table
+    pub total_accesses: u64,
+    /// Reuse ratio for this table
+    pub reuse_ratio: f64,
+    /// Number of hot pages (accounting for 80% of accesses)
+    pub hot_pages: u64,
+    /// Hot page ratio (hot_pages / unique_pages)
+    pub hot_page_ratio: f64,
+    /// Estimated size of hot set in MB
+    pub hot_set_mb: f64,
+    /// Estimated total table working set in MB
+    pub working_set_mb: f64,
+}
+
+/// Time-windowed working set size
+#[derive(Debug, Serialize, Clone)]
+pub struct TimeWindowedWSS {
+    /// Window size in seconds
+    pub window_secs: u64,
+    /// Average working set size (unique pages) in each window
+    pub avg_wss_pages: u64,
+    /// Maximum working set size seen in any window
+    pub max_wss_pages: u64,
+    /// Minimum working set size seen in any window
+    pub min_wss_pages: u64,
+    /// Working set size in MB (avg)
+    pub avg_wss_mb: f64,
+}
+
+/// Hot page analysis (Pareto distribution)
+#[derive(Debug, Serialize, Default)]
+pub struct HotPageAnalysis {
+    /// Pages accounting for 50% of accesses
+    pub pages_for_50pct: u64,
+    /// Pages accounting for 80% of accesses
+    pub pages_for_80pct: u64,
+    /// Pages accounting for 90% of accesses
+    pub pages_for_90pct: u64,
+    /// Pages accounting for 95% of accesses
+    pub pages_for_95pct: u64,
+    /// Ratio: pages_for_80pct / total_unique_pages (lower = more skewed)
+    pub pareto_ratio: f64,
+    /// Distribution curve points for visualization
+    pub distribution_curve: Vec<ParetoPoint>,
+}
+
+/// Point on the Pareto distribution curve
+#[derive(Debug, Serialize, Clone)]
+pub struct ParetoPoint {
+    /// Percentage of pages (sorted by access count, hottest first)
+    pub pages_pct: f64,
+    /// Percentage of accesses covered
+    pub accesses_pct: f64,
 }
 
 /// Direct fault attribution data from BPF active_ops tracking.

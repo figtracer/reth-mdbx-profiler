@@ -24,6 +24,7 @@ pub fn generate_html(data: &ViewerData) -> String {
     <div id="app">
         <nav class="tabs">
             <button class="tab active" data-tab="physical">Overview</button>
+            <button class="tab" data-tab="memory">Memory</button>
             <button class="tab" data-tab="tables">Tables</button>
             <button class="tab" data-tab="btree">Page Types</button>
             <button class="tab" data-tab="transactions">MDBX Txns</button>
@@ -114,6 +115,107 @@ pub fn generate_html(data: &ViewerData) -> String {
                             <div class="threads-section">
                                 <div id="threads-summary"></div>
                             </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- MEMORY TAB - Working Set Analysis -->
+            <section id="memory" class="panel">
+                <div id="memory-no-data" class="no-data" style="display:none;">
+                    No working set data available.
+                </div>
+
+                <div id="memory-content">
+                    <!-- Summary banner -->
+                    <div class="memory-summary-banner" id="memory-summary-banner">
+                        <span id="memory-summary-text"></span>
+                    </div>
+
+                    <!-- Key metrics -->
+                    <div class="metrics-row">
+                        <div class="metric">
+                            <span class="metric-value" id="mem-unique-pages">0</span>
+                            <span class="metric-label">Unique Pages</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-value" id="mem-working-set">0 GB</span>
+                            <span class="metric-label">Working Set</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-value" id="mem-reuse-ratio">0%</span>
+                            <span class="metric-label">Page Reuse</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-value" id="mem-avg-accesses">0</span>
+                            <span class="metric-label">Avg Accesses/Page</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-value major" id="mem-recommended-ram">0 GB</span>
+                            <span class="metric-label">Recommended RAM</span>
+                        </div>
+                    </div>
+
+                    <!-- Cache simulation and Pareto chart -->
+                    <div class="two-col">
+                        <div class="card">
+                            <div class="card-header">Cache Hit Rate by RAM Size</div>
+                            <div class="card-body">
+                                <div class="cache-sim-chart" id="cache-sim-chart"></div>
+                                <table class="data-table" id="cache-sim-table">
+                                    <thead>
+                                        <tr>
+                                            <th>RAM (GB)</th>
+                                            <th>Cache Pages</th>
+                                            <th>Hit Rate</th>
+                                            <th>Faults Avoided/s</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody></tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <div class="card">
+                            <div class="card-header">Hot Page Distribution (Pareto)</div>
+                            <div class="card-body">
+                                <div class="pareto-chart" id="pareto-chart"></div>
+                                <div class="pareto-stats" id="pareto-stats"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Reuse distance and per-table working set -->
+                    <div class="two-col">
+                        <div class="card">
+                            <div class="card-header">Page Reuse Distance Distribution</div>
+                            <div class="card-body">
+                                <div class="reuse-distance-chart" id="reuse-distance-chart"></div>
+                            </div>
+                        </div>
+                        <div class="card">
+                            <div class="card-header">Working Set by Table</div>
+                            <div class="card-body table-scroll">
+                                <table class="data-table" id="table-wss-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Table</th>
+                                            <th>Unique Pages</th>
+                                            <th>Working Set</th>
+                                            <th>Accesses</th>
+                                            <th>Reuse %</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Time-windowed WSS -->
+                    <div class="card" id="time-wss-card" style="display:none;">
+                        <div class="card-header">Working Set Size Over Time (1-minute windows)</div>
+                        <div class="card-body">
+                            <div class="time-wss-stats" id="time-wss-stats"></div>
                         </div>
                     </div>
                 </div>
@@ -1420,6 +1522,114 @@ body {
         width: 100%;
     }
 }
+
+/* Memory tab styles */
+.memory-summary-banner {
+    background: linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%);
+    border: 1px solid #3b82f6;
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin-bottom: 16px;
+    font-size: 15px;
+    line-height: 1.6;
+    color: #93c5fd;
+}
+
+.cache-sim-chart, .pareto-chart, .reuse-distance-chart {
+    height: 200px;
+    margin-bottom: 16px;
+}
+
+.pareto-stats {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 12px;
+    padding: 12px;
+    background: #0a0a0f;
+    border-radius: 6px;
+}
+
+.pareto-stat {
+    text-align: center;
+}
+
+.pareto-stat-value {
+    font-size: 18px;
+    font-weight: 700;
+    color: #f59e0b;
+}
+
+.pareto-stat-label {
+    font-size: 12px;
+    color: #71717a;
+}
+
+.time-wss-stats {
+    display: flex;
+    gap: 24px;
+    padding: 12px;
+}
+
+.time-wss-stat {
+    text-align: center;
+}
+
+.time-wss-stat-value {
+    font-size: 20px;
+    font-weight: 700;
+    color: #3b82f6;
+}
+
+.time-wss-stat-label {
+    font-size: 12px;
+    color: #71717a;
+}
+
+.bar-chart-container {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.bar-chart-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.bar-chart-label {
+    width: 140px;
+    font-size: 12px;
+    color: #a1a1aa;
+    text-align: right;
+    flex-shrink: 0;
+}
+
+.bar-chart-bar-container {
+    flex: 1;
+    height: 24px;
+    background: #1a1a24;
+    border-radius: 4px;
+    overflow: hidden;
+    position: relative;
+}
+
+.bar-chart-bar {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.3s ease;
+}
+
+.bar-chart-bar.cache { background: linear-gradient(90deg, #3b82f6, #60a5fa); }
+.bar-chart-bar.reuse { background: linear-gradient(90deg, #8b5cf6, #a78bfa); }
+.bar-chart-bar.pareto { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+
+.bar-chart-value {
+    width: 70px;
+    font-size: 12px;
+    color: #e4e4e7;
+    font-weight: 600;
+}
 "##;
 
 const JAVASCRIPT: &str = r##"
@@ -2128,6 +2338,7 @@ function initTab(name) {
     initialized[name] = true;
 
     if (name === 'physical') initPhysical();
+    else if (name === 'memory') initMemory();
     else if (name === 'tables') initTables();
     else if (name === 'btree') initBTree();
     else if (name === 'transactions') initTxns();
@@ -2287,6 +2498,177 @@ const RETH_TABLE_SOURCES = {
     'StageCheckpoints': { github_url: 'https://github.com/paradigmxyz/reth/blob/main/crates/storage/db-api/src/models/mod.rs' },
     'StageCheckpointProgresses': { github_url: 'https://github.com/paradigmxyz/reth/blob/main/crates/storage/db-api/src/models/mod.rs' },
 };
+
+function initMemory() {
+    const ws = DATA.working_set;
+
+    if (!ws || !ws.has_data) {
+        document.getElementById('memory-no-data').style.display = 'block';
+        document.getElementById('memory-content').style.display = 'none';
+        return;
+    }
+
+    // Summary banner
+    document.getElementById('memory-summary-text').textContent = ws.summary_text;
+
+    // Key metrics
+    document.getElementById('mem-unique-pages').textContent = fmt(ws.total_unique_pages);
+    const workingSetGB = (ws.total_unique_pages * 4096 / 1e9).toFixed(2);
+    document.getElementById('mem-working-set').textContent = workingSetGB + ' GB';
+    document.getElementById('mem-reuse-ratio').textContent = (ws.reuse_ratio * 100).toFixed(1) + '%';
+    document.getElementById('mem-avg-accesses').textContent = ws.avg_accesses_per_page.toFixed(2);
+    document.getElementById('mem-recommended-ram').textContent = ws.recommended_ram_gb.toFixed(0) + ' GB';
+
+    // Cache simulation chart (bar chart)
+    if (ws.cache_simulation && ws.cache_simulation.length > 0) {
+        const chartEl = document.getElementById('cache-sim-chart');
+        let html = '<div class="bar-chart-container">';
+        ws.cache_simulation.forEach(pt => {
+            const pct = (pt.hit_rate * 100).toFixed(1);
+            html += `
+                <div class="bar-chart-row">
+                    <span class="bar-chart-label">${pt.cache_size_gb} GB</span>
+                    <div class="bar-chart-bar-container">
+                        <div class="bar-chart-bar cache" style="width: ${pct}%"></div>
+                    </div>
+                    <span class="bar-chart-value">${pct}%</span>
+                </div>
+            `;
+        });
+        html += '</div>';
+        chartEl.innerHTML = html;
+
+        // Table
+        const tbody = document.querySelector('#cache-sim-table tbody');
+        ws.cache_simulation.forEach(pt => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td>${pt.cache_size_gb}</td>
+                <td>${fmt(pt.cache_size_pages)}</td>
+                <td>${(pt.hit_rate * 100).toFixed(1)}%</td>
+                <td>${pt.faults_avoided_per_sec.toFixed(1)}</td>
+            `;
+            tbody.appendChild(tr);
+        });
+    }
+
+    // Pareto / hot page chart
+    if (ws.hot_page_analysis) {
+        const hp = ws.hot_page_analysis;
+
+        // Pareto curve visualization
+        if (hp.distribution_curve && hp.distribution_curve.length > 0) {
+            const chartEl = document.getElementById('pareto-chart');
+            let html = '<div class="bar-chart-container">';
+
+            // Show key milestones
+            const milestones = [
+                { label: '50% accesses', pages: hp.pages_for_50pct, pct: 50 },
+                { label: '80% accesses', pages: hp.pages_for_80pct, pct: 80 },
+                { label: '90% accesses', pages: hp.pages_for_90pct, pct: 90 },
+                { label: '95% accesses', pages: hp.pages_for_95pct, pct: 95 },
+            ];
+
+            const totalPages = ws.total_unique_pages;
+            milestones.forEach(m => {
+                const pagesPct = totalPages > 0 ? (m.pages / totalPages * 100).toFixed(2) : 0;
+                html += `
+                    <div class="bar-chart-row">
+                        <span class="bar-chart-label">${m.label}</span>
+                        <div class="bar-chart-bar-container">
+                            <div class="bar-chart-bar pareto" style="width: ${pagesPct}%"></div>
+                        </div>
+                        <span class="bar-chart-value">${pagesPct}% pages</span>
+                    </div>
+                `;
+            });
+            html += '</div>';
+            chartEl.innerHTML = html;
+        }
+
+        // Stats
+        const statsEl = document.getElementById('pareto-stats');
+        const totalPages = ws.total_unique_pages;
+        statsEl.innerHTML = `
+            <div class="pareto-stat">
+                <div class="pareto-stat-value">${fmt(hp.pages_for_80pct)}</div>
+                <div class="pareto-stat-label">Pages for 80% accesses</div>
+            </div>
+            <div class="pareto-stat">
+                <div class="pareto-stat-value">${(hp.pareto_ratio * 100).toFixed(1)}%</div>
+                <div class="pareto-stat-label">Hot set ratio</div>
+            </div>
+            <div class="pareto-stat">
+                <div class="pareto-stat-value">${(hp.pages_for_80pct * 4096 / 1e9).toFixed(2)} GB</div>
+                <div class="pareto-stat-label">Hot set size</div>
+            </div>
+            <div class="pareto-stat">
+                <div class="pareto-stat-value">${fmt(hp.pages_for_90pct)}</div>
+                <div class="pareto-stat-label">Pages for 90% accesses</div>
+            </div>
+        `;
+    }
+
+    // Reuse distance histogram
+    if (ws.reuse_distance_histogram && ws.reuse_distance_histogram.length > 0) {
+        const chartEl = document.getElementById('reuse-distance-chart');
+        let html = '<div class="bar-chart-container">';
+
+        const maxPct = Math.max(...ws.reuse_distance_histogram.map(b => b.percentage));
+        ws.reuse_distance_histogram.forEach(bucket => {
+            const barWidth = maxPct > 0 ? (bucket.percentage / maxPct * 100) : 0;
+            html += `
+                <div class="bar-chart-row">
+                    <span class="bar-chart-label">${bucket.label}</span>
+                    <div class="bar-chart-bar-container">
+                        <div class="bar-chart-bar reuse" style="width: ${barWidth}%"></div>
+                    </div>
+                    <span class="bar-chart-value">${bucket.percentage.toFixed(1)}%</span>
+                </div>
+            `;
+        });
+        html += '</div>';
+        chartEl.innerHTML = html;
+    }
+
+    // Per-table working set
+    if (ws.per_table && ws.per_table.length > 0) {
+        const tbody = document.querySelector('#table-wss-table tbody');
+        ws.per_table.forEach(t => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td>${t.name}</td>
+                <td>${fmt(t.unique_pages)}</td>
+                <td>${t.working_set_mb.toFixed(1)} MB</td>
+                <td>${fmt(t.total_accesses)}</td>
+                <td>${(t.reuse_ratio * 100).toFixed(1)}%</td>
+            `;
+            tbody.appendChild(tr);
+        });
+    }
+
+    // Time-windowed WSS
+    if (ws.time_windowed && ws.time_windowed.length > 0) {
+        document.getElementById('time-wss-card').style.display = 'block';
+        const tw = ws.time_windowed[0]; // Just 1-minute windows for now
+
+        const statsEl = document.getElementById('time-wss-stats');
+        statsEl.innerHTML = `
+            <div class="time-wss-stat">
+                <div class="time-wss-stat-value">${tw.avg_wss_mb.toFixed(1)} MB</div>
+                <div class="time-wss-stat-label">Avg WSS / minute</div>
+            </div>
+            <div class="time-wss-stat">
+                <div class="time-wss-stat-value">${fmt(tw.max_wss_pages)}</div>
+                <div class="time-wss-stat-label">Max pages / minute</div>
+            </div>
+            <div class="time-wss-stat">
+                <div class="time-wss-stat-value">${fmt(tw.min_wss_pages)}</div>
+                <div class="time-wss-stat-label">Min pages / minute</div>
+            </div>
+        `;
+    }
+}
 
 function initTables() {
     const unified = DATA.unified_tables;

@@ -9,15 +9,16 @@ use crate::event::{
     dbi_to_table_name, is_pre_trace_cursor,
 };
 use crate::viewer::{
-    BTreeVisualization, BatchAnalysis, BlockRange, BurstStats, CursorData, CursorOpSample,
-    CursorSummary, CursorTableStats, CursorTimelinePoint, DepthBucket, DirectFaultAttribution,
-    FaultsByCursorOp, FaultsByOpType, HeatmapData, HistogramBucket, OpFaultCount,
-    OperationDepthStats, OperationFaultHistogram, OperationPageTypeBreakdown, OperationStats,
-    PageTypeFaultCount, PageTypeStats, PatternAnalysis, RwCommitPoint, SlowKeyStats,
-    SlowOpBreakdown, SlowOpsTableStats, StrideInfo, TableDepthStats, TableDrillDown,
-    TableSourceLink, TableTreeStats, ThreadStats, TimelinePoint, TraceSummary, TreeDepthEstimate,
-    TreeDepthStats, TreeTraversalViz, TxnConcurrencyStats, TxnData, TxnSummary, TxnThreadStats,
-    TxnTimelineEntry, UnifiedTableStats, ViewerData,
+    BTreeVisualization, BatchAnalysis, BlockRange, BurstStats, CacheSimulationPoint, CursorData,
+    CursorOpSample, CursorSummary, CursorTableStats, CursorTimelinePoint, DepthBucket,
+    DirectFaultAttribution, FaultsByCursorOp, FaultsByOpType, HeatmapData, HistogramBucket,
+    HotPageAnalysis, OpFaultCount, OperationDepthStats, OperationFaultHistogram,
+    OperationPageTypeBreakdown, OperationStats, PageTypeFaultCount, PageTypeStats, ParetoPoint,
+    PatternAnalysis, ReuseDistanceBucket, RwCommitPoint, SlowKeyStats, SlowOpBreakdown,
+    SlowOpsTableStats, StrideInfo, TableDepthStats, TableDrillDown, TableSourceLink,
+    TableTreeStats, TableWorkingSet, ThreadStats, TimeWindowedWSS, TimelinePoint, TraceSummary,
+    TreeDepthEstimate, TreeDepthStats, TreeTraversalViz, TxnConcurrencyStats, TxnData, TxnSummary,
+    TxnThreadStats, TxnTimelineEntry, UnifiedTableStats, ViewerData, WorkingSetAnalysis,
 };
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::io::{BufRead, BufReader};
@@ -236,6 +237,66 @@ struct HotKeyTracker {
     max_keys: usize,
 }
 
+/// Bounded page access tracker for reuse distance calculation
+/// Uses a sliding window approach to bound memory while still capturing reuse patterns
+#[derive(Debug)]
+struct PageAccessTracker {
+    /// Map from page number to last access sequence number
+    /// Bounded to max_entries using LRU-style eviction
+    page_to_seq: HashMap<u64, u64>,
+    /// Maximum entries to track
+    max_entries: usize,
+    /// Access order for LRU eviction (recent pages)
+    access_order: Vec<u64>,
+}
+
+impl PageAccessTracker {
+    fn new(max_entries: usize) -> Self {
+        Self {
+            page_to_seq: HashMap::with_capacity(max_entries),
+            max_entries,
+            access_order: Vec::with_capacity(max_entries),
+        }
+    }
+
+    /// Record an access and return the reuse distance if this is a repeat access
+    fn record_access(&mut self, page: u64, current_seq: u64) -> Option<u64> {
+        let reuse_distance = self
+            .page_to_seq
+            .get(&page)
+            .map(|&last_seq| current_seq.saturating_sub(last_seq));
+
+        // Update the page's last access sequence
+        self.page_to_seq.insert(page, current_seq);
+
+        // Update access order for LRU
+        // Remove old position if exists
+        if let Some(pos) = self.access_order.iter().position(|&p| p == page) {
+            self.access_order.remove(pos);
+        }
+        self.access_order.push(page);
+
+        // Evict oldest entries if over capacity
+        while self.page_to_seq.len() > self.max_entries {
+            if let Some(oldest_page) = self.access_order.first().copied() {
+                self.access_order.remove(0);
+                self.page_to_seq.remove(&oldest_page);
+            } else {
+                break;
+            }
+        }
+
+        reuse_distance
+    }
+}
+
+impl Default for PageAccessTracker {
+    fn default() -> Self {
+        // Default to tracking 500K pages (~4MB memory for the HashMap)
+        Self::new(500_000)
+    }
+}
+
 impl HotKeyTracker {
     fn new(max_keys: usize) -> Self {
         Self {
@@ -376,6 +437,21 @@ pub struct StreamingAggregator {
 
     // Parse errors
     parse_errors: u64,
+
+    // Working set analysis
+    // Page access counts: page_number -> access_count
+    page_access_counts: HashMap<u64, u32>,
+    // Per-table page access: dbi -> (unique_pages set, total_accesses)
+    table_page_access: HashMap<u32, (HashSet<u64>, u64)>,
+    // Reuse distance sampler: samples of (reuse_distance) for histogram
+    reuse_distance_sampler: ReservoirSampler,
+    // Last access sequence number for each page (for reuse distance calculation)
+    // Uses bounded LRU-like tracking to avoid unbounded memory
+    page_last_access_seq: PageAccessTracker,
+    // Current access sequence number
+    access_sequence: u64,
+    // Time-windowed working set: window_start_bucket -> unique pages in window
+    time_window_pages: HashMap<u64, HashSet<u64>>,
 }
 
 #[derive(Debug, Default)]
@@ -464,6 +540,13 @@ impl StreamingAggregator {
             heatmap_raw_data: HashMap::new(),
             heatmap_initialized: false,
             parse_errors: 0,
+            // Working set analysis
+            page_access_counts: HashMap::new(),
+            table_page_access: HashMap::new(),
+            reuse_distance_sampler: ReservoirSampler::new(100_000), // 100K samples for reuse distance
+            page_last_access_seq: PageAccessTracker::new(500_000),  // Track 500K pages for reuse
+            access_sequence: 0,
+            time_window_pages: HashMap::new(),
         }
     }
 
@@ -508,6 +591,26 @@ impl StreamingAggregator {
         }
         self.last_page = Some(page);
 
+        // Working set analysis - track page access counts and reuse distance
+        self.access_sequence += 1;
+        *self.page_access_counts.entry(page).or_insert(0) += 1;
+
+        // Track reuse distance (how many unique pages between repeated accesses)
+        if let Some(reuse_dist) = self
+            .page_last_access_seq
+            .record_access(page, self.access_sequence)
+        {
+            self.reuse_distance_sampler.add(reuse_dist);
+        }
+
+        // Time-windowed working set (1-minute windows)
+        let first_ts = self.first_timestamp.unwrap();
+        let window_bucket = (ts - first_ts) / (60 * 1_000_000_000); // 1-minute windows
+        self.time_window_pages
+            .entry(window_bucket)
+            .or_insert_with(HashSet::new)
+            .insert(page);
+
         // Page type stats
         let page_type = event.page_type;
         let entry = self.page_type_counts.entry(page_type).or_insert((0, 0));
@@ -546,6 +649,14 @@ impl StreamingAggregator {
             if is_major {
                 table_stats.major_faults += 1;
             }
+
+            // Per-table working set tracking
+            let table_ws = self
+                .table_page_access
+                .entry(dbi)
+                .or_insert_with(|| (HashSet::new(), 0));
+            table_ws.0.insert(page);
+            table_ws.1 += 1;
 
             // Page type per table
             match MdbxPageType::from_raw(page_type) {
@@ -1132,6 +1243,9 @@ impl StreamingAggregator {
         // Build heatmap
         let heatmap = self.build_heatmap();
 
+        // Build working set analysis
+        let working_set = self.build_working_set(duration_secs);
+
         ViewerData {
             summary,
             timeline,
@@ -1148,6 +1262,7 @@ impl StreamingAggregator {
             operation_histogram,
             tree_traversal,
             btree_viz,
+            working_set,
         }
     }
 
@@ -2011,6 +2126,349 @@ impl StreamingAggregator {
                 blocks_with_writes: 0,
             },
         }
+    }
+
+    fn build_working_set(&mut self, duration_secs: f64) -> WorkingSetAnalysis {
+        let total_unique_pages = self.unique_pages.len() as u64;
+        let total_accesses = self.page_fault_count;
+
+        if total_unique_pages == 0 {
+            return WorkingSetAnalysis::default();
+        }
+
+        // Calculate reuse ratio
+        let reuse_count = self.reuse_distance_sampler.count;
+        let reuse_ratio = if total_accesses > 0 {
+            reuse_count as f64 / total_accesses as f64
+        } else {
+            0.0
+        };
+
+        let avg_accesses_per_page = if total_unique_pages > 0 {
+            total_accesses as f64 / total_unique_pages as f64
+        } else {
+            0.0
+        };
+
+        // Build reuse distance histogram
+        let reuse_distance_histogram = self.build_reuse_distance_histogram();
+
+        // Build cache simulation
+        let cache_simulation = self.build_cache_simulation(duration_secs);
+
+        // Build per-table working set
+        let per_table = self.build_per_table_working_set();
+
+        // Build time-windowed WSS
+        let time_windowed = self.build_time_windowed_wss();
+
+        // Build hot page analysis
+        let hot_page_analysis = self.build_hot_page_analysis();
+
+        // Calculate recommended RAM
+        let recommended_ram_gb = self.calculate_recommended_ram(&cache_simulation);
+
+        // Generate summary text
+        let summary_text = format!(
+            "Traced {} unique pages ({:.1} GB) with {:.1}% reuse. \
+             For 90% cache hit rate, recommend {:.0} GB RAM. \
+             Hot set ({:.1}% of pages) accounts for 80% of accesses.",
+            total_unique_pages,
+            total_unique_pages as f64 * 4096.0 / 1e9,
+            reuse_ratio * 100.0,
+            recommended_ram_gb,
+            hot_page_analysis.pareto_ratio * 100.0
+        );
+
+        WorkingSetAnalysis {
+            has_data: true,
+            total_unique_pages,
+            total_accesses,
+            reuse_ratio,
+            avg_accesses_per_page,
+            cache_simulation,
+            reuse_distance_histogram,
+            per_table,
+            time_windowed,
+            hot_page_analysis,
+            summary_text,
+            recommended_ram_gb,
+        }
+    }
+
+    fn build_reuse_distance_histogram(&mut self) -> Vec<ReuseDistanceBucket> {
+        // Define buckets for reuse distance
+        let bucket_defs = [
+            ("immediate (0-100)", 0u64, 100u64),
+            ("short (100-1K)", 100, 1_000),
+            ("medium (1K-10K)", 1_000, 10_000),
+            ("long (10K-100K)", 10_000, 100_000),
+            ("very long (100K-1M)", 100_000, 1_000_000),
+            ("extreme (>1M)", 1_000_000, u64::MAX),
+        ];
+
+        // Sort the samples to count per bucket
+        let mut samples = std::mem::take(&mut self.reuse_distance_sampler.samples);
+        samples.sort_unstable();
+
+        let total_samples = samples.len() as u64;
+        if total_samples == 0 {
+            return vec![];
+        }
+
+        let mut buckets = Vec::new();
+        let mut cumulative = 0u64;
+
+        for (label, min, max) in bucket_defs.iter() {
+            let count = samples.iter().filter(|&&d| d >= *min && d < *max).count() as u64;
+            cumulative += count;
+
+            let percentage = count as f64 / total_samples as f64 * 100.0;
+            let cumulative_percentage = cumulative as f64 / total_samples as f64 * 100.0;
+
+            buckets.push(ReuseDistanceBucket {
+                label: label.to_string(),
+                min_distance: *min,
+                max_distance: *max,
+                count,
+                percentage,
+                cumulative_percentage,
+            });
+        }
+
+        // Restore samples for potential reuse
+        self.reuse_distance_sampler.samples = samples;
+
+        buckets
+    }
+
+    fn build_cache_simulation(&self, duration_secs: f64) -> Vec<CacheSimulationPoint> {
+        // Get sorted access counts (descending - most accessed pages first)
+        let mut page_counts: Vec<_> = self.page_access_counts.iter().collect();
+        page_counts.sort_by(|a, b| b.1.cmp(a.1));
+
+        let total_accesses = self.page_fault_count;
+        let total_unique = page_counts.len() as u64;
+        let major_fault_rate = if duration_secs > 0.0 {
+            self.major_fault_count as f64 / duration_secs
+        } else {
+            0.0
+        };
+
+        // Simulate cache sizes: 1GB, 2GB, 4GB, 8GB, 16GB, 32GB, 64GB, 128GB, 256GB
+        let cache_sizes_gb = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0];
+        let page_size = 4096u64;
+
+        let mut results = Vec::new();
+
+        for cache_gb in cache_sizes_gb {
+            let cache_pages = (cache_gb * 1e9 / page_size as f64) as u64;
+
+            // If cache can hold all pages, hit rate is the reuse ratio
+            if cache_pages >= total_unique {
+                results.push(CacheSimulationPoint {
+                    cache_size_gb: cache_gb,
+                    cache_size_pages: cache_pages,
+                    hit_rate: if total_accesses > 0 {
+                        1.0 - (total_unique as f64 / total_accesses as f64)
+                    } else {
+                        1.0
+                    },
+                    faults_avoided_per_sec: major_fault_rate,
+                });
+                continue;
+            }
+
+            // Calculate hit rate assuming LRU-like behavior
+            // Sum accesses for top N pages that fit in cache
+            let mut cached_accesses = 0u64;
+            for (i, (_, &count)) in page_counts.iter().enumerate() {
+                if i as u64 >= cache_pages {
+                    break;
+                }
+                // For pages in cache, subsequent accesses are hits (count - 1)
+                cached_accesses += count.saturating_sub(1) as u64;
+            }
+
+            let hit_rate = if total_accesses > 0 {
+                cached_accesses as f64 / total_accesses as f64
+            } else {
+                0.0
+            };
+
+            let faults_avoided = hit_rate * major_fault_rate;
+
+            results.push(CacheSimulationPoint {
+                cache_size_gb: cache_gb,
+                cache_size_pages: cache_pages,
+                hit_rate,
+                faults_avoided_per_sec: faults_avoided,
+            });
+        }
+
+        results
+    }
+
+    fn build_per_table_working_set(&self) -> Vec<TableWorkingSet> {
+        let page_size = 4096.0;
+
+        let mut table_ws: Vec<_> = self
+            .table_page_access
+            .iter()
+            .map(|(&dbi, (pages, accesses))| {
+                let unique_pages = pages.len() as u64;
+                let total_accesses = *accesses;
+
+                // Calculate reuse ratio for this table
+                let reuse_ratio = if total_accesses > unique_pages && unique_pages > 0 {
+                    (total_accesses - unique_pages) as f64 / total_accesses as f64
+                } else {
+                    0.0
+                };
+
+                // Estimate hot pages (simplified - would need per-table access counts for accurate)
+                // Assume Pareto-like distribution: 20% of pages handle 80% of accesses
+                let hot_pages = (unique_pages as f64 * 0.2) as u64;
+                let hot_page_ratio = if unique_pages > 0 {
+                    hot_pages as f64 / unique_pages as f64
+                } else {
+                    0.0
+                };
+
+                TableWorkingSet {
+                    name: dbi_to_table_name(dbi).to_string(),
+                    dbi,
+                    unique_pages,
+                    total_accesses,
+                    reuse_ratio,
+                    hot_pages,
+                    hot_page_ratio,
+                    hot_set_mb: hot_pages as f64 * page_size / 1e6,
+                    working_set_mb: unique_pages as f64 * page_size / 1e6,
+                }
+            })
+            .collect();
+
+        // Sort by working set size descending
+        table_ws.sort_by(|a, b| {
+            b.working_set_mb
+                .partial_cmp(&a.working_set_mb)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        table_ws
+    }
+
+    fn build_time_windowed_wss(&self) -> Vec<TimeWindowedWSS> {
+        if self.time_window_pages.is_empty() {
+            return vec![];
+        }
+
+        let page_size = 4096.0;
+
+        // Calculate stats for 1-minute windows (already collected)
+        let window_sizes: Vec<u64> = self
+            .time_window_pages
+            .values()
+            .map(|pages| pages.len() as u64)
+            .collect();
+
+        if window_sizes.is_empty() {
+            return vec![];
+        }
+
+        let avg_wss = window_sizes.iter().sum::<u64>() / window_sizes.len() as u64;
+        let max_wss = *window_sizes.iter().max().unwrap_or(&0);
+        let min_wss = *window_sizes.iter().min().unwrap_or(&0);
+
+        vec![TimeWindowedWSS {
+            window_secs: 60,
+            avg_wss_pages: avg_wss,
+            max_wss_pages: max_wss,
+            min_wss_pages: min_wss,
+            avg_wss_mb: avg_wss as f64 * page_size / 1e6,
+        }]
+    }
+
+    fn build_hot_page_analysis(&self) -> HotPageAnalysis {
+        if self.page_access_counts.is_empty() {
+            return HotPageAnalysis::default();
+        }
+
+        // Sort pages by access count (descending)
+        let mut page_counts: Vec<_> = self.page_access_counts.values().copied().collect();
+        page_counts.sort_unstable_by(|a, b| b.cmp(a));
+
+        let total_pages = page_counts.len() as u64;
+        let total_accesses: u64 = page_counts.iter().map(|&c| c as u64).sum();
+
+        if total_accesses == 0 {
+            return HotPageAnalysis::default();
+        }
+
+        // Find pages needed for various percentages of accesses
+        let mut cumulative_accesses = 0u64;
+        let mut pages_for_50pct = 0u64;
+        let mut pages_for_80pct = 0u64;
+        let mut pages_for_90pct = 0u64;
+        let mut pages_for_95pct = 0u64;
+
+        let mut distribution_curve = Vec::new();
+
+        for (i, &count) in page_counts.iter().enumerate() {
+            cumulative_accesses += count as u64;
+            let accesses_pct = cumulative_accesses as f64 / total_accesses as f64;
+            let pages_pct = (i + 1) as f64 / total_pages as f64;
+
+            // Record milestones
+            if pages_for_50pct == 0 && accesses_pct >= 0.50 {
+                pages_for_50pct = (i + 1) as u64;
+            }
+            if pages_for_80pct == 0 && accesses_pct >= 0.80 {
+                pages_for_80pct = (i + 1) as u64;
+            }
+            if pages_for_90pct == 0 && accesses_pct >= 0.90 {
+                pages_for_90pct = (i + 1) as u64;
+            }
+            if pages_for_95pct == 0 && accesses_pct >= 0.95 {
+                pages_for_95pct = (i + 1) as u64;
+            }
+
+            // Sample distribution curve (every 1% of pages, max 100 points)
+            let step = (total_pages / 100).max(1) as usize;
+            if i % step == 0 || i == page_counts.len() - 1 {
+                distribution_curve.push(ParetoPoint {
+                    pages_pct: pages_pct * 100.0,
+                    accesses_pct: accesses_pct * 100.0,
+                });
+            }
+        }
+
+        let pareto_ratio = if total_pages > 0 {
+            pages_for_80pct as f64 / total_pages as f64
+        } else {
+            0.0
+        };
+
+        HotPageAnalysis {
+            pages_for_50pct,
+            pages_for_80pct,
+            pages_for_90pct,
+            pages_for_95pct,
+            pareto_ratio,
+            distribution_curve,
+        }
+    }
+
+    fn calculate_recommended_ram(&self, cache_sim: &[CacheSimulationPoint]) -> f64 {
+        // Find the smallest cache size that gives >= 90% hit rate
+        for point in cache_sim {
+            if point.hit_rate >= 0.90 {
+                return point.cache_size_gb;
+            }
+        }
+        // If none reach 90%, recommend the largest simulated
+        cache_sim.last().map(|p| p.cache_size_gb).unwrap_or(64.0)
     }
 
     fn build_heatmap(&self) -> HeatmapData {
