@@ -2502,27 +2502,30 @@ function initTables() {
     if (unified.length > 0) {
         document.getElementById('fault-dist-row').style.display = 'grid';
 
-        // Fault distribution chart (top 8 by faults)
-        const faultCanvas = document.getElementById('fault-dist-chart');
-        const topByFaults = unified.slice(0, 8);
-        drawFaultDistChart(faultCanvas,
-            topByFaults.map(t => t.name),
-            topByFaults.map(t => t.faults),
-            topByFaults.map(t => t.major_faults)
-        );
-
-        // I/O time chart (top 8 by time lost, filtered to those with actual I/O time)
-        const ioCanvas = document.getElementById('io-time-chart');
-        const topByIO = unified.filter(t => t.time_lost_ms > 0)
-            .sort((a, b) => b.time_lost_ms - a.time_lost_ms)
-            .slice(0, 8);
-        if (topByIO.length > 0) {
-            drawIOTimeChart(ioCanvas,
-                topByIO.map(t => t.name),
-                topByIO.map(t => t.time_lost_ms),
-                topByIO.map(t => t.slow_ops)
+        // Defer chart drawing to ensure panel is visible and has dimensions
+        setTimeout(() => {
+            // Fault distribution chart (top 8 by faults)
+            const faultCanvas = document.getElementById('fault-dist-chart');
+            const topByFaults = unified.slice(0, 8);
+            drawFaultDistChart(faultCanvas,
+                topByFaults.map(t => t.name),
+                topByFaults.map(t => t.faults),
+                topByFaults.map(t => t.major_faults)
             );
-        }
+
+            // I/O time chart (top 8 by time lost, filtered to those with actual I/O time)
+            const ioCanvas = document.getElementById('io-time-chart');
+            const topByIO = unified.filter(t => t.time_lost_ms > 0)
+                .sort((a, b) => b.time_lost_ms - a.time_lost_ms)
+                .slice(0, 8);
+            if (topByIO.length > 0) {
+                drawIOTimeChart(ioCanvas,
+                    topByIO.map(t => t.name),
+                    topByIO.map(t => t.time_lost_ms),
+                    topByIO.map(t => t.slow_ops)
+                );
+            }
+        }, 50);
     }
 
     // Build unified table with expandable rows
