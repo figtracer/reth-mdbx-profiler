@@ -5,8 +5,8 @@
 //! Designed to handle traces of any size with bounded memory usage.
 
 use crate::event::{
-    CursorEvent, CursorOp, MdbxPageType, NO_ACTIVE_OP_DBI, PageFaultEvent, TxnEvent,
-    dbi_to_table_name, is_pre_trace_cursor,
+    CursorEvent, CursorOp, MdbxPageType, PageFaultEvent, TxnEvent, dbi_to_table_name,
+    is_pre_trace_cursor,
 };
 use crate::viewer::{
     AccessCountBucket, BTreeVisualization, BatchAnalysis, BlockRange, BurstStats,
@@ -15,11 +15,10 @@ use crate::viewer::{
     FaultsByCursorOp, FaultsByOpType, HeatmapData, HistogramBucket, HotPageAnalysis, OpFaultCount,
     OperationDepthStats, OperationFaultHistogram, OperationPageTypeBreakdown, OperationStats,
     PageTypeFaultCount, PageTypeStats, ParetoPoint, PatternAnalysis, RwCommitPoint, SlowKeyStats,
-    SlowOpBreakdown, SlowOpsTableStats, StrideInfo, TableDepthStats, TableDrillDown,
-    TableSourceLink, TableTreeStats, TableWorkingSet, ThreadStats, TimeWindowedWSS, TimelinePoint,
-    TraceSummary, TreeDepthEstimate, TreeDepthStats, TreeTraversalViz, TxnConcurrencyStats,
-    TxnData, TxnSummary, TxnThreadStats, TxnTimelineEntry, UnifiedTableStats, ViewerData,
-    WorkingSetAnalysis,
+    SlowOpBreakdown, SlowOpsTableStats, StrideInfo, TableDepthStats, TableDrillDown, TableHotKey,
+    TableTreeStats, TableWorkingSet, ThreadStats, TimeWindowedWSS, TimelinePoint, TraceSummary,
+    TreeDepthEstimate, TreeDepthStats, TreeTraversalViz, TxnConcurrencyStats, TxnData, TxnSummary,
+    TxnThreadStats, TxnTimelineEntry, UnifiedTableStats, ViewerData, WorkingSetAnalysis,
 };
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::io::{BufRead, BufReader};
@@ -2735,7 +2734,7 @@ impl StreamingAggregator {
         };
 
         // Build per-table CPU entries for ranking
-        let mut table_entries: Vec<_> = self
+        let table_entries: Vec<_> = self
             .table_stats
             .iter()
             .filter(|(_, stats)| stats.total_latency_ns > 0)
