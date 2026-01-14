@@ -31,9 +31,8 @@ cargo build --release
     --reth-binary /path/to/reth
 
 # generate visualization
-./target/release/mdbx-trace-analyzer \
-    --input trace.jsonl \
-    --mdbx-path /data/reth/db/mdbx.dat
+./target/release/mdbx-profiler analyze \
+    --input trace.jsonl
 ```
 
 ## commands
@@ -70,45 +69,28 @@ options:
 ### analyze
 
 ```bash
-./target/release/mdbx-profiler analyze --input trace.jsonl --format summary
+# generate html visualization (default)
+./target/release/mdbx-profiler analyze --input trace.jsonl
+
+# output raw json
+./target/release/mdbx-profiler analyze --input trace.jsonl --format json
+
+# output compact json for comparisons
+./target/release/mdbx-profiler analyze --input trace.jsonl --format compact --label "my-trace"
 ```
 
-formats: `summary`, `csv`, `json`, `logs`
+options:
+- `--input`: trace file to analyze (jsonl format)
+- `--output`: output file (default: `<input>-viewer.html`)
+- `--format`: output format - `html` (default), `json`, `compact`
+- `--label`: label for compact export (used in comparisons)
+- `--bucket-ms`: time bucket size for pattern analysis (default: 100)
 
-### web viewer
+the analyzer processes traces in streaming mode with constant memory usage (~500MB), so it can handle traces of any size (tested with 75GB+ files). progress is shown during analysis:
 
-```bash
-./target/release/mdbx-trace-analyzer \
-    --input trace.jsonl \
-    --mdbx-path /data/reth/db/mdbx.dat
 ```
-
-the analyzer runs on macos/linux without ebpf - collect traces on your node and analyze locally.
-
-### streaming mode (for large traces)
-
-for trace files larger than available RAM, use streaming mode:
-
-```bash
-./target/release/mdbx-trace-analyzer \
-    --input trace.jsonl \
-    --mdbx-path /data/reth/db/mdbx.dat \
-    --streaming
+[████████████░░░░░░░░░░░░░░░░░░]  40.5% | 30.4GB/75.0GB | 85 MB/s | ETA: 8m 45s | 125M faults, 89M ops
 ```
-
-streaming mode:
-- processes the trace in a single pass with constant memory usage (~500MB)
-- works with traces of any size (tested with 75GB+ files)
-- shows real-time progress with ETA:
-  ```
-  [████████████░░░░░░░░░░░░░░░░░░]  40.5% | 30.4GB/75.0GB | 85 MB/s | ETA: 8m 45s | 125M faults, 89M ops
-  ```
-- produces the same html output as normal mode
-
-use streaming mode when:
-- trace file is larger than available RAM
-- you get OOM errors with the default mode
-- processing multi-hour traces
 
 ## rpc method profiling
 
@@ -150,7 +132,7 @@ generates an interactive html comparison report showing:
 
 ## how it works
 
-see [INTERNALS.md](INTERNALS.md) for the full technical details on:
+see [docs/INTERNALS.md](docs/INTERNALS.md) for the full technical details on:
 - ebpf probe architecture
 - active operation tracking
 - page fault enrichment

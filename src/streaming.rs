@@ -5,10 +5,9 @@
 //! Designed to handle traces of any size with bounded memory usage.
 
 use crate::event::{
-    dbi_to_table_name, is_pre_trace_cursor, CursorEvent, CursorOp, MdbxPageType, PageFaultEvent,
-    TxnEvent, NO_ACTIVE_OP_DBI,
+    CursorEvent, CursorOp, MdbxPageType, NO_ACTIVE_OP_DBI, PageFaultEvent, TxnEvent,
+    dbi_to_table_name, is_pre_trace_cursor,
 };
-use crate::mdbx_metadata::PageAttribution;
 use crate::viewer::{
     BTreeVisualization, BatchAnalysis, BlockRange, BurstStats, CursorData, CursorOpSample,
     CursorSummary, CursorTableStats, CursorTimelinePoint, DepthBucket, DirectFaultAttribution,
@@ -263,7 +262,7 @@ impl HotKeyTracker {
     fn prune(&mut self) {
         // Keep only top N by slow_count
         let mut entries: Vec<_> = self.keys.drain().collect();
-        entries.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+        entries.sort_by(|a, b| b.1.0.cmp(&a.1.0));
         entries.truncate(self.max_keys);
         self.keys = entries.into_iter().collect();
     }

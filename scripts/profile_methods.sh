@@ -52,7 +52,6 @@ FLUSH_CACHES=false
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROFILER="$SCRIPT_DIR/../target/release/mdbx-profiler"
-ANALYZER="$SCRIPT_DIR/../target/release/mdbx-trace-analyzer"
 
 # Colors
 RED='\033[0;31m'
@@ -615,7 +614,7 @@ echo -e "${CYAN}Analyzing profiles...${NC}"
 # Analyze baseline
 if [ -f "$SESSION_DIR/baseline.jsonl" ]; then
     echo "  Analyzing baseline..."
-    "$ANALYZER" --input "$SESSION_DIR/baseline.jsonl" --mdbx-path "$MDBX_PATH" \
+    "$PROFILER" analyze --input "$SESSION_DIR/baseline.jsonl" \
         --format compact --label "baseline" 2>/dev/null > "$SESSION_DIR/baseline.json"
 fi
 
@@ -623,7 +622,7 @@ for method in "${METHOD_LIST[@]}"; do
     if [ -f "$SESSION_DIR/${method}.jsonl" ]; then
         echo "  Analyzing ${method}..."
         # Generate compact JSON for comparison
-        "$ANALYZER" --input "$SESSION_DIR/${method}.jsonl" --mdbx-path "$MDBX_PATH" \
+        "$PROFILER" analyze --input "$SESSION_DIR/${method}.jsonl" \
             --format compact --label "$method" 2>/dev/null > "$SESSION_DIR/${method}.json"
     fi
 done

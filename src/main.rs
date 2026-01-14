@@ -1,32 +1,32 @@
 //! eBPF-based profiler for MDBX page fault patterns and cursor operations
 //!
-//! This tool traces:
-//! 1. Page faults in MDBX memory-mapped regions to understand I/O patterns
-//! 2. MDBX cursor operations (seeks, gets) to understand database access patterns
+//! This tool provides two main functions:
+//! 1. `trace` - Traces page faults and cursor operations using eBPF
+//! 2. `analyze` - Analyzes collected traces and generates visualizations
 
 use clap::{Parser, Subcommand};
 use libbpf_rs::{MapCore, MapFlags, ObjectBuilder, ProgramMut, RingBufferBuilder};
 use std::{
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
 use tracing::{debug, info, warn};
 
 mod event;
-mod mdbx;
+mod streaming;
+mod viewer;
 
 use event::{CursorEvent, PageFaultEvent, TxnEvent};
+use streaming::StreamingConfig;
 
 /// eBPF profiler for MDBX page fault patterns and cursor operations
 #[derive(Parser)]
 #[command(name = "mdbx-profiler")]
-#[command(
-    about = "Trace MDBX page faults and cursor operations to analyze database access patterns"
-)]
+#[command(about = "Trace and analyze MDBX page faults and cursor operations")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -34,7 +34,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Trace a running process (page faults only)
+    /// Trace a running process (collect page faults and cursor operations)
     Trace {
         /// PID of the process to trace (use this OR --process-name)
         #[arg(short, long, required_unless_present = "process_name")]
@@ -69,6 +69,33 @@ enum Commands {
         /// Path to the reth binary (for cursor tracing)
         #[arg(long)]
         reth_binary: Option<PathBuf>,
+    },
+
+    /// Analyze a trace file and generate visualizations
+    Analyze {
+        /// Input trace file (JSON lines format)
+        #[arg(short, long)]
+        input: PathBuf,
+
+        /// Output HTML file (default: <input>-viewer.html)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Path to MDBX database file for table attribution
+        #[arg(long)]
+        mdbx_path: Option<PathBuf>,
+
+        /// Output format: html (default), json (raw data), compact (for comparison)
+        #[arg(short, long, default_value = "html")]
+        format: String,
+
+        /// Label for this trace (used in compact export for comparison)
+        #[arg(long)]
+        label: Option<String>,
+
+        /// Time bucket size in milliseconds (for pattern analysis)
+        #[arg(long, default_value = "100")]
+        bucket_ms: u64,
     },
 }
 
@@ -106,10 +133,255 @@ fn main() -> anyhow::Result<()> {
                 reth_binary,
             )?;
         }
+        Commands::Analyze {
+            input,
+            output,
+            mdbx_path,
+            format,
+            label,
+            bucket_ms,
+        } => {
+            run_analyze(input, output, mdbx_path, format, label, bucket_ms)?;
+        }
     }
 
     Ok(())
 }
+
+/// Run the trace analyzer
+fn run_analyze(
+    input: PathBuf,
+    output: Option<PathBuf>,
+    _mdbx_path: Option<PathBuf>,
+    format: String,
+    label: Option<String>,
+    bucket_ms: u64,
+) -> anyhow::Result<()> {
+    let file_size = std::fs::metadata(&input)?.len();
+    let file_size_gb = file_size as f64 / 1e9;
+
+    eprintln!("Processing {:.2}GB trace file: {:?}", file_size_gb, input);
+
+    let file = std::fs::File::open(&input)?;
+
+    let config = StreamingConfig {
+        bucket_ms,
+        ..Default::default()
+    };
+
+    // Progress callback with detailed info
+    use streaming::ProgressInfo;
+    let progress_callback: Option<Box<dyn Fn(&ProgressInfo) + Send>> =
+        Some(Box::new(move |info: &ProgressInfo| {
+            let pct = info.percent_complete().unwrap_or(0.0);
+            let speed = info.speed_mbps();
+            let eta = info.eta_string();
+
+            // Create a simple progress bar
+            let bar_width = 30;
+            let filled = (pct / 100.0 * bar_width as f64) as usize;
+            let bar: String = "█".repeat(filled) + &"░".repeat(bar_width - filled);
+
+            eprint!(
+                "\r[{}] {:5.1}% | {:.1}GB/{:.1}GB | {:.0} MB/s | ETA: {} | {}M faults, {}M ops   ",
+                bar,
+                pct,
+                info.bytes_read as f64 / 1e9,
+                info.total_bytes.unwrap_or(0) as f64 / 1e9,
+                speed,
+                eta,
+                info.page_faults / 1_000_000,
+                info.cursor_events / 1_000_000,
+            );
+        }));
+
+    let data =
+        streaming::process_trace_streaming(file, config, Some(file_size), progress_callback)?;
+
+    eprintln!("\n"); // Clear progress line
+
+    match format.as_str() {
+        "html" => {
+            let output_path = output.clone().unwrap_or_else(|| {
+                let input_stem = input
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("trace");
+                PathBuf::from(format!("{}-viewer.html", input_stem))
+            });
+
+            eprintln!("Writing HTML viewer to {:?}...", output_path);
+            viewer::write_html(&data, &output_path)?;
+            print_summary(&data);
+            eprintln!("\nViewer written to: {}", output_path.display());
+        }
+        "json" => {
+            println!("{}", serde_json::to_string_pretty(&data)?);
+        }
+        "compact" => {
+            let compact = generate_compact_export(&data, label.as_deref());
+            println!("{}", serde_json::to_string_pretty(&compact)?);
+        }
+        _ => {
+            eprintln!("Unknown format: {}. Use: html, json, compact", format);
+            std::process::exit(1);
+        }
+    }
+
+    Ok(())
+}
+
+fn print_summary(data: &viewer::ViewerData) {
+    eprintln!("\n=== Trace Summary ===");
+    eprintln!("Duration:        {:.2}s", data.summary.duration_secs);
+    eprintln!("Total faults:    {}", data.summary.page_faults);
+    eprintln!(
+        "Major faults:    {} ({:.1}%)",
+        data.summary.major_faults,
+        data.summary.major_fault_ratio * 100.0
+    );
+    eprintln!("Minor faults:    {}", data.summary.minor_faults);
+    eprintln!("Unique pages:    {}", data.summary.unique_pages);
+    eprintln!("Fault rate:      {:.1}/s", data.summary.fault_rate_per_sec);
+    eprintln!(
+        "Sequential:      {:.1}%",
+        data.patterns.sequential_ratio * 100.0
+    );
+
+    if data.cursor_data.has_data {
+        eprintln!("\n=== Cursor Operations ===");
+        eprintln!("Total ops:       {}", data.cursor_data.summary.total_ops);
+        eprintln!(
+            "Op rate:         {:.1}/s",
+            data.cursor_data.summary.op_rate_per_sec
+        );
+        eprintln!(
+            "Avg latency:     {:.1} us",
+            data.cursor_data.summary.avg_latency_us
+        );
+        eprintln!(
+            "P99 latency:     {:.1} us",
+            data.cursor_data.summary.p99_latency_us
+        );
+        eprintln!(
+            "Seek ratio:      {:.1}%",
+            data.cursor_data.summary.seek_ratio
+        );
+    }
+
+    if data.txn_data.has_data {
+        eprintln!("\n=== Transactions ===");
+        eprintln!("Total txns:      {}", data.txn_data.summary.begin_count);
+        eprintln!(
+            "Txn rate:        {:.1}/s",
+            data.txn_data.summary.txn_rate_per_sec
+        );
+        eprintln!(
+            "RO/RW:           {} / {}",
+            data.txn_data.summary.ro_count, data.txn_data.summary.rw_count
+        );
+        eprintln!(
+            "Commits/Aborts:  {} / {}",
+            data.txn_data.summary.commit_count, data.txn_data.summary.abort_count
+        );
+        eprintln!(
+            "Avg commit lat:  {:.1} us",
+            data.txn_data.summary.avg_commit_latency_us
+        );
+        eprintln!(
+            "Max concurrent:  {} RO, {} RW",
+            data.txn_data.concurrency.max_concurrent_ro,
+            data.txn_data.concurrency.max_concurrent_rw
+        );
+    }
+}
+
+/// Generate compact export format (same as browser export button)
+fn generate_compact_export(data: &viewer::ViewerData, label: Option<&str>) -> serde_json::Value {
+    let mut compact = serde_json::json!({
+        "label": label.unwrap_or("trace"),
+        "trace": {
+            "duration_secs": data.summary.duration_secs,
+            "total_events": data.summary.total_events,
+            "file_size_gb": data.summary.file_size_gb,
+            "block_range": data.summary.block_range
+        },
+        "page_faults": {
+            "total": data.summary.page_faults,
+            "major": data.summary.major_faults,
+            "minor": data.summary.minor_faults,
+            "major_ratio": data.summary.major_fault_ratio,
+            "rate_per_sec": data.summary.fault_rate_per_sec,
+            "unique_pages": data.summary.unique_pages,
+            "sequential_ratio": data.patterns.sequential_ratio,
+            "random_ratio": data.patterns.random_ratio
+        },
+        "tables": data.unified_tables.iter().take(20).map(|t| {
+            serde_json::json!({
+                "name": t.name,
+                "faults": t.faults,
+                "major_faults": t.major_faults,
+                "fault_pct": t.fault_percentage,
+                "slow_ops": t.slow_ops,
+                "time_lost_ms": t.time_lost_ms,
+                "top_op": t.top_operation
+            })
+        }).collect::<Vec<_>>(),
+        "threads": data.threads.iter().take(10).collect::<Vec<_>>()
+    });
+
+    // Add cursor data if available
+    if data.cursor_data.has_data {
+        compact["cursor_ops"] = serde_json::json!({
+            "total": data.cursor_data.summary.total_ops,
+            "rate_per_sec": data.cursor_data.summary.op_rate_per_sec,
+            "seek_ratio": data.cursor_data.summary.seek_ratio,
+            "latency_avg_us": data.cursor_data.summary.avg_latency_us,
+            "latency_p95_us": data.cursor_data.summary.p95_latency_us,
+            "latency_p99_us": data.cursor_data.summary.p99_latency_us,
+            "by_table": data.cursor_data.table_stats.iter().take(15).map(|t| {
+                serde_json::json!({
+                    "name": t.name,
+                    "ops": t.ops,
+                    "pct": t.percentage,
+                    "avg_latency_us": t.avg_latency_us,
+                    "p95_latency_us": t.p95_latency_us
+                })
+            }).collect::<Vec<_>>()
+        });
+    }
+
+    // Add transaction data if available
+    if data.txn_data.has_data {
+        compact["transactions"] = serde_json::json!({
+            "total": data.txn_data.summary.begin_count,
+            "rate_per_sec": data.txn_data.summary.txn_rate_per_sec,
+            "ro_count": data.txn_data.summary.ro_count,
+            "rw_count": data.txn_data.summary.rw_count,
+            "commits": data.txn_data.summary.commit_count,
+            "aborts": data.txn_data.summary.abort_count,
+            "commit_latency_avg_us": data.txn_data.summary.avg_commit_latency_us,
+            "commit_latency_p99_us": data.txn_data.summary.p99_commit_latency_us,
+            "max_concurrent_ro": data.txn_data.concurrency.max_concurrent_ro,
+            "max_concurrent_rw": data.txn_data.concurrency.max_concurrent_rw
+        });
+    }
+
+    // Add direct attribution stats if available
+    if data.direct_fault_attribution.has_data {
+        compact["attribution"] = serde_json::json!({
+            "directly_attributed": data.direct_fault_attribution.directly_attributed_count,
+            "timestamp_fallback": data.direct_fault_attribution.timestamp_fallback_count,
+            "uncorrelated": data.direct_fault_attribution.uncorrelated_count
+        });
+    }
+
+    compact
+}
+
+// ============================================================================
+// Trace collection functions (from original main.rs)
+// ============================================================================
 
 /// Find PID(s) by process name
 fn find_pids_by_name(name: &str) -> Vec<u32> {

@@ -41,7 +41,3 @@ libbpf-cargo = "0.24"
 [[bin]]
 name = "mdbx-profiler"
 path = "src/main.rs"
-
-[[bin]]
-name = "mdbx-trace-analyzer"
-path = "src/analyzer.rs"
