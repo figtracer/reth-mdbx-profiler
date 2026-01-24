@@ -893,6 +893,15 @@ pub struct BurstStats {
     pub bucket_ms: u64,
 }
 
+/// Attribution data for a single heatmap cell
+#[derive(Debug, Serialize, Clone)]
+pub struct HeatmapCellAttribution {
+    /// Cell index (time_idx * offset_buckets + offset_idx)
+    pub cell: u32,
+    /// Top tables by fault count: (table_name, fault_count, major_count)
+    pub tables: Vec<(String, u32, u32)>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct HeatmapData {
     pub time_buckets: u32,
@@ -904,6 +913,9 @@ pub struct HeatmapData {
     /// Flattened 2D array: [time][offset] -> count
     pub data: Vec<u32>,
     pub max_count: u32,
+    /// Sparse attribution data for cells with faults (only top tables per cell)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub cell_attribution: Vec<HeatmapCellAttribution>,
 }
 
 /// Generate the HTML viewer file

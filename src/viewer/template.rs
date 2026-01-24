@@ -1907,7 +1907,7 @@ class InteractiveHeatmap {
         const cellInfo = this.getCellAt(dataPos.time, dataPos.offset);
 
         if (cellInfo) {
-            this.showTooltip(pos, dataPos, cellInfo.count);
+            this.showTooltip(pos, dataPos, cellInfo);
         } else {
             this.hideTooltip();
         }
@@ -1930,27 +1930,59 @@ class InteractiveHeatmap {
         }
 
         const cellIdx = timeIdx * offset_buckets + offsetIdx;
-        return { count: cells[cellIdx] || 0, timeIdx, offsetIdx };
+        return { count: cells[cellIdx] || 0, timeIdx, offsetIdx, cellIdx };
     }
 
-    showTooltip(pos, dataPos, count) {
+    getAttribution(cellIdx) {
+        // Binary search for attribution data (sorted by cell index)
+        const attrib = this.data.cell_attribution;
+        if (!attrib || attrib.length === 0) return null;
+
+        let lo = 0, hi = attrib.length - 1;
+        while (lo <= hi) {
+            const mid = (lo + hi) >> 1;
+            if (attrib[mid].cell === cellIdx) {
+                return attrib[mid].tables;
+            } else if (attrib[mid].cell < cellIdx) {
+                lo = mid + 1;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        return null;
+    }
+
+    showTooltip(pos, dataPos, cellInfo) {
         const timeStr = dataPos.time < 60000
             ? (dataPos.time / 1000).toFixed(1) + 's'
             : (dataPos.time / 60000).toFixed(2) + 'm';
         const intensity = this.data.max_count > 0
-            ? (count / this.data.max_count * 100).toFixed(0)
+            ? (cellInfo.count / this.data.max_count * 100).toFixed(0)
             : 0;
 
-        this.tooltip.innerHTML = `
+        let html = `
             <div class="chart-tooltip-label">Time: ${timeStr}</div>
             <div class="chart-tooltip-label">Offset: ${dataPos.offset.toFixed(2)} GB</div>
-            <div class="chart-tooltip-value">${count} faults</div>
+            <div class="chart-tooltip-value">${cellInfo.count} faults</div>
             <div class="chart-tooltip-label">${intensity}% intensity</div>
         `;
 
+        // Add attribution if available
+        const tables = this.getAttribution(cellInfo.cellIdx);
+        if (tables && tables.length > 0) {
+            html += '<div style="margin-top: 6px; border-top: 1px solid #3f3f46; padding-top: 6px;">';
+            html += '<div class="chart-tooltip-label" style="color: #a1a1aa;">Top Tables:</div>';
+            for (const [name, total, major] of tables) {
+                const majorPct = total > 0 ? Math.round(major / total * 100) : 0;
+                html += `<div style="font-size: 10px; color: #d4d4d8;">${name}: ${total} (${majorPct}% major)</div>`;
+            }
+            html += '</div>';
+        }
+
+        this.tooltip.innerHTML = html;
         this.tooltip.style.display = 'block';
-        this.tooltip.style.left = Math.min(pos.x + 10, this.w - 140) + 'px';
-        this.tooltip.style.top = Math.min(pos.y + 10, this.h - 100) + 'px';
+        this.tooltip.style.left = Math.min(pos.x + 10, this.w - 180) + 'px';
+        this.tooltip.style.top = Math.min(pos.y + 10, this.h - 140) + 'px';
     }
 
     hideTooltip() {

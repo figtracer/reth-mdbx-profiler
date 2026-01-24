@@ -12,13 +12,14 @@ use crate::viewer::{
     AccessCountBucket, BTreeVisualization, BatchAnalysis, BlockRange, BurstStats,
     CacheSimulationPoint, CpuProfileSummary, CpuTableEntry, CursorData, CursorOpSample,
     CursorSummary, CursorTableStats, CursorTimelinePoint, DepthBucket, DirectFaultAttribution,
-    FaultsByCursorOp, FaultsByOpType, HeatmapData, HistogramBucket, HotPageAnalysis, OpFaultCount,
-    OperationDepthStats, OperationFaultHistogram, OperationPageTypeBreakdown, OperationStats,
-    PageTypeFaultCount, PageTypeStats, ParetoPoint, PatternAnalysis, RwCommitPoint, SlowKeyStats,
-    SlowOpBreakdown, SlowOpsTableStats, StrideInfo, TableDepthStats, TableDrillDown, TableHotKey,
-    TableTreeStats, TableWorkingSet, ThreadStats, TimeWindowedWSS, TimelinePoint, TraceSummary,
-    TreeDepthEstimate, TreeDepthStats, TreeTraversalViz, TxnConcurrencyStats, TxnData, TxnSummary,
-    TxnThreadStats, TxnTimelineEntry, UnifiedTableStats, ViewerData, WorkingSetAnalysis,
+    FaultsByCursorOp, FaultsByOpType, HeatmapCellAttribution, HeatmapData, HistogramBucket,
+    HotPageAnalysis, OpFaultCount, OperationDepthStats, OperationFaultHistogram,
+    OperationPageTypeBreakdown, OperationStats, PageTypeFaultCount, PageTypeStats, ParetoPoint,
+    PatternAnalysis, RwCommitPoint, SlowKeyStats, SlowOpBreakdown, SlowOpsTableStats, StrideInfo,
+    TableDepthStats, TableDrillDown, TableHotKey, TableTreeStats, TableWorkingSet, ThreadStats,
+    TimeWindowedWSS, TimelinePoint, TraceSummary, TreeDepthEstimate, TreeDepthStats,
+    TreeTraversalViz, TxnConcurrencyStats, TxnData, TxnSummary, TxnThreadStats, TxnTimelineEntry,
+    UnifiedTableStats, ViewerData, WorkingSetAnalysis,
 };
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::io::{BufRead, BufReader};
@@ -50,8 +51,8 @@ pub struct StreamingConfig {
 impl Default for StreamingConfig {
     fn default() -> Self {
         Self {
-            bucket_ms: 100,
-            max_timeline_points: 1000,
+            bucket_ms: 50,             // Finer time resolution (was 100ms)
+            max_timeline_points: 2000, // More detail in timeline (was 1000)
             max_cursor_samples: 200,
             max_txn_timeline: 1000,
             slow_op_threshold_us: 100,
@@ -585,6 +586,9 @@ pub struct StreamingAggregator {
     // Heatmap
     heatmap_data: Vec<Vec<u32>>,
     heatmap_raw_data: HashMap<u32, Vec<u64>>, // time_bucket -> list of file offsets
+    // Per-cell attribution: (time_bucket, offset) -> dbi -> (total_faults, major_faults)
+    // We store raw time buckets and offsets, then convert during finalization
+    heatmap_attribution: HashMap<u32, HashMap<u64, HashMap<u32, (u32, u32)>>>,
     heatmap_initialized: bool,
 
     // Parse errors
@@ -694,6 +698,7 @@ impl StreamingAggregator {
             batch_index: 0,
             heatmap_data,
             heatmap_raw_data: HashMap::new(),
+            heatmap_attribution: HashMap::new(),
             heatmap_initialized: false,
             parse_errors: 0,
             // Working set analysis
@@ -795,6 +800,23 @@ impl StreamingAggregator {
             .entry(bucket as u32)
             .or_insert_with(Vec::new)
             .push(event.file_offset);
+
+        // Track per-cell attribution for heatmap (only if we have active op info)
+        if event.has_active_op() {
+            let dbi = event.active_dbi;
+            let cell_attrib = self
+                .heatmap_attribution
+                .entry(bucket as u32)
+                .or_default()
+                .entry(event.file_offset)
+                .or_default()
+                .entry(dbi)
+                .or_insert((0, 0));
+            cell_attrib.0 += 1;
+            if is_major {
+                cell_attrib.1 += 1;
+            }
+        }
 
         // Direct attribution
         if event.has_active_op() {
@@ -2676,7 +2698,95 @@ impl StreamingAggregator {
             .unwrap_or(0);
 
         let first_ts = self.first_timestamp.unwrap_or(0);
-        let duration_ms = (self.last_timestamp.saturating_sub(first_ts)) / 1_000_000;
+        let duration_ns = self.last_timestamp.saturating_sub(first_ts);
+        let duration_ms = duration_ns / 1_000_000;
+
+        // Build cell attribution from raw data
+        // We need to convert raw time buckets and offsets to heatmap cell indices
+        let mut cell_attribution: Vec<HeatmapCellAttribution> = Vec::new();
+
+        if !self.heatmap_attribution.is_empty() && duration_ns > 0 {
+            let time_bucket_size = duration_ns / self.config.heatmap_time_buckets as u64;
+            let offset_range = self.max_offset.saturating_sub(self.min_offset);
+            let offset_bucket_size = if offset_range > 0 {
+                offset_range / self.config.heatmap_offset_buckets as u64
+            } else {
+                1
+            };
+
+            // Aggregate attribution by final cell index
+            // cell_idx -> dbi -> (total_faults, major_faults)
+            let mut cell_map: HashMap<u32, HashMap<u32, (u32, u32)>> = HashMap::new();
+
+            for (&time_bucket, offset_map) in &self.heatmap_attribution {
+                // Convert raw time bucket to heatmap time index
+                let time_idx = ((time_bucket as u64 * self.config.bucket_ms * 1_000_000)
+                    / time_bucket_size.max(1)) as usize;
+                if time_idx >= self.config.heatmap_time_buckets as usize {
+                    continue;
+                }
+
+                for (&offset, dbi_map) in offset_map {
+                    // Convert offset to heatmap offset index
+                    let offset_idx = if offset >= self.min_offset && offset_bucket_size > 0 {
+                        ((offset - self.min_offset) / offset_bucket_size) as usize
+                    } else {
+                        0
+                    };
+                    let offset_idx =
+                        offset_idx.min(self.config.heatmap_offset_buckets as usize - 1);
+
+                    let cell_idx = (time_idx * self.config.heatmap_offset_buckets as usize
+                        + offset_idx) as u32;
+
+                    for (&dbi, &(total, major)) in dbi_map {
+                        let entry = cell_map
+                            .entry(cell_idx)
+                            .or_default()
+                            .entry(dbi)
+                            .or_insert((0, 0));
+                        entry.0 += total;
+                        entry.1 += major;
+                    }
+                }
+            }
+
+            // Convert to final attribution, keeping top 3 tables per cell
+            // First, collect all cells with their total fault counts
+            let mut cells_with_totals: Vec<(u32, u32, HashMap<u32, (u32, u32)>)> = cell_map
+                .into_iter()
+                .map(|(cell_idx, dbi_counts)| {
+                    let total: u32 = dbi_counts.values().map(|(t, _)| t).sum();
+                    (cell_idx, total, dbi_counts)
+                })
+                .collect();
+
+            // Sort by total faults descending and keep top 2000 cells
+            // This limits attribution data to ~300KB max while keeping the most interesting cells
+            cells_with_totals.sort_by(|a, b| b.1.cmp(&a.1));
+            cells_with_totals.truncate(2000);
+
+            for (cell_idx, _, dbi_counts) in cells_with_totals {
+                let mut tables: Vec<_> = dbi_counts
+                    .into_iter()
+                    .map(|(dbi, (total, major))| (dbi_to_table_name(dbi).to_string(), total, major))
+                    .collect();
+
+                // Sort by total faults descending, take top 3
+                tables.sort_by(|a, b| b.1.cmp(&a.1));
+                tables.truncate(3);
+
+                if !tables.is_empty() {
+                    cell_attribution.push(HeatmapCellAttribution {
+                        cell: cell_idx,
+                        tables,
+                    });
+                }
+            }
+
+            // Sort by cell index for efficient lookup
+            cell_attribution.sort_by_key(|a| a.cell);
+        }
 
         HeatmapData {
             time_buckets: self.config.heatmap_time_buckets,
@@ -2687,6 +2797,7 @@ impl StreamingAggregator {
             max_offset_gb: self.max_offset as f64 / 1e9,
             data: self.heatmap_data.iter().flatten().copied().collect(),
             max_count,
+            cell_attribution,
         }
     }
 
