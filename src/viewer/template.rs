@@ -1882,14 +1882,15 @@ function initPlotlyHeatmap(container, data, timelineData, durationSecs) {
 
     const traces = [heatmapTrace];
 
-    // Add fault timeline as overlay on secondary y-axis
+    // Add fault timeline as overlay - use actual time_ms from data
     if (timelineData && timelineData.length > 0) {
         const timelineX = [];
         const timelineY = [];
         const maxFaults = Math.max(...timelineData.map(t => t.faults));
 
         for (let i = 0; i < timelineData.length; i++) {
-            const timeSecs = i * (durationSecs / timelineData.length);
+            // Use actual time from data (time_ms field), convert to seconds
+            const timeSecs = timelineData[i].time_ms / 1000;
             timelineX.push(timeSecs);
             // Normalize faults to offset range for overlay (map to y-axis range)
             const normalizedY = min_offset_gb + (timelineData[i].faults / maxFaults) * offsetRange * 0.9;
@@ -1903,11 +1904,11 @@ function initPlotlyHeatmap(container, data, timelineData, durationSecs) {
             mode: 'lines',
             name: 'Fault Rate',
             line: {
-                color: 'rgba(251, 146, 60, 0.08)',  // Orange with 15% opacity
+                color: 'rgba(251, 146, 60, 0.12)',  // Orange, slightly more visible
                 width: 1.5
             },
             fill: 'tozeroy',
-            fillcolor: 'rgba(251, 146, 60, 0.06)',  // Very subtle fill
+            fillcolor: 'rgba(251, 146, 60, 0.08)',  // Subtle fill
             hoverinfo: 'skip',  // Don't show hover for timeline
             yaxis: 'y'  // Use same y-axis
         };
