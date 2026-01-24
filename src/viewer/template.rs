@@ -1820,6 +1820,10 @@ class InteractiveHeatmap {
         // Zoom history for back navigation
         this.zoomHistory = [];
 
+        // Rendered cells - stores pixel bounds for each drawn cell for accurate hit testing
+        // This array is populated during draw() and used for tooltip lookup
+        this.renderedCells = [];
+
         // Interaction state
         this.isDragging = false;
         this.dragStart = null;
@@ -1922,67 +1926,14 @@ class InteractiveHeatmap {
     }
 
     getCellAtPixel(pos) {
-        // Find which cell is drawn at this pixel position
-        // This matches the draw() logic exactly to avoid mismatches
-        const { time_buckets, offset_buckets, data: cells } = this.data;
-
-        const chartW = this.w - this.pad.l - this.pad.r;
-        const chartH = this.h - this.pad.t - this.pad.b;
-
-        const fullTimeRange = this.fullTimeMax - this.fullTimeMin;
-        const fullOffsetRange = this.fullOffsetMax - this.fullOffsetMin;
-        const viewTimeRange = this.viewTimeMax - this.viewTimeMin;
-        const viewOffsetRange = this.viewOffsetMax - this.viewOffsetMin;
-
-        if (fullTimeRange <= 0 || fullOffsetRange <= 0 || viewTimeRange <= 0 || viewOffsetRange <= 0) {
-            return null;
-        }
-
-        // Convert pixel to view coordinates
-        const relX = (pos.x - this.pad.l) / chartW;
-        const relY = (pos.y - this.pad.t) / chartH;
-
-        // View data coordinates
-        const viewTime = this.viewTimeMin + relX * viewTimeRange;
-        const viewOffset = this.viewOffsetMax - relY * viewOffsetRange;
-
-        // Find which bucket range is visible
-        const startTimeBucket = Math.floor(((this.viewTimeMin - this.fullTimeMin) / fullTimeRange) * time_buckets);
-        const endTimeBucket = Math.ceil(((this.viewTimeMax - this.fullTimeMin) / fullTimeRange) * time_buckets);
-        const startOffsetBucket = Math.floor(((this.viewOffsetMin - this.fullOffsetMin) / fullOffsetRange) * offset_buckets);
-        const endOffsetBucket = Math.ceil(((this.viewOffsetMax - this.fullOffsetMin) / fullOffsetRange) * offset_buckets);
-
-        // Search through visible buckets to find which one contains this pixel
-        // This matches the draw() logic exactly
-        for (let t = Math.max(0, startTimeBucket); t < Math.min(time_buckets, endTimeBucket); t++) {
-            const bucketTimeMin = this.fullTimeMin + (t / time_buckets) * fullTimeRange;
-            const bucketTimeMax = this.fullTimeMin + ((t + 1) / time_buckets) * fullTimeRange;
-
-            // Check if this time bucket contains the hovered time
-            if (viewTime < bucketTimeMin || viewTime >= bucketTimeMax) continue;
-
-            for (let o = Math.max(0, startOffsetBucket); o < Math.min(offset_buckets, endOffsetBucket); o++) {
-                const bucketOffsetMin = this.fullOffsetMin + (o / offset_buckets) * fullOffsetRange;
-                const bucketOffsetMax = this.fullOffsetMin + ((o + 1) / offset_buckets) * fullOffsetRange;
-
-                // Check if this offset bucket contains the hovered offset
-                if (viewOffset < bucketOffsetMin || viewOffset >= bucketOffsetMax) continue;
-
-                // Found the cell
-                const cellIdx = t * offset_buckets + o;
-                return {
-                    count: cells[cellIdx] || 0,
-                    timeIdx: t,
-                    offsetIdx: o,
-                    cellIdx,
-                    bucketTimeMin,
-                    bucketTimeMax,
-                    bucketOffsetMin,
-                    bucketOffsetMax
-                };
+        // Simple hit-test against rendered cells stored during draw()
+        // This guarantees the tooltip matches exactly what's drawn on screen
+        for (const cell of this.renderedCells) {
+            if (pos.x >= cell.x1 && pos.x < cell.x2 &&
+                pos.y >= cell.y1 && pos.y < cell.y2) {
+                return cell;
             }
         }
-
         return null;
     }
 
@@ -2197,7 +2148,10 @@ class InteractiveHeatmap {
         }
         if (visibleMaxCount === 0) visibleMaxCount = max_count;
 
-        // Draw cells
+        // Clear rendered cells array before drawing
+        this.renderedCells = [];
+
+        // Draw cells and store their bounds for hit testing
         for (let t = Math.max(0, startTimeBucket); t < Math.min(time_buckets, endTimeBucket); t++) {
             for (let o = Math.max(0, startOffsetBucket); o < Math.min(offset_buckets, endOffsetBucket); o++) {
                 const idx = t * offset_buckets + o;
@@ -2230,6 +2184,22 @@ class InteractiveHeatmap {
                 if (drawW > 0 && drawH > 0) {
                     this.ctx.fillStyle = this.heatColor(intensity);
                     this.ctx.fillRect(drawX, drawY, drawW, drawH);
+
+                    // Store the rendered cell bounds for accurate hit testing
+                    this.renderedCells.push({
+                        x1: drawX,
+                        y1: drawY,
+                        x2: drawX + drawW,
+                        y2: drawY + drawH,
+                        count: count,
+                        cellIdx: idx,
+                        timeIdx: t,
+                        offsetIdx: o,
+                        bucketTimeMin,
+                        bucketTimeMax,
+                        bucketOffsetMin,
+                        bucketOffsetMax
+                    });
                 }
             }
         }
