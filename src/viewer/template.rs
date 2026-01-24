@@ -1797,8 +1797,8 @@ class Chart {
 }
 
 // Initialize Plotly heatmap - handles zoom, pan, and tooltips correctly
-function initPlotlyHeatmap(container, data) {
-    const { time_buckets, offset_buckets, data: cells, max_count, 
+function initPlotlyHeatmap(container, data, timelineData, durationSecs) {
+    const { time_buckets, offset_buckets, data: cells, max_count,
             min_offset_gb, max_offset_gb, min_time_ms, max_time_ms,
             cell_attribution } = data;
 
@@ -1811,50 +1811,65 @@ function initPlotlyHeatmap(container, data) {
     // Convert flat array to 2D array for Plotly (offset rows, time columns)
     // Plotly expects z[y][x] format
     const z = [];
-    const customData = [];  // For storing attribution info
+    const hoverTexts = [];  // Custom hover text with attribution
     for (let o = 0; o < offset_buckets; o++) {
         const row = [];
-        const customRow = [];
+        const hoverRow = [];
         for (let t = 0; t < time_buckets; t++) {
             const idx = t * offset_buckets + o;
-            row.push(cells[idx] || 0);
-            // Store cell index for attribution lookup
-            customRow.push(idx);
+            const count = cells[idx] || 0;
+            row.push(count);
+
+            // Build hover text with attribution
+            const timeRange = max_time_ms - min_time_ms;
+            const offsetRange = max_offset_gb - min_offset_gb;
+            const time = min_time_ms + (t + 0.5) * timeRange / time_buckets;
+            const offset = min_offset_gb + (o + 0.5) * offsetRange / offset_buckets;
+            const timeStr = time < 60000
+                ? (time / 1000).toFixed(2) + 's'
+                : (time / 60000).toFixed(2) + 'm';
+
+            let hoverText = '<b>TIME:</b> ' + timeStr + '<br>' +
+                           '<b>OFFSET:</b> ' + offset.toFixed(2) + ' GB<br>' +
+                           '<b style="color:#60a5fa">' + count + ' faults</b>';
+
+            // Add table attribution if available
+            const tables = attrLookup[idx];
+            if (tables && tables.length > 0) {
+                hoverText += '<br><br><b>TOP TABLES:</b>';
+                tables.slice(0, 5).forEach(([name, total, major]) => {
+                    const majorPct = total > 0 ? Math.round(major / total * 100) : 0;
+                    hoverText += '<br>' + name + ': ' + total + ' (' + majorPct + '% major)';
+                });
+            }
+
+            hoverRow.push(hoverText);
         }
         z.push(row);
-        customData.push(customRow);
+        hoverTexts.push(hoverRow);
     }
 
-    // Generate axis labels
+    // Generate axis values (numeric for proper alignment with timeline overlay)
     const timeRange = max_time_ms - min_time_ms;
     const offsetRange = max_offset_gb - min_offset_gb;
 
-    const xLabels = [];
+    const xValues = [];
     for (let t = 0; t < time_buckets; t++) {
         const time = min_time_ms + (t + 0.5) * timeRange / time_buckets;
-        xLabels.push(time < 60000 
-            ? (time / 1000).toFixed(2) + 's'
-            : (time / 60000).toFixed(2) + 'm');
+        xValues.push(time / 1000);  // Convert to seconds
     }
 
-    const yLabels = [];
+    const yValues = [];
     for (let o = 0; o < offset_buckets; o++) {
         const offset = min_offset_gb + (o + 0.5) * offsetRange / offset_buckets;
-        yLabels.push(offset.toFixed(2) + ' GB');
+        yValues.push(offset);
     }
 
-    // Custom hover template with attribution
-    const hovertemplate = 
-        '<b>Time:</b> %{x}<br>' +
-        '<b>Offset:</b> %{y}<br>' +
-        '<b>Faults:</b> %{z}<br>' +
-        '<extra></extra>';
-
-    const trace = {
+    // Heatmap trace
+    const heatmapTrace = {
         z: z,
-        x: xLabels,
-        y: yLabels,
-        customdata: customData,
+        x: xValues,
+        y: yValues,
         type: 'heatmap',
         colorscale: [
             [0, '#000000'],
@@ -1864,18 +1879,55 @@ function initPlotlyHeatmap(container, data) {
             [0.75, '#3cfff0'],
             [1, '#ffff50']
         ],
-        hovertemplate: hovertemplate,
+        hoverinfo: 'text',
+        text: hoverTexts,
         showscale: true,
         colorbar: {
             title: 'Faults',
             titleside: 'right',
             tickfont: { color: '#a1a1aa', size: 10 },
             titlefont: { color: '#a1a1aa', size: 11 }
-        }
+        },
+        zsmooth: false
     };
 
+    const traces = [heatmapTrace];
+
+    // Add fault timeline as overlay on secondary y-axis
+    if (timelineData && timelineData.length > 0) {
+        const timelineX = [];
+        const timelineY = [];
+        const maxFaults = Math.max(...timelineData.map(t => t.faults));
+
+        for (let i = 0; i < timelineData.length; i++) {
+            const timeSecs = i * (durationSecs / timelineData.length);
+            timelineX.push(timeSecs);
+            // Normalize faults to offset range for overlay (map to y-axis range)
+            const normalizedY = min_offset_gb + (timelineData[i].faults / maxFaults) * offsetRange * 0.9;
+            timelineY.push(normalizedY);
+        }
+
+        const timelineTrace = {
+            x: timelineX,
+            y: timelineY,
+            type: 'scatter',
+            mode: 'lines',
+            name: 'Fault Rate',
+            line: {
+                color: 'rgba(251, 146, 60, 0.5)',  // Orange with 50% opacity
+                width: 2
+            },
+            fill: 'tozeroy',
+            fillcolor: 'rgba(251, 146, 60, 0.15)',
+            hoverinfo: 'skip',  // Don't show hover for timeline
+            yaxis: 'y'  // Use same y-axis
+        };
+
+        traces.push(timelineTrace);
+    }
+
     const layout = {
-        paper_bgcolor: '#18181b',
+        paper_bgcolor: '#12121a',  // Match card background color
         plot_bgcolor: '#000000',
         font: { color: '#a1a1aa', family: '-apple-system, BlinkMacSystemFont, sans-serif' },
         margin: { l: 70, r: 80, t: 20, b: 50 },
@@ -1885,49 +1937,42 @@ function initPlotlyHeatmap(container, data) {
             tickfont: { size: 10 },
             tickangle: 0,
             nticks: 8,
-            gridcolor: '#27272a',
-            linecolor: '#3f3f46'
+            gridcolor: '#3f3f46',
+            gridwidth: 1,
+            linecolor: '#3f3f46',
+            showgrid: true,
+            layer: 'above traces',  // Grid lines on top
+            tickformat: '.1f',
+            ticksuffix: 's'
         },
         yaxis: {
-            title: 'File Offset',
+            title: 'File Offset (GB)',
             titlefont: { size: 12 },
             tickfont: { size: 10 },
             nticks: 8,
-            gridcolor: '#27272a',
-            linecolor: '#3f3f46'
+            gridcolor: '#3f3f46',
+            gridwidth: 1,
+            linecolor: '#3f3f46',
+            showgrid: true,
+            layer: 'above traces',  // Grid lines on top
+            tickformat: '.1f',
+            ticksuffix: ' GB'
         },
-        dragmode: 'zoom'
+        dragmode: 'zoom',  // Only zoom, no pan
+        showlegend: false,
+        hovermode: 'closest'
     };
 
     const config = {
         responsive: true,
         displayModeBar: true,
-        modeBarButtonsToRemove: ['lasso2d', 'select2d', 'autoScale2d'],
+        modeBarButtonsToRemove: ['lasso2d', 'select2d', 'autoScale2d', 'pan2d'],  // Remove pan
         displaylogo: false,
-        doubleClick: 'reset'
+        doubleClick: 'reset',
+        scrollZoom: false  // Disable scroll zoom to prevent accidental panning
     };
 
-    Plotly.newPlot(container, [trace], layout, config);
-
-    // Add custom hover handler for attribution data
-    container.on('plotly_hover', function(eventData) {
-        if (!eventData.points || !eventData.points[0]) return;
-        const pt = eventData.points[0];
-        const cellIdx = pt.customdata;
-        const tables = attrLookup[cellIdx];
-        
-        if (tables && tables.length > 0) {
-            // Update the hover label with attribution info
-            const hoverText = document.querySelector('.hovertext');
-            if (hoverText) {
-                let attrHtml = '<tspan x="0" dy="1.2em" style="font-weight:bold">Top Tables:</tspan>';
-                tables.forEach(([name, total, major]) => {
-                    const majorPct = total > 0 ? Math.round(major / total * 100) : 0;
-                    attrHtml += '<tspan x="0" dy="1.1em">' + name + ': ' + total + ' (' + majorPct + '% major)</tspan>';
-                });
-            }
-        }
-    });
+    Plotly.newPlot(container, traces, layout, config);
 }
 
 // Horizontal bar chart for fault distribution (dynamically sized)
@@ -2313,10 +2358,10 @@ function initOverview() {
         });
     }
 
-    // Plotly Heatmap with built-in zoom/pan/tooltips
+    // Plotly Heatmap with built-in zoom/pan/tooltips and timeline overlay
     if (DATA.heatmap.data.length) {
         const container = document.getElementById('heatmap-plotly');
-        initPlotlyHeatmap(container, DATA.heatmap);
+        initPlotlyHeatmap(container, DATA.heatmap, DATA.timeline, s.duration_secs);
     }
 
     // Access patterns
