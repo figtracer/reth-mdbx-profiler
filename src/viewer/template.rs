@@ -2185,29 +2185,9 @@ class InteractiveHeatmap {
 
         if (visibleTimeBuckets <= 0 || visibleOffsetBuckets <= 0) return;
 
-        // Build X lookup: for each pixel column, which time bucket does it belong to?
-        for (let px = 0; px < chartPixelW; px++) {
-            const screenX = this.pad.l + px;
-            // Which bucket does this pixel belong to?
-            const bucketFloat = (px / chartPixelW) * visibleTimeBuckets;
-            const bucketIdx = Math.floor(bucketFloat);
-            const t = startT + Math.min(bucketIdx, visibleTimeBuckets - 1);
-            this.pixelToCellX[screenX] = t;
-        }
-
-        // Build Y lookup: for each pixel row, which offset bucket does it belong to?
-        // Note: Y is inverted (top = high offset, bottom = low offset)
-        for (let py = 0; py < chartPixelH; py++) {
-            const screenY = this.pad.t + py;
-            // Which bucket does this pixel belong to? (inverted)
-            const bucketFloat = (py / chartPixelH) * visibleOffsetBuckets;
-            const bucketIdx = Math.floor(bucketFloat);
-            // Invert: top of screen = highest offset bucket
-            const o = endO - 1 - Math.min(bucketIdx, visibleOffsetBuckets - 1);
-            this.pixelToCellY[screenY] = o;
-        }
-
-        // Draw cells and store metadata
+        // Draw cells and build pixel lookup arrays simultaneously.
+        // By populating the lookup arrays during drawing, we guarantee
+        // that each pixel maps to exactly the cell that was drawn there.
         for (let t = startT; t < endT; t++) {
             for (let o = startO; o < endO; o++) {
                 const idx = t * offset_buckets + o;
@@ -2237,6 +2217,14 @@ class InteractiveHeatmap {
                 if (drawW > 0 && drawH > 0) {
                     this.ctx.fillStyle = this.heatColor(intensity);
                     this.ctx.fillRect(x1, y1, drawW, drawH);
+
+                    // Populate pixel lookup arrays for the exact pixels we just drew
+                    for (let px = x1; px < x2; px++) {
+                        this.pixelToCellX[px] = t;
+                    }
+                    for (let py = y1; py < y2; py++) {
+                        this.pixelToCellY[py] = o;
+                    }
                 }
 
                 // Store cell metadata for tooltip lookup
