@@ -82,6 +82,7 @@ pub fn generate_html(data: &ViewerData) -> String {
                     <div class="card-body">
                         <div class="access-pattern-row">
                             <div class="pattern-section">
+                                <div class="section-title">Distribution <span class="help-icon" data-tooltip="How page faults are distributed across the database file. Sequential means consecutive pages (good for OS prefetch). Random means scattered access (typical for B+ tree traversal like trie lookups).">?</span></div>
                                 <div class="pattern-bar">
                                     <span class="pattern-label">Sequential</span>
                                     <div class="bar-container">
@@ -98,7 +99,7 @@ pub fn generate_html(data: &ViewerData) -> String {
                                 </div>
                             </div>
                             <div class="stride-section" id="stride-section">
-                                <div class="section-title">Top Stride Patterns</div>
+                                <div class="section-title">Stride Patterns <span class="help-icon" data-tooltip="Common distances (in pages) between consecutive accesses. Large strides = jumping across the file (trie traversal). Small strides = sequential scanning.">?</span></div>
                                 <div id="stride-list"></div>
                             </div>
                         </div>
@@ -423,6 +424,7 @@ body {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 32px;
+    align-items: start;
 }
 
 @media (max-width: 800px) {
@@ -868,7 +870,22 @@ body {
 
 /* Pattern section */
 .pattern-section {
-    margin-bottom: 20px;
+    margin-bottom: 0;
+}
+
+.pattern-explanation,
+.stride-explanation {
+    margin-bottom: 12px;
+}
+
+.explanation-text {
+    font-size: 12px;
+    color: #71717a;
+    line-height: 1.5;
+}
+
+.explanation-text strong {
+    color: #a1a1aa;
 }
 
 .pattern-bar {
@@ -922,9 +939,87 @@ body {
     border-bottom: 1px solid #1e1e2a;
 }
 
+/* Help icon with tooltip */
+.help-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    font-size: 10px;
+    font-weight: 600;
+    color: #52525b;
+    background: rgba(82, 82, 91, 0.2);
+    border: 1px solid rgba(82, 82, 91, 0.3);
+    border-radius: 50%;
+    cursor: help;
+    margin-left: 6px;
+    vertical-align: middle;
+    position: relative;
+    transition: all 0.15s;
+}
+
+.help-icon:hover {
+    color: #a1a1aa;
+    background: rgba(82, 82, 91, 0.3);
+    border-color: rgba(161, 161, 170, 0.4);
+}
+
+.help-icon::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: #1e1e2a;
+    color: #d4d4d8;
+    font-size: 12px;
+    font-weight: 400;
+    text-transform: none;
+    letter-spacing: normal;
+    line-height: 1.5;
+    padding: 10px 14px;
+    border-radius: 6px;
+    border: 1px solid #3b82f6;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    white-space: normal;
+    width: 280px;
+    max-width: 90vw;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.15s, visibility 0.15s;
+    z-index: 100;
+    pointer-events: none;
+}
+
+.help-icon:hover::after {
+    opacity: 1;
+    visibility: visible;
+}
+
+/* Arrow for tooltip */
+.help-icon::before {
+    content: '';
+    position: absolute;
+    bottom: calc(100% + 2px);
+    left: 50%;
+    transform: translateX(-50%);
+    border: 6px solid transparent;
+    border-top-color: #3b82f6;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.15s, visibility 0.15s;
+    z-index: 101;
+}
+
+.help-icon:hover::before {
+    opacity: 1;
+    visibility: visible;
+}
+
 /* Stride section */
 .stride-section {
-    margin-bottom: 20px;
+    margin-bottom: 0;
 }
 
 .stride-item {
