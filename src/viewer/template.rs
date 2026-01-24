@@ -3684,10 +3684,7 @@ function initResourcesThreads() {
             yMajor.push(curr.major_faults);
         }
 
-        // Add zero at end
-        x.push(durationSecs / 60);
-        yMinor.push(0);
-        yMajor.push(0);
+
 
         // Minor faults (blue area)
         traces.push({
