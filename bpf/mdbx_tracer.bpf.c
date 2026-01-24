@@ -462,6 +462,8 @@ struct {
 #define STAT_TXN_ABORTS      13
 #define STAT_DIRECT_PUTS     14
 #define STAT_DIRECT_DELS     15
+#define STAT_PAGE_TYPE_READ_OK   16   // Page type detection succeeded
+#define STAT_PAGE_TYPE_READ_FAIL 17   // Page type detection failed (Unknown)
 
 static __always_inline void inc_stat(__u32 idx) {
     __u64 *val = bpf_map_lookup_elem(&stats, &idx);
@@ -617,19 +619,40 @@ int BPF_KRETPROBE(trace_page_fault_ret, vm_fault_t ret)
         __u16 flags = 0;
         int read_ok = 0;
 
-        // Try bpf_probe_read_user first (for user-mapped pages)
-        // The page should be mapped now since the fault handler completed
-        // Flags are at offset 10 (after txnid[8] + dupfix_ksize[2])
-        if (bpf_probe_read_user(&flags, sizeof(flags), (void *)(page_start + MDBX_PAGE_FLAGS_OFFSET)) == 0) {
+        // Memory barrier to ensure page table updates are visible
+        // After handle_mm_fault returns, the PTE should be updated but we need
+        // to ensure this is visible to our read operations
+        asm volatile("" ::: "memory");
+
+        // Strategy: Try multiple read methods to maximize success rate
+        // After a page fault completes, the page is in the page cache and mapped.
+        // However, depending on timing and TLB state, different read methods may succeed.
+
+        // Method 1: bpf_probe_read (generic helper, can read user or kernel memory)
+        // This is the most flexible and often works when specific helpers fail
+        if (bpf_probe_read(&flags, sizeof(flags), (void *)(page_start + MDBX_PAGE_FLAGS_OFFSET)) == 0) {
             read_ok = 1;
-        } else {
-            // Fallback: try bpf_probe_read which can read both kernel and user memory
-            // This may work in cases where the page is in a transitional state
+        }
+
+        // Method 2: bpf_probe_read_user (specific for user-space addresses)
+        // The page should be mapped now since the fault handler completed
+        if (!read_ok) {
+            if (bpf_probe_read_user(&flags, sizeof(flags), (void *)(page_start + MDBX_PAGE_FLAGS_OFFSET)) == 0) {
+                read_ok = 1;
+            }
+        }
+
+        // Method 3: Retry with bpf_probe_read after barrier (last resort)
+        if (!read_ok) {
+            asm volatile("" ::: "memory");
             if (bpf_probe_read(&flags, sizeof(flags), (void *)(page_start + MDBX_PAGE_FLAGS_OFFSET)) == 0) {
                 read_ok = 1;
             }
         }
 
+        // Validate the flags - MDBX pages should have at least one flag set
+        // Valid flag combinations: BRANCH, LEAF, LARGE (overflow), META, DUPFIX, SUBP
+        // A flags value of 0 with successful read might indicate uninitialized page
         if (read_ok && flags != 0) {
             // Determine page type from flags
             // MDBX page types can be combined, check in order of specificity
@@ -641,14 +664,18 @@ int BPF_KRETPROBE(trace_page_fault_ret, vm_fault_t ret)
                 page_type = PAGE_TYPE_BRANCH;
             } else if (flags & (MDBX_P_LEAF | MDBX_P_DUPFIX | MDBX_P_SUBP)) {
                 // P_LEAF: regular leaf pages with data
-                // P_DUPFIX: MDBX_DUPFIXED leaf pages for sorted duplicates  
+                // P_DUPFIX: MDBX_DUPFIXED leaf pages for sorted duplicates
                 // P_SUBP: sub-pages for DUPSORT tables (also contain data)
                 // All of these are data-level pages, classify as LEAF
                 page_type = PAGE_TYPE_LEAF;
             }
             // If flags doesn't match any known type, stays as UNKNOWN
+            // But still count as read success since we got valid data
+            inc_stat(STAT_PAGE_TYPE_READ_OK);
+        } else {
+            // Read failed or flags was 0 - page_type stays as PAGE_TYPE_UNKNOWN
+            inc_stat(STAT_PAGE_TYPE_READ_FAIL);
         }
-        // If both reads fail or flags is 0, page_type stays as PAGE_TYPE_UNKNOWN
     }
 
     e->page_type = page_type;

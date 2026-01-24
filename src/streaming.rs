@@ -58,8 +58,8 @@ impl Default for StreamingConfig {
             max_hot_keys_per_table: 50,
             max_block_analysis: 500,
             cursor_sample_rate: 1,
-            heatmap_time_buckets: 100,
-            heatmap_offset_buckets: 50,
+            heatmap_time_buckets: 500,
+            heatmap_offset_buckets: 200,
         }
     }
 }
