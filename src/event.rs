@@ -141,6 +141,8 @@ pub enum EventType {
     TxnAbort = 9,
     DirectPut = 10,
     DirectDel = 11,
+    CursorOpen = 12,
+    CursorClose = 13,
 }
 
 /// Write flags for cursor put operations (from libmdbx)
@@ -858,6 +860,88 @@ impl TxnEvent {
         format!(
             "{} {} txn=0x{:x} tid={}",
             event_name, flags_str, self.txn_ptr, self.tid
+        )
+    }
+}
+
+/// MDBX cursor lifecycle event from BPF
+///
+/// This struct must match the layout of cursor_lifecycle_event in mdbx_tracer.bpf.c exactly.
+/// Layout on x86_64 Linux (40 bytes total):
+///   - timestamp_ns: offset 0, size 8
+///   - pid: offset 8, size 4
+///   - tid: offset 12, size 4
+///   - event_type: offset 16, size 4
+///   - dbi: offset 20, size 4
+///   - cursor_ptr: offset 24, size 8
+///   - return_code: offset 32, size 4
+///   - _pad: offset 36, size 4
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct CursorLifecycleEvent {
+    /// Kernel timestamp in nanoseconds
+    pub timestamp_ns: u64,
+    /// Process ID
+    pub pid: u32,
+    /// Thread ID
+    pub tid: u32,
+    /// Event type (EVENT_CURSOR_OPEN=12, EVENT_CURSOR_CLOSE=13)
+    pub event_type: u32,
+    /// Database index (table identifier)
+    pub dbi: u32,
+    /// Cursor pointer (unique identifier for this cursor instance)
+    pub cursor_ptr: u64,
+    /// Return code (for open: 0 = success)
+    pub return_code: i32,
+    /// Padding for alignment
+    pub _pad: u32,
+}
+
+impl CursorLifecycleEvent {
+    /// Returns true if this is a cursor open event
+    pub fn is_open(&self) -> bool {
+        self.event_type == 12
+    }
+
+    /// Returns true if this is a cursor close event
+    pub fn is_close(&self) -> bool {
+        self.event_type == 13
+    }
+
+    /// Returns true if the cursor open succeeded
+    pub fn is_success(&self) -> bool {
+        self.return_code == 0
+    }
+
+    /// Get the table name for this cursor
+    pub fn table_name(&self) -> &'static str {
+        dbi_to_table_name(self.dbi)
+    }
+
+    /// Get the event type as an EventType enum
+    pub fn event_type_enum(&self) -> Option<EventType> {
+        match self.event_type {
+            12 => Some(EventType::CursorOpen),
+            13 => Some(EventType::CursorClose),
+            _ => None,
+        }
+    }
+
+    /// Get a human-readable description of the event
+    pub fn description(&self) -> String {
+        let event_name = if self.is_open() {
+            "CURSOR_OPEN"
+        } else if self.is_close() {
+            "CURSOR_CLOSE"
+        } else {
+            "CURSOR_UNKNOWN"
+        };
+        format!(
+            "{} table={} cursor=0x{:x} tid={}",
+            event_name,
+            self.table_name(),
+            self.cursor_ptr,
+            self.tid
         )
     }
 }

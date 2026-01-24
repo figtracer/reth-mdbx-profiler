@@ -28,6 +28,8 @@ pub struct ViewerData {
     pub heatmap: HeatmapData,
     /// Cursor operation data
     pub cursor_data: CursorData,
+    /// Cursor lifecycle data (open/close tracking)
+    pub cursor_lifecycle: CursorLifecycleData,
     /// Transaction lifecycle data
     pub txn_data: TxnData,
     /// Warning about page fault attribution method
@@ -455,6 +457,44 @@ pub struct CursorData {
     pub pre_trace_cursor_ops: u64,
     /// Warning message if many cursors were opened before tracing
     pub pre_trace_warning: Option<String>,
+}
+
+/// Cursor lifecycle tracking data (open/close events)
+#[derive(Debug, Serialize, Default)]
+pub struct CursorLifecycleData {
+    /// Whether lifecycle data is available
+    pub has_data: bool,
+    /// Total cursor opens tracked
+    pub total_opens: u64,
+    /// Total cursor closes tracked
+    pub total_closes: u64,
+    /// Cursors still open at end of trace (opened but not closed)
+    pub still_open: u64,
+    /// Average cursor lifetime in microseconds (for cursors that were closed)
+    pub avg_lifetime_us: f64,
+    /// Median cursor lifetime in microseconds
+    pub p50_lifetime_us: f64,
+    /// 95th percentile cursor lifetime in microseconds
+    pub p95_lifetime_us: f64,
+    /// 99th percentile cursor lifetime in microseconds
+    pub p99_lifetime_us: f64,
+    /// Per-table cursor lifecycle statistics
+    pub by_table: Vec<CursorLifecycleTableStats>,
+}
+
+/// Per-table cursor lifecycle statistics
+#[derive(Debug, Serialize)]
+pub struct CursorLifecycleTableStats {
+    /// Table name
+    pub table: String,
+    /// Database index
+    pub dbi: u32,
+    /// Number of cursor opens for this table
+    pub opens: u64,
+    /// Number of cursor closes for this table
+    pub closes: u64,
+    /// Average cursor lifetime in microseconds (for this table)
+    pub avg_lifetime_us: f64,
 }
 
 /// Statistics for slow operations (>100μs) per table

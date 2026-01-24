@@ -31,6 +31,8 @@
 #define EVENT_TXN_ABORT      9
 #define EVENT_DIRECT_PUT    10
 #define EVENT_DIRECT_DEL    11
+#define EVENT_CURSOR_OPEN   12
+#define EVENT_CURSOR_CLOSE  13
 
 // MDBX cursor operations (from libmdbx mdbx.h MDBX_cursor_op enum)
 // These are the numeric values for the cursor operations
@@ -144,6 +146,19 @@ struct txn_event {
     __u64 parent_txn_ptr;    // Parent transaction pointer (0 if none)
     __u64 latency_ns;        // Time spent (for commit)
     __s32 return_code;       // Return code
+    __u32 _pad;              // Padding for alignment
+};
+
+// Cursor lifecycle event sent to userspace
+// This captures mdbx_cursor_open/close calls for cursor lifecycle tracking
+struct cursor_lifecycle_event {
+    __u64 timestamp_ns;      // Kernel timestamp
+    __u32 pid;               // Process ID
+    __u32 tid;               // Thread ID
+    __u32 event_type;        // EVENT_CURSOR_OPEN or EVENT_CURSOR_CLOSE
+    __u32 dbi;               // Database index (table identifier)
+    __u64 cursor_ptr;        // Cursor pointer (unique identifier for this cursor)
+    __s32 return_code;       // Return code (for open: 0 = success)
     __u32 _pad;              // Padding for alignment
 };
 
@@ -1075,27 +1090,48 @@ SEC("uretprobe/mdbx_cursor_open")
 int BPF_URETPROBE(trace_cursor_open_ret, int ret)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 pid = pid_tgid >> 32;
 
     struct cursor_open_context *octx = bpf_map_lookup_elem(&pending_cursor_opens, &pid_tgid);
     if (!octx) {
         return 0;
     }
 
-    // Only record if open succeeded
-    if (ret == 0 && octx->cursor_ptr_ptr) {
-        // Read the cursor pointer from the output parameter
+    __u64 cursor_addr = 0;
+
+    // Read the cursor pointer from the output parameter (even if open failed, for the event)
+    if (octx->cursor_ptr_ptr) {
         void *cursor = NULL;
         if (bpf_probe_read_user(&cursor, sizeof(cursor), (void *)octx->cursor_ptr_ptr) == 0 && cursor) {
-            __u64 cursor_addr = (__u64)cursor;
-            bpf_map_update_elem(&cursor_to_dbi, &cursor_addr, &octx->dbi, BPF_ANY);
+            cursor_addr = (__u64)cursor;
+            // Only update the mapping if open succeeded
+            if (ret == 0) {
+                bpf_map_update_elem(&cursor_to_dbi, &cursor_addr, &octx->dbi, BPF_ANY);
+            }
         }
+    }
+
+    // Emit cursor lifecycle event
+    struct cursor_lifecycle_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (e) {
+        e->timestamp_ns = bpf_ktime_get_ns();
+        e->pid = pid;
+        e->tid = (__u32)pid_tgid;
+        e->event_type = EVENT_CURSOR_OPEN;
+        e->dbi = octx->dbi;
+        e->cursor_ptr = cursor_addr;
+        e->return_code = ret;
+        e->_pad = 0;
+        bpf_ringbuf_submit(e, 0);
+    } else {
+        inc_stat(STAT_EVENTS_DROPPED);
     }
 
     bpf_map_delete_elem(&pending_cursor_opens, &pid_tgid);
     return 0;
 }
 
-// Also track cursor close to clean up the map
+// Also track cursor close to clean up the map and emit lifecycle event
 // Signature: void mdbx_cursor_close(MDBX_cursor *cursor)
 SEC("uprobe/mdbx_cursor_close")
 int BPF_UPROBE(trace_cursor_close, void *cursor)
@@ -1107,9 +1143,33 @@ int BPF_UPROBE(trace_cursor_close, void *cursor)
         return 0;
     }
 
+    __u64 cursor_addr = 0;
+    __u32 dbi = 0xFFFFFFFE;  // Unknown sentinel
+
     if (cursor) {
-        __u64 cursor_addr = (__u64)cursor;
+        cursor_addr = (__u64)cursor;
+        // Look up DBI before we delete the mapping
+        __u32 *dbi_ptr = bpf_map_lookup_elem(&cursor_to_dbi, &cursor_addr);
+        if (dbi_ptr) {
+            dbi = *dbi_ptr;
+        }
         bpf_map_delete_elem(&cursor_to_dbi, &cursor_addr);
+    }
+
+    // Emit cursor lifecycle event
+    struct cursor_lifecycle_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (e) {
+        e->timestamp_ns = bpf_ktime_get_ns();
+        e->pid = pid;
+        e->tid = (__u32)pid_tgid;
+        e->event_type = EVENT_CURSOR_CLOSE;
+        e->dbi = dbi;
+        e->cursor_ptr = cursor_addr;
+        e->return_code = 0;  // Close doesn't have a return code
+        e->_pad = 0;
+        bpf_ringbuf_submit(e, 0);
+    } else {
+        inc_stat(STAT_EVENTS_DROPPED);
     }
 
     return 0;

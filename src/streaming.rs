@@ -5,21 +5,22 @@
 //! Designed to handle traces of any size with bounded memory usage.
 
 use crate::event::{
-    CursorEvent, CursorOp, MdbxPageType, PageFaultEvent, TxnEvent, dbi_to_table_name,
-    is_pre_trace_cursor,
+    CursorEvent, CursorLifecycleEvent, CursorOp, MdbxPageType, PageFaultEvent, TxnEvent,
+    dbi_to_table_name, is_pre_trace_cursor,
 };
 use crate::viewer::{
     AccessCountBucket, BTreeVisualization, BatchAnalysis, BlockRange, BurstStats,
-    CacheSimulationPoint, CpuProfileSummary, CpuTableEntry, CursorData, CursorOpSample,
-    CursorSummary, CursorTableStats, CursorTimelinePoint, DepthBucket, DirectFaultAttribution,
-    FaultsByCursorOp, FaultsByOpType, HeatmapCellAttribution, HeatmapData, HistogramBucket,
-    HotPageAnalysis, OpFaultCount, OperationDepthStats, OperationFaultHistogram,
-    OperationPageTypeBreakdown, OperationStats, PageTypeFaultCount, PageTypeStats, ParetoPoint,
-    PatternAnalysis, RwCommitPoint, SlowKeyStats, SlowOpBreakdown, SlowOpsTableStats, StrideInfo,
-    TableDepthStats, TableDrillDown, TableHotKey, TableTreeStats, TableWorkingSet, ThreadStats,
-    ThreadTableStats, ThreadTimelinePoint, TimeWindowedWSS, TimelinePoint, TraceSummary,
-    TreeDepthEstimate, TreeDepthStats, TreeTraversalViz, TxnConcurrencyStats, TxnData, TxnSummary,
-    TxnThreadStats, TxnTimelineEntry, UnifiedTableStats, ViewerData, WorkingSetAnalysis,
+    CacheSimulationPoint, CpuProfileSummary, CpuTableEntry, CursorData, CursorLifecycleData,
+    CursorLifecycleTableStats, CursorOpSample, CursorSummary, CursorTableStats,
+    CursorTimelinePoint, DepthBucket, DirectFaultAttribution, FaultsByCursorOp, FaultsByOpType,
+    HeatmapCellAttribution, HeatmapData, HistogramBucket, HotPageAnalysis, OpFaultCount,
+    OperationDepthStats, OperationFaultHistogram, OperationPageTypeBreakdown, OperationStats,
+    PageTypeFaultCount, PageTypeStats, ParetoPoint, PatternAnalysis, RwCommitPoint, SlowKeyStats,
+    SlowOpBreakdown, SlowOpsTableStats, StrideInfo, TableDepthStats, TableDrillDown, TableHotKey,
+    TableTreeStats, TableWorkingSet, ThreadStats, ThreadTableStats, ThreadTimelinePoint,
+    TimeWindowedWSS, TimelinePoint, TraceSummary, TreeDepthEstimate, TreeDepthStats,
+    TreeTraversalViz, TxnConcurrencyStats, TxnData, TxnSummary, TxnThreadStats, TxnTimelineEntry,
+    UnifiedTableStats, ViewerData, WorkingSetAnalysis,
 };
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::io::{BufRead, BufReader};
@@ -528,6 +529,20 @@ pub struct StreamingAggregator {
     // Cursor timeline (downsampled)
     cursor_timeline_buckets: HashMap<u64, (u32, u32, u64)>, // bucket_ms -> (ops, seeks, total_latency)
 
+    // Cursor lifecycle tracking
+    cursor_open_count: u64,
+    cursor_close_count: u64,
+    // Track active cursors: cursor_ptr -> (open_timestamp_ns, dbi, tid)
+    active_cursors: HashMap<u64, (u64, u32, u32)>,
+    // Per-table cursor lifecycle stats: dbi -> (opens, closes, total_lifetime_ns, ops_count)
+    cursor_lifecycle_by_table: HashMap<u32, (u64, u64, u64, u64)>,
+    // Histogram of operations per cursor lifetime: ops_count -> cursor_count
+    ops_per_cursor_histogram: HashMap<u64, u64>,
+    // Track ops per cursor for active cursors: cursor_ptr -> op_count
+    cursor_op_counts: HashMap<u64, u64>,
+    // Cursor lifetime samples (for percentile calculation)
+    cursor_lifetime_sampler: ReservoirSampler,
+
     // Hot keys
     hot_keys: HotKeyTracker,
 
@@ -665,6 +680,13 @@ impl StreamingAggregator {
             cursor_sample_counter: 0,
             pre_trace_cursor_ops: 0,
             cursor_timeline_buckets: HashMap::new(),
+            cursor_open_count: 0,
+            cursor_close_count: 0,
+            active_cursors: HashMap::new(),
+            cursor_lifecycle_by_table: HashMap::new(),
+            ops_per_cursor_histogram: HashMap::new(),
+            cursor_op_counts: HashMap::new(),
+            cursor_lifetime_sampler: ReservoirSampler::new(10000),
             hot_keys: HotKeyTracker::new(config.max_hot_keys_per_table * 32),
             txn_count: 0,
             ro_txn_count: 0,
@@ -1126,6 +1148,62 @@ impl StreamingAggregator {
         }
     }
 
+    /// Process a cursor lifecycle event (open/close)
+    pub fn process_cursor_lifecycle_event(&mut self, event: &CursorLifecycleEvent) {
+        let ts = event.timestamp_ns;
+        if self.first_timestamp.is_none() {
+            self.first_timestamp = Some(ts);
+        }
+        self.last_timestamp = ts;
+        self.total_events += 1;
+
+        // Skip pre-trace cursors (unknown DBI)
+        if is_pre_trace_cursor(event.dbi) {
+            return;
+        }
+
+        if event.is_open() {
+            // Only track successful opens
+            if event.is_success() {
+                self.cursor_open_count += 1;
+
+                // Track active cursor for lifetime calculation
+                self.active_cursors
+                    .insert(event.cursor_ptr, (ts, event.dbi, event.tid));
+
+                // Per-table stats
+                let table_stats = self
+                    .cursor_lifecycle_by_table
+                    .entry(event.dbi)
+                    .or_insert((0, 0, 0, 0));
+                table_stats.0 += 1; // opens
+            }
+        } else if event.is_close() {
+            self.cursor_close_count += 1;
+
+            // Calculate lifetime if we tracked this cursor's open
+            if let Some((open_ts, dbi, _tid)) = self.active_cursors.remove(&event.cursor_ptr) {
+                let lifetime_ns = ts.saturating_sub(open_ts);
+                self.cursor_lifetime_sampler.add(lifetime_ns);
+
+                // Per-table stats
+                let table_stats = self
+                    .cursor_lifecycle_by_table
+                    .entry(dbi)
+                    .or_insert((0, 0, 0, 0));
+                table_stats.1 += 1; // closes
+                table_stats.2 += lifetime_ns; // total_lifetime_ns
+            } else {
+                // Cursor was opened before tracing started - still count the close
+                let table_stats = self
+                    .cursor_lifecycle_by_table
+                    .entry(event.dbi)
+                    .or_insert((0, 0, 0, 0));
+                table_stats.1 += 1; // closes
+            }
+        }
+    }
+
     /// Process a transaction event
     pub fn process_txn_event(&mut self, event: &TxnEvent) {
         let ts = event.timestamp_ns;
@@ -1492,6 +1570,9 @@ impl StreamingAggregator {
         // Build CPU profile summary
         let cpu_profile = self.build_cpu_profile();
 
+        // Build cursor lifecycle data
+        let cursor_lifecycle = self.build_cursor_lifecycle_data();
+
         ViewerData {
             summary,
             timeline,
@@ -1501,6 +1582,7 @@ impl StreamingAggregator {
             patterns,
             heatmap,
             cursor_data,
+            cursor_lifecycle,
             txn_data,
             page_fault_attribution_warning: None,
             direct_fault_attribution,
@@ -1764,6 +1846,71 @@ impl StreamingAggregator {
             depth_histogram,
             by_table,
             by_operation,
+        }
+    }
+
+    fn build_cursor_lifecycle_data(&mut self) -> CursorLifecycleData {
+        if self.cursor_open_count == 0 && self.cursor_close_count == 0 {
+            return CursorLifecycleData::default();
+        }
+
+        // Calculate percentiles from sampler
+        let p50 = self.cursor_lifetime_sampler.p50() as f64 / 1000.0; // ns to us
+        let p95 = self.cursor_lifetime_sampler.p95() as f64 / 1000.0;
+        let p99 = self.cursor_lifetime_sampler.p99() as f64 / 1000.0;
+
+        // Calculate average lifetime from per-table stats
+        let total_lifetime_ns: u64 = self
+            .cursor_lifecycle_by_table
+            .values()
+            .map(|(_, _, lifetime, _)| *lifetime)
+            .sum();
+        let total_closes_with_lifetime: u64 = self
+            .cursor_lifecycle_by_table
+            .values()
+            .filter(|(_, closes, lifetime, _)| *closes > 0 && *lifetime > 0)
+            .map(|(_, closes, _, _)| *closes)
+            .sum();
+
+        let avg_lifetime_us = if total_closes_with_lifetime > 0 {
+            (total_lifetime_ns as f64 / total_closes_with_lifetime as f64) / 1000.0
+        } else {
+            0.0
+        };
+
+        // Build per-table stats
+        let mut by_table: Vec<CursorLifecycleTableStats> = self
+            .cursor_lifecycle_by_table
+            .iter()
+            .map(|(&dbi, &(opens, closes, total_lifetime_ns, _ops))| {
+                let avg_lifetime_us = if closes > 0 && total_lifetime_ns > 0 {
+                    (total_lifetime_ns as f64 / closes as f64) / 1000.0
+                } else {
+                    0.0
+                };
+                CursorLifecycleTableStats {
+                    table: dbi_to_table_name(dbi).to_string(),
+                    dbi,
+                    opens,
+                    closes,
+                    avg_lifetime_us,
+                }
+            })
+            .collect();
+
+        // Sort by opens descending
+        by_table.sort_by(|a, b| b.opens.cmp(&a.opens));
+
+        CursorLifecycleData {
+            has_data: true,
+            total_opens: self.cursor_open_count,
+            total_closes: self.cursor_close_count,
+            still_open: self.active_cursors.len() as u64,
+            avg_lifetime_us,
+            p50_lifetime_us: p50,
+            p95_lifetime_us: p95,
+            p99_lifetime_us: p99,
+            by_table,
         }
     }
 
@@ -3135,6 +3282,14 @@ pub fn process_trace_streaming<R: std::io::Read>(
             if event.event_type >= 7 && event.event_type <= 9 {
                 txn_event_count += 1;
                 aggregator.process_txn_event(&event);
+                continue;
+            }
+        }
+
+        // Try to parse as cursor lifecycle event
+        if let Ok(event) = serde_json::from_str::<CursorLifecycleEvent>(&line) {
+            if event.event_type == 12 || event.event_type == 13 {
+                aggregator.process_cursor_lifecycle_event(&event);
                 continue;
             }
         }
