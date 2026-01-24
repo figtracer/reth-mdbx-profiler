@@ -240,11 +240,11 @@ pub fn generate_html(data: &ViewerData) -> String {
                             <span class="swimlane-legend">
                                 <span class="legend-item"><span class="legend-swatch" style="background: #60a5fa;"></span> Minor</span>
                                 <span class="legend-item"><span class="legend-swatch" style="background: #ef4444;"></span> Major</span>
-                                <span class="legend-item"><span class="legend-swatch" style="background: #f59e0b;"></span> RW Commit</span>
+                                <span class="legend-item"><span class="legend-swatch" style="background: rgba(251, 191, 36, 0.4); border: 1px solid #f59e0b;"></span> RW Commit</span>
                             </span>
                         </div>
                         <div class="card-body" style="padding: 0;">
-                            <div id="thread-swimlane" class="thread-swimlane-container"></div>
+                            <div id="thread-swimlane" style="width: 100%; height: 400px;"></div>
                         </div>
                     </div>
                     <div id="thread-swimlane-no-data" class="no-data" style="display:none;">
@@ -610,7 +610,7 @@ body {
 
 .thread-swimlane-track {
     flex: 1;
-    height: 32px;
+    height: 40px;
     position: relative;
     background: #12121a;
 }
@@ -3614,129 +3614,130 @@ function initResourcesThreads() {
     document.getElementById('thread-swimlane-no-data').style.display = 'none';
 
     const container = document.getElementById('thread-swimlane');
-    container.innerHTML = '';
 
     // Get time range from summary
-    const durationMs = (DATA.summary.duration_secs || 60) * 1000;
+    const durationSecs = DATA.summary.duration_secs || 60;
 
-    // Get RW commit times if available (these mark persistence/heavy work)
+    // Get RW commit times if available
     const rwCommits = (txnData && txnData.rw_commit_timeline) || [];
 
-    // Sort threads by fault count, take top 10
+    // Sort threads by fault count, take top 8
     const sortedThreads = [...threads]
         .sort((a, b) => b.faults - a.faults)
-        .slice(0, 10);
+        .slice(0, 8);
 
-    // Find global max for scaling across all threads
-    let globalMaxFaultsPerBucket = 1;
-    sortedThreads.forEach(thread => {
-        if (thread.timeline && thread.timeline.length > 0) {
-            const maxInThread = Math.max(...thread.timeline.map(p => p.faults));
-            globalMaxFaultsPerBucket = Math.max(globalMaxFaultsPerBucket, maxInThread);
-        }
-    });
+    const traces = [];
 
-    // Build HTML rows
-    sortedThreads.forEach(thread => {
-        const row = document.createElement('div');
-        row.className = 'thread-swimlane-row';
+    // Add traces for each thread (minor faults as area)
+    sortedThreads.forEach((thread, idx) => {
+        const timeline = thread.timeline || [];
+        if (timeline.length === 0) return;
 
-        const label = document.createElement('div');
-        label.className = 'thread-swimlane-label';
-        label.textContent = 'T' + thread.tid;
-        label.title = `Thread ${thread.tid}: ${fmt(thread.faults)} faults (${thread.percentage.toFixed(1)}%)`;
+        const x = timeline.map(p => p.time_ms / 1000); // convert to seconds
+        const yMinor = timeline.map(p => p.faults - p.major_faults);
+        const yMajor = timeline.map(p => p.major_faults);
 
-        const track = document.createElement('div');
-        track.className = 'thread-swimlane-track';
+        // Minor faults (blue area)
+        traces.push({
+            x: x,
+            y: yMinor,
+            name: 'T' + thread.tid,
+            type: 'scatter',
+            mode: 'lines',
+            fill: 'tozeroy',
+            fillcolor: 'rgba(96, 165, 250, 0.4)',
+            line: { color: 'rgba(96, 165, 250, 0.8)', width: 1 },
+            yaxis: 'y' + (idx + 1),
+            hovertemplate: 'T' + thread.tid + '<br>Minor: %{y}<br>Time: %{x:.1f}s<extra></extra>',
+            showlegend: idx === 0
+        });
 
-        const canvas = document.createElement('canvas');
-        canvas.className = 'thread-swimlane-canvas';
-        track.appendChild(canvas);
-
-        row.appendChild(label);
-        row.appendChild(track);
-        container.appendChild(row);
-
-        // Draw on canvas after it's in DOM
-        requestAnimationFrame(() => {
-            const rect = track.getBoundingClientRect();
-            const dpr = window.devicePixelRatio || 1;
-            canvas.width = rect.width * dpr;
-            canvas.height = rect.height * dpr;
-            canvas.style.width = rect.width + 'px';
-            canvas.style.height = rect.height + 'px';
-
-            const ctx = canvas.getContext('2d');
-            ctx.scale(dpr, dpr);
-
-            const w = rect.width;
-            const h = rect.height;
-            const timeline = thread.timeline || [];
-
-            if (timeline.length > 0) {
-                // Draw area chart of fault activity over time
-                ctx.beginPath();
-                ctx.moveTo(0, h);
-
-                timeline.forEach(point => {
-                    const x = (point.time_ms / durationMs) * w;
-                    const intensity = point.faults / globalMaxFaultsPerBucket;
-                    const barHeight = intensity * (h - 4);
-                    ctx.lineTo(x, h - barHeight);
-                });
-
-                // Close the path
-                const lastX = timeline.length > 0 ? (timeline[timeline.length - 1].time_ms / durationMs) * w : w;
-                ctx.lineTo(lastX, h);
-                ctx.closePath();
-
-                // Blue gradient fill
-                const gradient = ctx.createLinearGradient(0, 0, 0, h);
-                gradient.addColorStop(0, 'rgba(96, 165, 250, 0.9)');
-                gradient.addColorStop(1, 'rgba(96, 165, 250, 0.2)');
-                ctx.fillStyle = gradient;
-                ctx.fill();
-
-                // Draw major faults as darker overlay
-                ctx.beginPath();
-                ctx.moveTo(0, h);
-                timeline.forEach(point => {
-                    const x = (point.time_ms / durationMs) * w;
-                    const intensity = point.major_faults / globalMaxFaultsPerBucket;
-                    const barHeight = intensity * (h - 4);
-                    ctx.lineTo(x, h - barHeight);
-                });
-                ctx.lineTo(lastX, h);
-                ctx.closePath();
-                ctx.fillStyle = 'rgba(239, 68, 68, 0.6)'; // red for major faults
-                ctx.fill();
-            }
-
-            // Draw RW commits as orange vertical markers
-            ctx.fillStyle = 'rgba(245, 158, 11, 0.8)';
-            rwCommits.forEach(commit => {
-                const x = (commit.time_secs * 1000 / durationMs) * w;
-                if (x >= 0 && x <= w) {
-                    ctx.fillRect(x - 1, 0, 2, h);
-                }
-            });
+        // Major faults (red area, stacked on top conceptually but shown as separate)
+        traces.push({
+            x: x,
+            y: yMajor,
+            name: 'Major',
+            type: 'scatter',
+            mode: 'lines',
+            fill: 'tozeroy',
+            fillcolor: 'rgba(239, 68, 68, 0.5)',
+            line: { color: 'rgba(239, 68, 68, 0.8)', width: 1 },
+            yaxis: 'y' + (idx + 1),
+            hovertemplate: 'T' + thread.tid + '<br>Major: %{y}<br>Time: %{x:.1f}s<extra></extra>',
+            showlegend: idx === 0
         });
     });
 
-    // Add time axis
-    const timeAxis = document.createElement('div');
-    timeAxis.className = 'thread-swimlane-time-axis';
-    for (let i = 0; i <= 5; i++) {
-        const span = document.createElement('span');
-        const timeMs = (i / 5) * durationMs;
-        if (timeMs < 60000) {
-            span.textContent = (timeMs / 1000).toFixed(0) + 's';
-        } else {
-            span.textContent = (timeMs / 60000).toFixed(1) + 'm';
-        }
-        timeAxis.appendChild(span);
-    }
-    container.appendChild(timeAxis);
+    // Add RW commit markers as vertical lines (shapes)
+    const shapes = rwCommits.map(commit => ({
+        type: 'line',
+        x0: commit.time_secs,
+        x1: commit.time_secs,
+        y0: 0,
+        y1: 1,
+        yref: 'paper',
+        line: { color: 'rgba(251, 191, 36, 0.3)', width: 1 }
+    }));
+
+    // Build yaxis configs for each thread row
+    const numThreads = sortedThreads.length;
+    const rowHeight = 1 / numThreads;
+    const yaxes = {};
+    const annotations = [];
+
+    sortedThreads.forEach((thread, idx) => {
+        const domain = [1 - (idx + 1) * rowHeight + 0.02, 1 - idx * rowHeight - 0.02];
+        const axisName = idx === 0 ? 'yaxis' : 'yaxis' + (idx + 1);
+        yaxes[axisName] = {
+            domain: domain,
+            showticklabels: false,
+            showgrid: false,
+            zeroline: false,
+            fixedrange: true
+        };
+
+        // Thread label annotation
+        annotations.push({
+            x: 0,
+            y: (domain[0] + domain[1]) / 2,
+            xref: 'paper',
+            yref: 'paper',
+            text: 'T' + thread.tid,
+            showarrow: false,
+            font: { size: 10, color: '#a1a1aa' },
+            xanchor: 'right',
+            xshift: -5
+        });
+    });
+
+    const layout = {
+        paper_bgcolor: 'transparent',
+        plot_bgcolor: 'transparent',
+        margin: { t: 10, r: 20, b: 40, l: 70 },
+        xaxis: {
+            title: { text: '', font: { size: 10, color: '#52525b' } },
+            tickfont: { size: 10, color: '#71717a' },
+            gridcolor: '#1e1e2a',
+            linecolor: '#1e1e2a',
+            ticksuffix: 's',
+            range: [0, durationSecs],
+            fixedrange: false
+        },
+        ...yaxes,
+        shapes: shapes,
+        annotations: annotations,
+        hovermode: 'x unified',
+        showlegend: false
+    };
+
+    const config = {
+        responsive: true,
+        displayModeBar: true,
+        modeBarButtonsToRemove: ['lasso2d', 'select2d', 'autoScale2d'],
+        displaylogo: false
+    };
+
+    Plotly.newPlot(container, traces, layout, config);
 }
 
 // Init overview on load
