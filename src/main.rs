@@ -20,7 +20,7 @@ mod event;
 mod streaming;
 mod viewer;
 
-use event::{CursorEvent, PageFaultEvent, TxnEvent};
+use event::{CursorEvent, CursorLifecycleEvent, PageFaultEvent, TxnEvent};
 use streaming::StreamingConfig;
 
 /// eBPF profiler for MDBX page fault patterns and cursor operations
@@ -813,6 +813,22 @@ fn run_trace(
                 unsafe { std::ptr::read_unaligned(data.as_ptr() as *const TxnEvent) };
 
             txn_count_clone.fetch_add(1, Ordering::Relaxed);
+
+            if let Ok(json) = serde_json::to_string(&event) {
+                use std::io::Write;
+                if let Ok(mut w) = writer_clone.lock() {
+                    let _ = writeln!(w, "{}", json);
+                }
+            }
+            return 0;
+        }
+
+        // Check if this is a cursor lifecycle event (event_type 12 or 13 at offset 16)
+        // 12 = CursorOpen, 13 = CursorClose
+        const CURSOR_LIFECYCLE_EVENT_SIZE: usize = 40;
+        if (event_type == 12 || event_type == 13) && data.len() >= CURSOR_LIFECYCLE_EVENT_SIZE {
+            let event: CursorLifecycleEvent =
+                unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CursorLifecycleEvent) };
 
             if let Ok(json) = serde_json::to_string(&event) {
                 use std::io::Write;
