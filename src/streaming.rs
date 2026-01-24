@@ -17,9 +17,9 @@ use crate::viewer::{
     OperationPageTypeBreakdown, OperationStats, PageTypeFaultCount, PageTypeStats, ParetoPoint,
     PatternAnalysis, RwCommitPoint, SlowKeyStats, SlowOpBreakdown, SlowOpsTableStats, StrideInfo,
     TableDepthStats, TableDrillDown, TableHotKey, TableTreeStats, TableWorkingSet, ThreadStats,
-    TimeWindowedWSS, TimelinePoint, TraceSummary, TreeDepthEstimate, TreeDepthStats,
-    TreeTraversalViz, TxnConcurrencyStats, TxnData, TxnSummary, TxnThreadStats, TxnTimelineEntry,
-    UnifiedTableStats, ViewerData, WorkingSetAnalysis,
+    ThreadTimelinePoint, TimeWindowedWSS, TimelinePoint, TraceSummary, TreeDepthEstimate,
+    TreeDepthStats, TreeTraversalViz, TxnConcurrencyStats, TxnData, TxnSummary, TxnThreadStats,
+    TxnTimelineEntry, UnifiedTableStats, ViewerData, WorkingSetAnalysis,
 };
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::io::{BufRead, BufReader};
@@ -190,6 +190,9 @@ struct TableStreamStats {
 #[derive(Debug, Default)]
 struct ThreadStreamStats {
     faults: u64,
+    major_faults: u64,
+    /// Per-thread timeline: bucket_index -> (faults, major_faults)
+    timeline_buckets: HashMap<u64, (u32, u32)>,
     // Transaction stats
     total_txns: u64,
     ro_txns: u64,
@@ -740,6 +743,18 @@ impl StreamingAggregator {
         // Thread stats
         let thread = self.thread_stats.entry(event.tid).or_default();
         thread.faults += 1;
+        if is_major {
+            thread.major_faults += 1;
+        }
+
+        // Per-thread timeline bucket (reuse the same bucket calculation)
+        let first_ts = self.first_timestamp.unwrap();
+        let bucket = (ts - first_ts) / (self.config.bucket_ms * 1_000_000);
+        let thread_timeline_entry = thread.timeline_buckets.entry(bucket).or_insert((0, 0));
+        thread_timeline_entry.0 += 1;
+        if is_major {
+            thread_timeline_entry.1 += 1;
+        }
 
         // Pattern analysis
         if let Some(last) = self.last_page {
@@ -1360,19 +1375,36 @@ impl StreamingAggregator {
         // Build transaction data
         let txn_data = self.build_txn_data(duration_secs);
 
-        // Build thread stats
+        // Build thread stats with per-thread timelines
         let total_thread_faults: u64 = self.thread_stats.values().map(|t| t.faults).sum();
+        let bucket_ms = self.config.bucket_ms;
         let mut threads: Vec<_> = self
             .thread_stats
             .iter()
-            .map(|(&tid, stats)| ThreadStats {
-                tid,
-                faults: stats.faults,
-                percentage: if total_thread_faults > 0 {
-                    stats.faults as f64 / total_thread_faults as f64 * 100.0
-                } else {
-                    0.0
-                },
+            .map(|(&tid, stats)| {
+                // Convert timeline buckets to sorted vec
+                let mut timeline: Vec<_> = stats
+                    .timeline_buckets
+                    .iter()
+                    .map(|(&bucket, &(faults, major))| ThreadTimelinePoint {
+                        time_ms: bucket * bucket_ms,
+                        faults,
+                        major_faults: major,
+                    })
+                    .collect();
+                timeline.sort_by_key(|p| p.time_ms);
+
+                ThreadStats {
+                    tid,
+                    faults: stats.faults,
+                    major_faults: stats.major_faults,
+                    percentage: if total_thread_faults > 0 {
+                        stats.faults as f64 / total_thread_faults as f64 * 100.0
+                    } else {
+                        0.0
+                    },
+                    timeline,
+                }
             })
             .collect();
         threads.sort_by(|a, b| b.faults.cmp(&a.faults));

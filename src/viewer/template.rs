@@ -18,10 +18,7 @@ pub fn generate_html(data: &ViewerData) -> String {
     <script src="https://unpkg.com/uplot@1.6.30/dist/uPlot.iife.min.js"></script>
     <!-- Plotly for heatmap -->
     <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
-    <!-- D3.js for timelines-chart -->
-    <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
-    <!-- Timelines Chart for thread swimlane -->
-    <script src="https://cdn.jsdelivr.net/npm/timelines-chart"></script>
+
     <style>
 {css}
     </style>
@@ -241,16 +238,17 @@ pub fn generate_html(data: &ViewerData) -> String {
                     <div class="card" id="thread-swimlane-card" style="margin-top: 16px;">
                         <div class="card-header">Thread Activity
                             <span class="swimlane-legend">
-                                <span class="legend-item"><span class="legend-swatch" style="background: #34d399;"></span> RO</span>
-                                <span class="legend-item"><span class="legend-swatch" style="background: #f87171;"></span> RW</span>
+                                <span class="legend-item"><span class="legend-swatch" style="background: #60a5fa;"></span> Minor</span>
+                                <span class="legend-item"><span class="legend-swatch" style="background: #ef4444;"></span> Major</span>
+                                <span class="legend-item"><span class="legend-swatch" style="background: #f59e0b;"></span> RW Commit</span>
                             </span>
                         </div>
-                        <div class="card-body" style="padding: 8px 16px;">
-                            <div id="thread-swimlane" style="width: 100%; min-height: 150px;"></div>
+                        <div class="card-body" style="padding: 0;">
+                            <div id="thread-swimlane" class="thread-swimlane-container"></div>
                         </div>
                     </div>
                     <div id="thread-swimlane-no-data" class="no-data" style="display:none;">
-                        No transaction timeline data available.
+                        No thread activity data available.
                     </div>
 
                     <!-- Hidden tables for JS compatibility -->
@@ -582,63 +580,58 @@ body {
     margin-left: auto;
 }
 
-.swimlane-container {
-    position: relative;
+.thread-swimlane-container {
     width: 100%;
+    overflow-x: auto;
 }
 
-.swimlane-row {
+.thread-swimlane-row {
     display: flex;
     align-items: center;
-    height: 24px;
-    margin-bottom: 2px;
+    border-bottom: 1px solid #1e1e2a;
 }
 
-.swimlane-label {
-    width: 80px;
+.thread-swimlane-row:last-child {
+    border-bottom: none;
+}
+
+.thread-swimlane-label {
+    width: 100px;
+    min-width: 100px;
+    padding: 8px 12px;
     font-size: 11px;
     color: #a1a1aa;
-    text-align: right;
-    padding-right: 12px;
-    flex-shrink: 0;
+    background: #0a0a0f;
+    border-right: 1px solid #1e1e2a;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 
-.swimlane-track {
+.thread-swimlane-track {
     flex: 1;
-    height: 18px;
-    background: #1a1a24;
-    border-radius: 3px;
+    height: 32px;
     position: relative;
-    overflow: hidden;
+    background: #12121a;
 }
 
-.swimlane-bar {
-    position: absolute;
-    height: 14px;
-    top: 2px;
-    border-radius: 2px;
-    min-width: 2px;
-    opacity: 0.85;
-    transition: opacity 0.1s;
+.thread-swimlane-canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
 }
 
-.swimlane-bar:hover {
-    opacity: 1;
-    z-index: 10;
-}
-
-.swimlane-bar.ro { background: #34d399; }
-.swimlane-bar.rw { background: #f87171; }
-
-.swimlane-time-axis {
+.thread-swimlane-time-axis {
     display: flex;
-    justify-content: space-between;
-    margin-left: 80px;
-    padding-left: 12px;
-    margin-top: 4px;
+    margin-left: 100px;
+    padding: 4px 0;
+    background: #0a0a0f;
+    border-top: 1px solid #1e1e2a;
+}
+
+.thread-swimlane-time-axis span {
+    flex: 1;
+    text-align: center;
     font-size: 10px;
     color: #52525b;
 }
@@ -1647,14 +1640,10 @@ function createUPlotChart(container, data, opts = {}) {
     return uplot;
 }
 
-// uPlot scatter chart for commit latency timeline
-function createCommitTimelineChart(container, commitData, opts = {}) {
+// Plotly bar chart for commit latency timeline
+function createCommitLatencyChart(container, commitData) {
     const el = typeof container === 'string' ? document.getElementById(container) : container;
     if (!el || !commitData.length) return null;
-
-    const rect = el.getBoundingClientRect();
-    const width = rect.width || 400;
-    const height = rect.height || 140;
 
     // Extract timestamps (seconds) and latencies (ms)
     const timestamps = commitData.map(p => p.time_secs);
@@ -1665,121 +1654,49 @@ function createCommitTimelineChart(container, commitData, opts = {}) {
     const p95Index = Math.floor(sortedLatencies.length * 0.95);
     const p95Threshold = sortedLatencies[p95Index] || sortedLatencies[sortedLatencies.length - 1];
 
-    const uplotData = [timestamps, latencies];
+    // Color each bar based on whether it's an outlier
+    const colors = latencies.map(v => v >= p95Threshold ? '#f87171' : '#3b82f6');
 
-    const normalColor = opts.color || '#3b82f6';
-    const outlierColor = '#f87171'; // red for high latency
-
-    const uplotOpts = {
-        width,
-        height,
-        cursor: {
-            show: true,
-            x: true,
-            y: true,
-            drag: { x: true, y: false, setScale: true }
+    const trace = {
+        x: timestamps,
+        y: latencies,
+        type: 'bar',
+        marker: {
+            color: colors,
+            line: { width: 0 }
         },
-        select: {
-            show: true,
-        },
-        scales: {
-            x: { time: false },
-            y: { auto: true, min: 0 }
-        },
-        axes: [
-            {
-                stroke: '#71717a',
-                grid: { stroke: '#1e1e2a', width: 1 },
-                ticks: { stroke: '#1e1e2a', width: 1 },
-                font: '11px sans-serif',
-                values: (u, vals) => vals.map(v => {
-                    if (v < 60) return v.toFixed(0) + 's';
-                    return (v / 60).toFixed(1) + 'm';
-                })
-            },
-            {
-                stroke: '#71717a',
-                grid: { stroke: '#1e1e2a', width: 1 },
-                ticks: { stroke: '#1e1e2a', width: 1 },
-                font: '11px sans-serif',
-                size: 55,
-                values: (u, vals) => vals.map(v => {
-                    if (v === 0) return '0ms';
-                    if (v < 1) return v.toFixed(1) + 'ms';
-                    if (v < 1000) return v.toFixed(0) + 'ms';
-                    return (v / 1000).toFixed(1) + 's';
-                })
-            }
-        ],
-        series: [
-            {},
-            {
-                stroke: normalColor,
-                width: 0,
-                fill: normalColor + '80',
-                label: 'Commit Latency',
-                paths: (u, seriesIdx, idx0, idx1) => {
-                    // Draw vertical bars - color outliers differently
-                    const xdata = u.data[0];
-                    const ydata = u.data[seriesIdx];
-                    const ctx = u.ctx;
-
-                    const barWidth = Math.max(2, Math.min(8, u.bbox.width / ydata.length * 0.6));
-
-                    // We need to draw manually to support multiple colors
-                    // Return null and use drawOrder hook instead
-                    return null;
-                },
-                points: { show: false }
-            }
-        ],
-        hooks: {
-            draw: [
-                u => {
-                    const ctx = u.ctx;
-                    const xdata = u.data[0];
-                    const ydata = u.data[1];
-                    const barWidth = Math.max(2, Math.min(6, u.bbox.width / ydata.length * 0.5));
-
-                    for (let i = 0; i < ydata.length; i++) {
-                        const x = u.valToPos(xdata[i], 'x', true);
-                        const y0 = u.valToPos(0, 'y', true);
-                        const y1 = u.valToPos(ydata[i], 'y', true);
-
-                        // Color based on whether it's an outlier
-                        const isOutlier = ydata[i] >= p95Threshold;
-                        ctx.fillStyle = isOutlier ? outlierColor + 'cc' : normalColor + '99';
-
-                        ctx.fillRect(x - barWidth/2, y1, barWidth, y0 - y1);
-                    }
-                }
-            ],
-            setSelect: [
-                u => {
-                    if (u.select.width > 0) {
-                        const min = u.posToVal(u.select.left, 'x');
-                        const max = u.posToVal(u.select.left + u.select.width, 'x');
-                        u.setScale('x', { min, max });
-                    }
-                    u.setSelect({ width: 0, height: 0 }, false);
-                }
-            ]
-        }
+        hovertemplate: '<b>%{y:.1f}ms</b> at %{x:.1f}s<extra></extra>'
     };
 
-    // Clear container and create chart
-    el.innerHTML = '';
-    const uplot = new uPlot(uplotOpts, uplotData, el);
+    const layout = {
+        paper_bgcolor: 'transparent',
+        plot_bgcolor: 'transparent',
+        margin: { t: 10, r: 20, b: 40, l: 55 },
+        xaxis: {
+            title: { text: '', font: { size: 10, color: '#52525b' } },
+            tickfont: { size: 10, color: '#71717a' },
+            gridcolor: '#1e1e2a',
+            linecolor: '#1e1e2a',
+            ticksuffix: 's'
+        },
+        yaxis: {
+            title: { text: '', font: { size: 10, color: '#52525b' } },
+            tickfont: { size: 10, color: '#71717a' },
+            gridcolor: '#1e1e2a',
+            linecolor: '#1e1e2a',
+            ticksuffix: 'ms',
+            rangemode: 'tozero'
+        },
+        bargap: 0.1,
+        hovermode: 'closest'
+    };
 
-    // Double-click to reset zoom
-    el.addEventListener('dblclick', () => {
-        uplot.setScale('x', { min: timestamps[0], max: timestamps[timestamps.length - 1] });
-    });
+    const config = {
+        responsive: true,
+        displayModeBar: false
+    };
 
-    // Track for resize
-    uplotInstances.push({ uplot, el, height });
-
-    return uplot;
+    Plotly.newPlot(el, [trace], layout, config);
 }
 
 // Resize handler for all uPlot charts
@@ -3678,82 +3595,148 @@ function initResourcesTxns() {
 
     // RW Commit latency timeline (shows WHEN commits happen and their latency)
     if (t.rw_commit_timeline && t.rw_commit_timeline.length > 0) {
-        createCommitTimelineChart('txn-latency-chart', t.rw_commit_timeline, {
-            color: '#3b82f6'
-        });
+        createCommitLatencyChart('txn-latency-chart', t.rw_commit_timeline);
     }
 }
 
 function initResourcesThreads() {
-    const t = DATA.txn_data;
+    const threads = DATA.threads;
+    const txnData = DATA.txn_data;
 
-    // Check if we have timeline data for the swimlane
-    if (t && t.has_data && t.timeline && t.timeline.length > 0) {
-        document.getElementById('thread-swimlane-card').style.display = 'block';
-        document.getElementById('thread-swimlane-no-data').style.display = 'none';
-
-        // Group transactions by thread ID
-        const threadMap = new Map();
-        t.timeline.forEach(txn => {
-            if (!threadMap.has(txn.tid)) {
-                threadMap.set(txn.tid, []);
-            }
-            // Only include completed transactions with valid times
-            if (txn.start_ms !== undefined && txn.end_ms !== undefined) {
-                threadMap.get(txn.tid).push({
-                    timeRange: [txn.start_ms, txn.end_ms],
-                    val: txn.txn_type // "RO" or "RW"
-                });
-            }
-        });
-
-        // Convert to timelines-chart format
-        // Sort threads by total transaction count (most active first)
-        const sortedThreads = [...threadMap.entries()]
-            .sort((a, b) => b[1].length - a[1].length)
-            .slice(0, 15); // Limit to top 15 threads
-
-        const chartData = [{
-            group: '',
-            data: sortedThreads.map(([tid, segments]) => ({
-                label: 'T' + tid,
-                data: segments
-            }))
-        }];
-
-        // Find time range
-        let minTime = Infinity, maxTime = 0;
-        t.timeline.forEach(txn => {
-            if (txn.start_ms < minTime) minTime = txn.start_ms;
-            if (txn.end_ms > maxTime) maxTime = txn.end_ms;
-        });
-
-        // Create the swimlane chart
-        const container = document.getElementById('thread-swimlane');
-        container.innerHTML = ''; // Clear any existing content
-
-        const chart = TimelinesChart()(container)
-            .data(chartData)
-            .useUtc(true)
-            .zScaleLabel('Transaction Type')
-            .zQualitative(true)
-            .zColorScale(d3.scaleOrdinal().domain(['RO', 'RW']).range(['#34d399', '#f87171']))
-            .enableAnimations(false)
-            .leftMargin(65)
-            .rightMargin(20)
-            .maxHeight(Math.min(400, sortedThreads.length * 28 + 50))
-            .maxLineHeight(20)
-            .xTickFormat(d => {
-                const ms = d.getTime ? d.getTime() : d;
-                if (ms < 60000) return (ms / 1000).toFixed(0) + 's';
-                return (ms / 60000).toFixed(1) + 'm';
-            })
-            .timeFormat('%H:%M:%S.%L');
-
-    } else {
+    // We need thread data with timelines
+    if (!threads || threads.length === 0) {
         document.getElementById('thread-swimlane-card').style.display = 'none';
         document.getElementById('thread-swimlane-no-data').style.display = 'block';
+        return;
     }
+
+    document.getElementById('thread-swimlane-card').style.display = 'block';
+    document.getElementById('thread-swimlane-no-data').style.display = 'none';
+
+    const container = document.getElementById('thread-swimlane');
+    container.innerHTML = '';
+
+    // Get time range from summary
+    const durationMs = (DATA.summary.duration_secs || 60) * 1000;
+
+    // Get RW commit times if available (these mark persistence/heavy work)
+    const rwCommits = (txnData && txnData.rw_commit_timeline) || [];
+
+    // Sort threads by fault count, take top 10
+    const sortedThreads = [...threads]
+        .sort((a, b) => b.faults - a.faults)
+        .slice(0, 10);
+
+    // Find global max for scaling across all threads
+    let globalMaxFaultsPerBucket = 1;
+    sortedThreads.forEach(thread => {
+        if (thread.timeline && thread.timeline.length > 0) {
+            const maxInThread = Math.max(...thread.timeline.map(p => p.faults));
+            globalMaxFaultsPerBucket = Math.max(globalMaxFaultsPerBucket, maxInThread);
+        }
+    });
+
+    // Build HTML rows
+    sortedThreads.forEach(thread => {
+        const row = document.createElement('div');
+        row.className = 'thread-swimlane-row';
+
+        const label = document.createElement('div');
+        label.className = 'thread-swimlane-label';
+        label.textContent = 'T' + thread.tid;
+        label.title = `Thread ${thread.tid}: ${fmt(thread.faults)} faults (${thread.percentage.toFixed(1)}%)`;
+
+        const track = document.createElement('div');
+        track.className = 'thread-swimlane-track';
+
+        const canvas = document.createElement('canvas');
+        canvas.className = 'thread-swimlane-canvas';
+        track.appendChild(canvas);
+
+        row.appendChild(label);
+        row.appendChild(track);
+        container.appendChild(row);
+
+        // Draw on canvas after it's in DOM
+        requestAnimationFrame(() => {
+            const rect = track.getBoundingClientRect();
+            const dpr = window.devicePixelRatio || 1;
+            canvas.width = rect.width * dpr;
+            canvas.height = rect.height * dpr;
+            canvas.style.width = rect.width + 'px';
+            canvas.style.height = rect.height + 'px';
+
+            const ctx = canvas.getContext('2d');
+            ctx.scale(dpr, dpr);
+
+            const w = rect.width;
+            const h = rect.height;
+            const timeline = thread.timeline || [];
+
+            if (timeline.length > 0) {
+                // Draw area chart of fault activity over time
+                ctx.beginPath();
+                ctx.moveTo(0, h);
+
+                timeline.forEach(point => {
+                    const x = (point.time_ms / durationMs) * w;
+                    const intensity = point.faults / globalMaxFaultsPerBucket;
+                    const barHeight = intensity * (h - 4);
+                    ctx.lineTo(x, h - barHeight);
+                });
+
+                // Close the path
+                const lastX = timeline.length > 0 ? (timeline[timeline.length - 1].time_ms / durationMs) * w : w;
+                ctx.lineTo(lastX, h);
+                ctx.closePath();
+
+                // Blue gradient fill
+                const gradient = ctx.createLinearGradient(0, 0, 0, h);
+                gradient.addColorStop(0, 'rgba(96, 165, 250, 0.9)');
+                gradient.addColorStop(1, 'rgba(96, 165, 250, 0.2)');
+                ctx.fillStyle = gradient;
+                ctx.fill();
+
+                // Draw major faults as darker overlay
+                ctx.beginPath();
+                ctx.moveTo(0, h);
+                timeline.forEach(point => {
+                    const x = (point.time_ms / durationMs) * w;
+                    const intensity = point.major_faults / globalMaxFaultsPerBucket;
+                    const barHeight = intensity * (h - 4);
+                    ctx.lineTo(x, h - barHeight);
+                });
+                ctx.lineTo(lastX, h);
+                ctx.closePath();
+                ctx.fillStyle = 'rgba(239, 68, 68, 0.6)'; // red for major faults
+                ctx.fill();
+            }
+
+            // Draw RW commits as orange vertical markers
+            ctx.fillStyle = 'rgba(245, 158, 11, 0.8)';
+            rwCommits.forEach(commit => {
+                const x = (commit.time_secs * 1000 / durationMs) * w;
+                if (x >= 0 && x <= w) {
+                    ctx.fillRect(x - 1, 0, 2, h);
+                }
+            });
+        });
+    });
+
+    // Add time axis
+    const timeAxis = document.createElement('div');
+    timeAxis.className = 'thread-swimlane-time-axis';
+    for (let i = 0; i <= 5; i++) {
+        const span = document.createElement('span');
+        const timeMs = (i / 5) * durationMs;
+        if (timeMs < 60000) {
+            span.textContent = (timeMs / 1000).toFixed(0) + 's';
+        } else {
+            span.textContent = (timeMs / 60000).toFixed(1) + 'm';
+        }
+        timeAxis.appendChild(span);
+    }
+    container.appendChild(timeAxis);
 }
 
 // Init overview on load

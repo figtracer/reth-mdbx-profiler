@@ -865,7 +865,17 @@ pub struct TableHotKey {
 pub struct ThreadStats {
     pub tid: u32,
     pub faults: u64,
+    pub major_faults: u64,
     pub percentage: f64,
+    /// Per-thread timeline: fault counts per time bucket
+    pub timeline: Vec<ThreadTimelinePoint>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ThreadTimelinePoint {
+    pub time_ms: u64,
+    pub faults: u32,
+    pub major_faults: u32,
 }
 
 #[derive(Debug, Serialize)]
