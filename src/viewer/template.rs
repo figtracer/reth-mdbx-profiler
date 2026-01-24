@@ -204,6 +204,24 @@ pub fn generate_html(data: &ViewerData) -> String {
                                 <span class="metric-value" id="txn-avg-ro">-</span>
                             </div>
                         </div>
+                        <div class="metrics-group" id="cursor-lifecycle-metrics-group" style="display:none;">
+                            <div class="metric">
+                                <span class="metric-label">Cursors Opened</span>
+                                <span class="metric-value" id="cursor-opens">-</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">Closed</span>
+                                <span class="metric-value" id="cursor-closes">-</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">Avg Lifetime</span>
+                                <span class="metric-value" id="cursor-avg-lifetime">-</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">P95 Lifetime</span>
+                                <span class="metric-value" id="cursor-p95-lifetime">-</span>
+                            </div>
+                        </div>
                     </div>
 
                     <div id="memory-no-data" class="no-data" style="display:none;">
@@ -2530,6 +2548,9 @@ function initResources() {
     // Initialize Transactions section
     initResourcesTxns();
 
+    // Initialize Cursor Lifecycle section
+    initCursorLifecycle();
+
     // Initialize Threads section
     initResourcesThreads();
 }
@@ -3663,6 +3684,39 @@ function initResourcesTxns() {
     // RW Commit latency timeline (shows WHEN commits happen and their latency)
     if (t.rw_commit_timeline && t.rw_commit_timeline.length > 0) {
         createCommitLatencyChart('txn-latency-chart', t.rw_commit_timeline);
+    }
+}
+
+function initCursorLifecycle() {
+    const cl = DATA.cursor_lifecycle;
+
+    if (!cl || !cl.has_data) {
+        // Hide the metrics group if no data
+        document.getElementById('cursor-lifecycle-metrics-group').style.display = 'none';
+        return;
+    }
+
+    // Show the metrics group
+    document.getElementById('cursor-lifecycle-metrics-group').style.display = 'flex';
+
+    // Populate metrics
+    document.getElementById('cursor-opens').textContent = fmt(cl.total_opens);
+    document.getElementById('cursor-closes').textContent = fmt(cl.total_closes);
+
+    // Format lifetime in appropriate units (us -> ms if > 1000)
+    const avgLifetime = cl.avg_lifetime_us;
+    const p95Lifetime = cl.p95_lifetime_us;
+
+    if (avgLifetime > 1000) {
+        document.getElementById('cursor-avg-lifetime').textContent = (avgLifetime / 1000).toFixed(1) + 'ms';
+    } else {
+        document.getElementById('cursor-avg-lifetime').textContent = avgLifetime.toFixed(0) + 'us';
+    }
+
+    if (p95Lifetime > 1000) {
+        document.getElementById('cursor-p95-lifetime').textContent = (p95Lifetime / 1000).toFixed(1) + 'ms';
+    } else {
+        document.getElementById('cursor-p95-lifetime').textContent = p95Lifetime.toFixed(0) + 'us';
     }
 }
 
