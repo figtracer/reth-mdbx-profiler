@@ -1930,26 +1930,20 @@ class InteractiveHeatmap {
     }
 
     getCellAtPixel(pos) {
-        // O(1) lookup using pixel-to-cell mapping arrays
-        // This is deterministic - each pixel maps to exactly one cell
-        if (!this.pixelToCellX || !this.pixelToCellY) return null;
+        // O(1) lookup using 2D pixel-to-cell mapping
+        // Each pixel maps to exactly the cell that was drawn there
+        if (!this.pixelToCell || !this.lookupW) return null;
 
         const px = Math.floor(pos.x);
         const py = Math.floor(pos.y);
 
         // Check bounds
-        if (px < this.pad.l || px >= this.w - this.pad.r) return null;
-        if (py < this.pad.t || py >= this.h - this.pad.b) return null;
+        if (px < 0 || py < 0 || px >= this.lookupW || py >= this.lookupH) return null;
 
-        // Get cell indices from lookup arrays
-        const timeIdx = this.pixelToCellX[px];
-        const offsetIdx = this.pixelToCellY[py];
+        // Direct 2D lookup - guaranteed to match what was drawn
+        const cellKey = this.pixelToCell[py * this.lookupW + px];
+        if (!cellKey) return null;
 
-        if (timeIdx === undefined || offsetIdx === undefined) return null;
-        if (timeIdx < 0 || offsetIdx < 0) return null;
-
-        // Get cell metadata
-        const cellKey = timeIdx + ',' + offsetIdx;
         return this.cellMetadata[cellKey] || null;
     }
 
@@ -2164,14 +2158,18 @@ class InteractiveHeatmap {
         }
         if (visibleMaxCount === 0) visibleMaxCount = max_count;
 
-        // Build pixel-to-cell lookup arrays for O(1) deterministic hit testing
-        // Every pixel in the chart area maps to exactly one cell
+        // Build 2D pixel-to-cell lookup for O(1) deterministic hit testing
+        // Each pixel maps to exactly the cell key that was drawn there
         const chartPixelW = Math.floor(chartW);
         const chartPixelH = Math.floor(chartH);
+        
+        // Store canvas dimensions for lookup consistency
+        this.lookupW = Math.ceil(this.w);
+        this.lookupH = Math.ceil(this.h);
+        const canvasW = this.lookupW;
 
-        // Initialize lookup arrays
-        this.pixelToCellX = new Array(Math.ceil(this.w)).fill(-1);
-        this.pixelToCellY = new Array(Math.ceil(this.h)).fill(-1);
+        // Initialize 2D lookup array (stores cell keys directly)
+        this.pixelToCell = new Array(this.lookupW * this.lookupH).fill(null);
         this.cellMetadata = {};
 
         // Calculate visible bucket range
@@ -2214,19 +2212,6 @@ class InteractiveHeatmap {
                 const drawW = x2 - x1;
                 const drawH = y2 - y1;
 
-                if (drawW > 0 && drawH > 0) {
-                    this.ctx.fillStyle = this.heatColor(intensity);
-                    this.ctx.fillRect(x1, y1, drawW, drawH);
-
-                    // Populate pixel lookup arrays for the exact pixels we just drew
-                    for (let px = x1; px < x2; px++) {
-                        this.pixelToCellX[px] = t;
-                    }
-                    for (let py = y1; py < y2; py++) {
-                        this.pixelToCellY[py] = o;
-                    }
-                }
-
                 // Store cell metadata for tooltip lookup
                 const cellKey = t + ',' + o;
                 this.cellMetadata[cellKey] = {
@@ -2239,6 +2224,20 @@ class InteractiveHeatmap {
                     bucketOffsetMin,
                     bucketOffsetMax
                 };
+
+                if (drawW > 0 && drawH > 0) {
+                    this.ctx.fillStyle = this.heatColor(intensity);
+                    this.ctx.fillRect(x1, y1, drawW, drawH);
+
+                    // Populate 2D pixel lookup for the exact pixels we just drew
+                    // This guarantees getCellAtPixel returns exactly this cell
+                    for (let py = y1; py < y2; py++) {
+                        const rowOffset = py * canvasW;
+                        for (let px = x1; px < x2; px++) {
+                            this.pixelToCell[rowOffset + px] = cellKey;
+                        }
+                    }
+                }
             }
         }
 
