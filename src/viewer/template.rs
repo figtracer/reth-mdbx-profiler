@@ -148,6 +148,60 @@ pub fn generate_html(data: &ViewerData) -> String {
                         </div>
                     </div>
                 </div>
+
+                <!-- Cursor Lifecycle Section -->
+                <div id="cursor-lifecycle-section" style="display:none;">
+                    <div class="section-separator">
+                        <span class="separator-label">Cursor Lifecycle</span>
+                    </div>
+                    <div class="metrics-row" style="margin-bottom: 16px;">
+                        <div class="metrics-group">
+                            <div class="metric">
+                                <span class="metric-label">Cursors Opened</span>
+                                <span class="metric-value" id="cursor-opens">-</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">Closed</span>
+                                <span class="metric-value" id="cursor-closes">-</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">Avg Lifetime</span>
+                                <span class="metric-value" id="cursor-avg-lifetime">-</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">P50</span>
+                                <span class="metric-value" id="cursor-p50-lifetime">-</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">P95</span>
+                                <span class="metric-value" id="cursor-p95-lifetime">-</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">P99</span>
+                                <span class="metric-value" id="cursor-p99-lifetime">-</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card full-width">
+                        <div class="card-header">
+                            Cursor Lifecycle by Table
+                            <span class="card-hint">Which tables have the most cursor activity</span>
+                        </div>
+                        <div class="card-body compact-table-container" style="padding: 0;">
+                            <table class="compact-table sortable-table" id="cursor-lifecycle-table">
+                                <thead>
+                                    <tr>
+                                        <th data-sort="table" class="sortable">Table</th>
+                                        <th data-sort="opens" class="sortable sorted-desc">Opens <span class="sort-icon">▼</span></th>
+                                        <th data-sort="closes" class="sortable">Closes</th>
+                                        <th data-sort="avg_lifetime" class="sortable">Avg Lifetime</th>
+                                    </tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
             </section>
 
             <!-- Hidden Tables tab for compatibility (data still loads here) -->
@@ -202,24 +256,6 @@ pub fn generate_html(data: &ViewerData) -> String {
                             <div class="metric">
                                 <span class="metric-label">Avg RO</span>
                                 <span class="metric-value" id="txn-avg-ro">-</span>
-                            </div>
-                        </div>
-                        <div class="metrics-group" id="cursor-lifecycle-metrics-group" style="display:none;">
-                            <div class="metric">
-                                <span class="metric-label">Cursors Opened</span>
-                                <span class="metric-value" id="cursor-opens">-</span>
-                            </div>
-                            <div class="metric">
-                                <span class="metric-label">Closed</span>
-                                <span class="metric-value" id="cursor-closes">-</span>
-                            </div>
-                            <div class="metric">
-                                <span class="metric-label">Avg Lifetime</span>
-                                <span class="metric-value" id="cursor-avg-lifetime">-</span>
-                            </div>
-                            <div class="metric">
-                                <span class="metric-label">P95 Lifetime</span>
-                                <span class="metric-value" id="cursor-p95-lifetime">-</span>
                             </div>
                         </div>
                     </div>
@@ -2465,6 +2501,7 @@ function initTab(name) {
     if (name === 'overview') {
         initOverview();
         initTables();  // Tables are now part of overview
+        initCursorLifecycle();  // Cursor lifecycle is in overview
     }
     else if (name === 'resources') initResources();
 }
@@ -2557,9 +2594,6 @@ function initResources() {
 
     // Initialize Transactions section
     initResourcesTxns();
-
-    // Initialize Cursor Lifecycle section
-    initCursorLifecycle();
 
     // Initialize Threads section
     initResourcesThreads();
@@ -3697,37 +3731,104 @@ function initResourcesTxns() {
     }
 }
 
+// Cursor lifecycle table sorting state
+let cursorLifecycleSortColumn = 'opens';
+let cursorLifecycleSortDesc = true;
+
 function initCursorLifecycle() {
     const cl = DATA.cursor_lifecycle;
 
     if (!cl || !cl.has_data) {
-        // Hide the metrics group if no data
-        document.getElementById('cursor-lifecycle-metrics-group').style.display = 'none';
+        // Hide the section if no data
+        document.getElementById('cursor-lifecycle-section').style.display = 'none';
         return;
     }
 
-    // Show the metrics group
-    document.getElementById('cursor-lifecycle-metrics-group').style.display = 'flex';
+    // Show the section
+    document.getElementById('cursor-lifecycle-section').style.display = 'block';
 
     // Populate metrics
     document.getElementById('cursor-opens').textContent = fmt(cl.total_opens);
     document.getElementById('cursor-closes').textContent = fmt(cl.total_closes);
+    document.getElementById('cursor-avg-lifetime').textContent = fmtLifetime(cl.avg_lifetime_us);
+    document.getElementById('cursor-p50-lifetime').textContent = fmtLifetime(cl.p50_lifetime_us);
+    document.getElementById('cursor-p95-lifetime').textContent = fmtLifetime(cl.p95_lifetime_us);
+    document.getElementById('cursor-p99-lifetime').textContent = fmtLifetime(cl.p99_lifetime_us);
 
-    // Format lifetime in appropriate units (us -> ms if > 1000)
-    const avgLifetime = cl.avg_lifetime_us;
-    const p95Lifetime = cl.p95_lifetime_us;
+    // Initial table render
+    renderCursorLifecycleTable(cl.by_table);
 
-    if (avgLifetime > 1000) {
-        document.getElementById('cursor-avg-lifetime').textContent = (avgLifetime / 1000).toFixed(1) + 'ms';
-    } else {
-        document.getElementById('cursor-avg-lifetime').textContent = avgLifetime.toFixed(0) + 'us';
-    }
+    // Setup sortable column headers
+    document.querySelectorAll('#cursor-lifecycle-table th[data-sort]').forEach(th => {
+        th.style.cursor = 'pointer';
+        th.addEventListener('click', () => {
+            const sortKey = th.dataset.sort;
+            if (!sortKey) return;
 
-    if (p95Lifetime > 1000) {
-        document.getElementById('cursor-p95-lifetime').textContent = (p95Lifetime / 1000).toFixed(1) + 'ms';
-    } else {
-        document.getElementById('cursor-p95-lifetime').textContent = p95Lifetime.toFixed(0) + 'us';
-    }
+            // Toggle direction if same column, else default to desc
+            if (cursorLifecycleSortColumn === sortKey) {
+                cursorLifecycleSortDesc = !cursorLifecycleSortDesc;
+            } else {
+                cursorLifecycleSortColumn = sortKey;
+                cursorLifecycleSortDesc = sortKey !== 'table'; // Ascending for table name, desc for numbers
+            }
+
+            // Update header styles
+            document.querySelectorAll('#cursor-lifecycle-table th').forEach(h => {
+                h.classList.remove('sorted-asc', 'sorted-desc');
+                const icon = h.querySelector('.sort-icon');
+                if (icon) icon.remove();
+            });
+            th.classList.add(cursorLifecycleSortDesc ? 'sorted-desc' : 'sorted-asc');
+            const label = th.textContent.trim();
+            th.innerHTML = label + ` <span class="sort-icon">${cursorLifecycleSortDesc ? '▼' : '▲'}</span>`;
+
+            // Re-render table
+            renderCursorLifecycleTable(cl.by_table);
+        });
+    });
+}
+
+// Helper to format lifetime (shared)
+function fmtLifetime(us) {
+    if (us >= 1000000) return (us / 1000000).toFixed(1) + 's';
+    if (us >= 1000) return (us / 1000).toFixed(1) + 'ms';
+    return us.toFixed(0) + 'us';
+}
+
+function renderCursorLifecycleTable(data) {
+    const tbody = document.querySelector('#cursor-lifecycle-table tbody');
+    tbody.innerHTML = '';
+
+    if (!data || data.length === 0) return;
+
+    // Sort data
+    const sorted = [...data].sort((a, b) => {
+        let aVal, bVal;
+        switch (cursorLifecycleSortColumn) {
+            case 'table': aVal = a.table; bVal = b.table; break;
+            case 'opens': aVal = a.opens; bVal = b.opens; break;
+            case 'closes': aVal = a.closes; bVal = b.closes; break;
+            case 'avg_lifetime': aVal = a.avg_lifetime_us; bVal = b.avg_lifetime_us; break;
+            default: aVal = a.opens; bVal = b.opens;
+        }
+        if (typeof aVal === 'string') {
+            return cursorLifecycleSortDesc ? bVal.localeCompare(aVal) : aVal.localeCompare(bVal);
+        }
+        return cursorLifecycleSortDesc ? bVal - aVal : aVal - bVal;
+    });
+
+    // Render rows
+    sorted.forEach(t => {
+        const row = document.createElement('tr');
+        row.innerHTML = `
+            <td>${t.table}</td>
+            <td>${fmt(t.opens)}</td>
+            <td>${fmt(t.closes)}</td>
+            <td>${fmtLifetime(t.avg_lifetime_us)}</td>
+        `;
+        tbody.appendChild(row);
+    });
 }
 
 function initResourcesThreads() {
