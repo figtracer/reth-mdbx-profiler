@@ -1928,7 +1928,9 @@ class InteractiveHeatmap {
     getCellAtPixel(pos) {
         // Simple hit-test against rendered cells stored during draw()
         // This guarantees the tooltip matches exactly what's drawn on screen
-        for (const cell of this.renderedCells) {
+        // Iterate in reverse so later-drawn (topmost) cells are matched first
+        for (let i = this.renderedCells.length - 1; i >= 0; i--) {
+            const cell = this.renderedCells[i];
             if (pos.x >= cell.x1 && pos.x < cell.x2 &&
                 pos.y >= cell.y1 && pos.y < cell.y2) {
                 return cell;
@@ -2151,6 +2153,16 @@ class InteractiveHeatmap {
         // Clear rendered cells array before drawing
         this.renderedCells = [];
 
+        // Build a 2D grid for pixel-perfect cell lookup
+        // This maps each pixel column (x) to a time bucket index, and each pixel row (y) to an offset bucket index
+        // This ensures no gaps or overlaps in hit testing
+
+        // Calculate pixel-to-bucket mappings for the visible area
+        const visibleTimeBuckets = Math.min(time_buckets, endTimeBucket) - Math.max(0, startTimeBucket);
+        const visibleOffsetBuckets = Math.min(offset_buckets, endOffsetBucket) - Math.max(0, startOffsetBucket);
+        const cellPixelW = chartW / visibleTimeBuckets;
+        const cellPixelH = chartH / visibleOffsetBuckets;
+
         // Draw cells and store their bounds for hit testing
         for (let t = Math.max(0, startTimeBucket); t < Math.min(time_buckets, endTimeBucket); t++) {
             for (let o = Math.max(0, startOffsetBucket); o < Math.min(offset_buckets, endOffsetBucket); o++) {
@@ -2164,33 +2176,36 @@ class InteractiveHeatmap {
                 const bucketOffsetMin = this.fullOffsetMin + (o / offset_buckets) * fullOffsetRange;
                 const bucketOffsetMax = this.fullOffsetMin + ((o + 1) / offset_buckets) * fullOffsetRange;
 
-                // Convert to pixel coordinates
-                const x1 = this.pad.l + ((bucketTimeMin - this.viewTimeMin) / viewTimeRange) * chartW;
-                const x2 = this.pad.l + ((bucketTimeMax - this.viewTimeMin) / viewTimeRange) * chartW;
-                const y2 = this.pad.t + ((this.viewOffsetMax - bucketOffsetMin) / viewOffsetRange) * chartH;
-                const y1 = this.pad.t + ((this.viewOffsetMax - bucketOffsetMax) / viewOffsetRange) * chartH;
+                // Calculate pixel position relative to visible bucket range
+                // Use integer pixel boundaries for crisp rendering and accurate hit testing
+                const tRel = t - Math.max(0, startTimeBucket);
+                const oRel = o - Math.max(0, startOffsetBucket);
 
-                // Skip cells outside visible area
-                if (x2 < this.pad.l || x1 > this.w - this.pad.r || y2 < this.pad.t || y1 > this.h - this.pad.b) {
-                    continue;
-                }
+                // Pixel boundaries - use floor/ceil to avoid gaps between cells
+                const pixelX1 = Math.floor(this.pad.l + tRel * cellPixelW);
+                const pixelX2 = Math.floor(this.pad.l + (tRel + 1) * cellPixelW);
+                const pixelY1 = Math.floor(this.pad.t + (visibleOffsetBuckets - 1 - oRel) * cellPixelH);
+                const pixelY2 = Math.floor(this.pad.t + (visibleOffsetBuckets - oRel) * cellPixelH);
 
                 // Clip to chart area
-                const drawX = Math.max(this.pad.l, x1);
-                const drawY = Math.max(this.pad.t, y1);
-                const drawW = Math.min(this.w - this.pad.r, x2) - drawX + 1;
-                const drawH = Math.min(this.h - this.pad.b, y2) - drawY + 1;
+                const drawX1 = Math.max(this.pad.l, pixelX1);
+                const drawY1 = Math.max(this.pad.t, pixelY1);
+                const drawX2 = Math.min(this.w - this.pad.r, pixelX2);
+                const drawY2 = Math.min(this.h - this.pad.b, pixelY2);
+
+                const drawW = drawX2 - drawX1;
+                const drawH = drawY2 - drawY1;
 
                 if (drawW > 0 && drawH > 0) {
                     this.ctx.fillStyle = this.heatColor(intensity);
-                    this.ctx.fillRect(drawX, drawY, drawW, drawH);
+                    this.ctx.fillRect(drawX1, drawY1, drawW, drawH);
 
                     // Store the rendered cell bounds for accurate hit testing
                     this.renderedCells.push({
-                        x1: drawX,
-                        y1: drawY,
-                        x2: drawX + drawW,
-                        y2: drawY + drawH,
+                        x1: drawX1,
+                        y1: drawY1,
+                        x2: drawX2,
+                        y2: drawY2,
                         count: count,
                         cellIdx: idx,
                         timeIdx: t,
