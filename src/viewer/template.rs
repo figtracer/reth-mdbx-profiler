@@ -64,20 +64,20 @@ pub fn generate_html(data: &ViewerData) -> String {
                     </div>
                 </div>
 
-                <!-- Fault Timeline (full width) -->
-                <div class="card" style="margin-bottom: 16px;">
-                    <div class="card-header">Fault Timeline <span class="axis-hint">(drag to zoom, dbl-click to reset)</span></div>
-                    <div class="card-body uplot-container" id="timeline-chart">
-                    </div>
-                </div>
-
-                <!-- Access Heatmap (full width, larger) -->
+                <!-- Access Heatmap (full width, larger) - on top for correlation with timeline -->
                 <div class="card" style="margin-bottom: 16px;">
                     <div class="card-header">Access Heatmap <span class="axis-hint">(drag to zoom, dbl-click to reset)</span></div>
                     <div class="card-body heatmap-container" style="position: relative;">
                         <canvas id="heatmap-canvas"></canvas>
                         <div id="heatmap-tooltip" class="chart-tooltip" style="display: none;"></div>
                         <div id="heatmap-selection" class="heatmap-selection" style="display: none;"></div>
+                    </div>
+                </div>
+
+                <!-- Fault Timeline (full width) -->
+                <div class="card" style="margin-bottom: 16px;">
+                    <div class="card-header">Fault Timeline <span class="axis-hint">(drag to zoom, dbl-click to reset)</span></div>
+                    <div class="card-body uplot-container" id="timeline-chart">
                     </div>
                 </div>
 
@@ -1458,6 +1458,8 @@ function createUPlotChart(container, data, opts = {}) {
     const uplotOpts = {
         width,
         height,
+        // Padding to align with heatmap: { t: 25, r: 20, b: 45, l: 63 }
+        padding: [25, 20, 0, 0], // top, right, bottom (handled by axis), left (handled by axis)
         cursor: {
             show: true,
             x: true,
@@ -1477,6 +1479,7 @@ function createUPlotChart(container, data, opts = {}) {
                 grid: { stroke: '#1e1e2a', width: 1 },
                 ticks: { stroke: '#1e1e2a', width: 1 },
                 font: '11px sans-serif',
+                size: 45, // Bottom axis height to match heatmap
                 values: (u, vals) => vals.map(v => {
                     if (v < 60) return v.toFixed(0) + 's';
                     return (v / 60).toFixed(1) + 'm';
@@ -1487,7 +1490,7 @@ function createUPlotChart(container, data, opts = {}) {
                 grid: { stroke: '#1e1e2a', width: 1 },
                 ticks: { stroke: '#1e1e2a', width: 1 },
                 font: '11px sans-serif',
-                size: 55,
+                size: 63, // Left axis width to match heatmap
                 values: (u, vals) => vals.map(v => {
                     if (v >= 1e6) return (v/1e6).toFixed(1) + 'M';
                     if (v >= 1e3) return (v/1e3).toFixed(1) + 'K';
@@ -1820,7 +1823,9 @@ class InteractiveHeatmap {
         // Interaction state
         this.isDragging = false;
         this.dragStart = null;
-        this.pad = { t: 30, r: 30, b: 50, l: 70 };
+        // Padding matches uPlot's layout for alignment
+        // uPlot Y-axis size is 55px, plus internal margins ~5-8px
+        this.pad = { t: 25, r: 20, b: 45, l: 63 };
 
         this.setupCanvas();
         this.setupEvents();
@@ -1903,34 +1908,82 @@ class InteractiveHeatmap {
             return;
         }
 
-        const dataPos = this.posToData(pos);
-        const cellInfo = this.getCellAt(dataPos.time, dataPos.offset);
-
+        const cellInfo = this.getCellAtPixel(pos);
         if (cellInfo) {
+            // Use the cell's actual data coordinates for display
+            const dataPos = {
+                time: (cellInfo.bucketTimeMin + cellInfo.bucketTimeMax) / 2,
+                offset: (cellInfo.bucketOffsetMin + cellInfo.bucketOffsetMax) / 2
+            };
             this.showTooltip(pos, dataPos, cellInfo);
         } else {
             this.hideTooltip();
         }
     }
 
-    getCellAt(time, offset) {
-        const { time_buckets, offset_buckets, data: cells, max_count } = this.data;
+    getCellAtPixel(pos) {
+        // Find which cell is drawn at this pixel position
+        // This matches the draw() logic exactly to avoid mismatches
+        const { time_buckets, offset_buckets, data: cells } = this.data;
 
-        // Map time/offset to bucket indices (in full data space)
+        const chartW = this.w - this.pad.l - this.pad.r;
+        const chartH = this.h - this.pad.t - this.pad.b;
+
         const fullTimeRange = this.fullTimeMax - this.fullTimeMin;
         const fullOffsetRange = this.fullOffsetMax - this.fullOffsetMin;
+        const viewTimeRange = this.viewTimeMax - this.viewTimeMin;
+        const viewOffsetRange = this.viewOffsetMax - this.viewOffsetMin;
 
-        if (fullTimeRange <= 0 || fullOffsetRange <= 0) return null;
-
-        const timeIdx = Math.floor(((time - this.fullTimeMin) / fullTimeRange) * time_buckets);
-        const offsetIdx = Math.floor(((offset - this.fullOffsetMin) / fullOffsetRange) * offset_buckets);
-
-        if (timeIdx < 0 || timeIdx >= time_buckets || offsetIdx < 0 || offsetIdx >= offset_buckets) {
+        if (fullTimeRange <= 0 || fullOffsetRange <= 0 || viewTimeRange <= 0 || viewOffsetRange <= 0) {
             return null;
         }
 
-        const cellIdx = timeIdx * offset_buckets + offsetIdx;
-        return { count: cells[cellIdx] || 0, timeIdx, offsetIdx, cellIdx };
+        // Convert pixel to view coordinates
+        const relX = (pos.x - this.pad.l) / chartW;
+        const relY = (pos.y - this.pad.t) / chartH;
+
+        // View data coordinates
+        const viewTime = this.viewTimeMin + relX * viewTimeRange;
+        const viewOffset = this.viewOffsetMax - relY * viewOffsetRange;
+
+        // Find which bucket range is visible
+        const startTimeBucket = Math.floor(((this.viewTimeMin - this.fullTimeMin) / fullTimeRange) * time_buckets);
+        const endTimeBucket = Math.ceil(((this.viewTimeMax - this.fullTimeMin) / fullTimeRange) * time_buckets);
+        const startOffsetBucket = Math.floor(((this.viewOffsetMin - this.fullOffsetMin) / fullOffsetRange) * offset_buckets);
+        const endOffsetBucket = Math.ceil(((this.viewOffsetMax - this.fullOffsetMin) / fullOffsetRange) * offset_buckets);
+
+        // Search through visible buckets to find which one contains this pixel
+        // This matches the draw() logic exactly
+        for (let t = Math.max(0, startTimeBucket); t < Math.min(time_buckets, endTimeBucket); t++) {
+            const bucketTimeMin = this.fullTimeMin + (t / time_buckets) * fullTimeRange;
+            const bucketTimeMax = this.fullTimeMin + ((t + 1) / time_buckets) * fullTimeRange;
+
+            // Check if this time bucket contains the hovered time
+            if (viewTime < bucketTimeMin || viewTime >= bucketTimeMax) continue;
+
+            for (let o = Math.max(0, startOffsetBucket); o < Math.min(offset_buckets, endOffsetBucket); o++) {
+                const bucketOffsetMin = this.fullOffsetMin + (o / offset_buckets) * fullOffsetRange;
+                const bucketOffsetMax = this.fullOffsetMin + ((o + 1) / offset_buckets) * fullOffsetRange;
+
+                // Check if this offset bucket contains the hovered offset
+                if (viewOffset < bucketOffsetMin || viewOffset >= bucketOffsetMax) continue;
+
+                // Found the cell
+                const cellIdx = t * offset_buckets + o;
+                return {
+                    count: cells[cellIdx] || 0,
+                    timeIdx: t,
+                    offsetIdx: o,
+                    cellIdx,
+                    bucketTimeMin,
+                    bucketTimeMax,
+                    bucketOffsetMin,
+                    bucketOffsetMax
+                };
+            }
+        }
+
+        return null;
     }
 
     getAttribution(cellIdx) {
