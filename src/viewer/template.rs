@@ -1882,18 +1882,29 @@ function initPlotlyHeatmap(container, data, timelineData, durationSecs) {
 
     const traces = [heatmapTrace];
 
-    // Add fault timeline as overlay - use actual time_ms from data
-    if (timelineData && timelineData.length > 0) {
+    // Add fault timeline as area overlay at bottom of chart
+    // Aggregate heatmap columns to get fault rate per time bucket (more accurate than separate timeline)
+    if (time_buckets > 0 && offset_buckets > 0) {
         const timelineX = [];
         const timelineY = [];
-        const maxFaults = Math.max(...timelineData.map(t => t.faults));
 
-        for (let i = 0; i < timelineData.length; i++) {
-            // Use actual time from data (time_ms field), convert to seconds
-            const timeSecs = timelineData[i].time_ms / 1000;
-            timelineX.push(timeSecs);
-            // Normalize faults to offset range for overlay (map to y-axis range)
-            const normalizedY = min_offset_gb + (timelineData[i].faults / maxFaults) * offsetRange * 0.9;
+        // Sum faults per time column from heatmap data
+        const columnSums = [];
+        for (let t = 0; t < time_buckets; t++) {
+            let sum = 0;
+            for (let o = 0; o < offset_buckets; o++) {
+                sum += z[o][t];
+            }
+            columnSums.push(sum);
+        }
+
+        const maxSum = Math.max(...columnSums, 1);
+
+        for (let t = 0; t < time_buckets; t++) {
+            const time = min_time_ms + (t + 0.5) * timeRange / time_buckets;
+            timelineX.push(time / 1000);  // Same X as heatmap
+            // Scale to bottom 30% of chart
+            const normalizedY = min_offset_gb + (columnSums[t] / maxSum) * offsetRange * 0.3;
             timelineY.push(normalizedY);
         }
 
@@ -1904,13 +1915,13 @@ function initPlotlyHeatmap(container, data, timelineData, durationSecs) {
             mode: 'lines',
             name: 'Fault Rate',
             line: {
-                color: 'rgba(251, 146, 60, 0.12)',  // Orange, slightly more visible
-                width: 1.5
+                color: 'rgba(251, 146, 60, 0.25)',
+                width: 1
             },
             fill: 'tozeroy',
-            fillcolor: 'rgba(251, 146, 60, 0.08)',  // Subtle fill
-            hoverinfo: 'skip',  // Don't show hover for timeline
-            yaxis: 'y'  // Use same y-axis
+            fillcolor: 'rgba(251, 146, 60, 0.1)',
+            hoverinfo: 'skip',
+            yaxis: 'y'
         };
 
         traces.push(timelineTrace);
