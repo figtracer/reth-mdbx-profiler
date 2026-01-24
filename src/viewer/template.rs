@@ -26,7 +26,6 @@ pub fn generate_html(data: &ViewerData) -> String {
     <div id="app">
         <nav class="tabs">
             <button class="tab active" data-tab="overview">Overview</button>
-            <button class="tab" data-tab="tables">Tables</button>
             <button class="tab" data-tab="resources">Resources</button>
             <button class="export-btn" id="export-compact-btn" title="Download JSON for analysis">Export</button>
         </nav>
@@ -105,88 +104,37 @@ pub fn generate_html(data: &ViewerData) -> String {
                         </div>
                     </div>
                 </div>
-            </section>
 
-            <!-- TABLES TAB -->
-            <section id="tables" class="panel">
-                <div id="tables-no-data" class="no-data" style="display:none;">
-                    No table data. Run with <code>--trace-cursors</code> for full attribution.
+                <!-- Section separator -->
+                <div class="section-separator">
+                    <span class="separator-label">Table Analysis</span>
                 </div>
 
+                <!-- Tables section (merged from Tables tab) -->
                 <div id="tables-content">
-                    <!-- Summary metrics row -->
-                    <div class="metrics-row">
-                        <div class="metric">
-                            <span class="metric-value" id="tables-total-faults">0</span>
-                            <span class="metric-label">Total Faults</span>
-                        </div>
-                        <div class="metric">
-                            <span class="metric-value" id="tables-io-time">0ms</span>
-                            <span class="metric-label">I/O Time Lost</span>
-                        </div>
-                        <div class="metric">
-                            <span class="metric-value" id="tables-hottest">-</span>
-                            <span class="metric-label">Hottest Table</span>
-                        </div>
-                        <div class="metric">
-                            <span class="metric-value" id="tables-count">0</span>
-                            <span class="metric-label">Tables Traced</span>
-                        </div>
+                    <div id="tables-no-data" class="no-data" style="display:none;">
+                        No table data. Run with <code>--trace-cursors</code> for full attribution.
                     </div>
 
-                    <!-- Attribution badge -->
-                    <div class="attribution-header" id="tables-attribution-header">
-                        <span class="card-badge direct-badge">Direct BPF Attribution</span>
-                        <span class="attribution-summary" id="tables-attribution-summary"></span>
-                    </div>
-
-                    <!-- CPU Profile Summary -->
-                    <div class="cpu-profile-banner" id="cpu-profile-banner" style="display:none;">
-                        <span class="cpu-profile-bottleneck" id="cpu-bottleneck">-</span>
-                        <span class="cpu-profile-detail" id="cpu-profile-detail"></span>
-                    </div>
-
-                    <!-- Fault distribution and I/O breakdown side by side -->
-                    <div class="two-col" id="fault-dist-row" style="display:none;">
-                        <div class="card" id="fault-dist-card">
-                            <div class="card-header">
-                                Fault Distribution
-                                <span class="chart-legend">
-                                    <span class="legend-item"><span class="legend-swatch minor-swatch"></span>Minor</span>
-                                    <span class="legend-item"><span class="legend-swatch major-swatch"></span>Major</span>
-                                </span>
-                            </div>
-                            <div class="card-body" style="padding: 12px 16px;">
-                                <canvas id="fault-dist-chart"></canvas>
-                            </div>
-                        </div>
-                        <div class="card" id="io-breakdown-card">
-                            <div class="card-header">I/O Time Breakdown</div>
-                            <div class="card-body" style="padding: 12px 16px;">
-                                <canvas id="io-time-chart"></canvas>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Detailed table with expandable rows showing top 5 operations -->
+                    <!-- Sortable table -->
                     <div class="card full-width">
                         <div class="card-header">
                             Tables
-                            <span class="card-hint">Click row to expand details</span>
+                            <span class="card-hint">Click column headers to sort, click row to expand</span>
                         </div>
                         <div class="card-body compact-table-container" style="max-height: none; padding: 0;">
-                            <table class="compact-table expandable-table" id="unified-tables">
+                            <table class="compact-table expandable-table sortable-table" id="unified-tables">
                                 <thead>
                                     <tr>
                                         <th style="width:30px;"></th>
-                                        <th>Table</th>
-                                        <th>Faults</th>
-                                        <th>Major %</th>
-                                        <th>B:L Ratio</th>
-                                        <th>Working Set</th>
-                                        <th>Reuse %</th>
-                                        <th>I/O Time</th>
-                                        <th>CPU %</th>
+                                        <th data-sort="name">Table</th>
+                                        <th data-sort="faults" class="sortable sorted-desc">Faults <span class="sort-icon">▼</span></th>
+                                        <th data-sort="major_pct" class="sortable">Major %</th>
+                                        <th data-sort="bl_ratio" class="sortable">B:L Ratio</th>
+                                        <th data-sort="working_set" class="sortable">Working Set</th>
+                                        <th data-sort="reuse" class="sortable">Reuse %</th>
+                                        <th data-sort="io_time" class="sortable">I/O Time</th>
+                                        <th data-sort="cpu" class="sortable">CPU %</th>
                                     </tr>
                                 </thead>
                                 <tbody></tbody>
@@ -195,6 +143,9 @@ pub fn generate_html(data: &ViewerData) -> String {
                     </div>
                 </div>
             </section>
+
+            <!-- Hidden Tables tab for compatibility (data still loads here) -->
+            <section id="tables" class="panel" style="display:none;"></section>
 
             <!-- RESOURCES TAB - Compact layout -->
             <section id="resources" class="panel">
@@ -481,6 +432,30 @@ body {
     }
 }
 
+/* Section separator */
+.section-separator {
+    display: flex;
+    align-items: center;
+    margin: 24px 0 16px 0;
+    gap: 16px;
+}
+
+.section-separator::before,
+.section-separator::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, #2a2a3a, transparent);
+}
+
+.separator-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: #52525b;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
 /* Section headers for Resources tab */
 .section-header {
     font-size: 14px;
@@ -491,6 +466,28 @@ body {
     margin-bottom: 12px;
     padding-bottom: 8px;
     border-bottom: 1px solid #1e1e2a;
+}
+
+/* Sortable table headers */
+.sortable-table th.sortable {
+    cursor: pointer;
+    user-select: none;
+    transition: color 0.15s;
+}
+
+.sortable-table th.sortable:hover {
+    color: #60a5fa;
+}
+
+.sortable-table th.sorted-asc,
+.sortable-table th.sorted-desc {
+    color: #60a5fa;
+}
+
+.sortable-table .sort-icon {
+    font-size: 10px;
+    margin-left: 4px;
+    opacity: 0.7;
 }
 
 /* Two column layout */
@@ -2327,8 +2324,10 @@ function initTab(name) {
     if (initialized[name]) return;
     initialized[name] = true;
 
-    if (name === 'overview') initOverview();
-    else if (name === 'tables') initTables();
+    if (name === 'overview') {
+        initOverview();
+        initTables();  // Tables are now part of overview
+    }
     else if (name === 'resources') initResources();
 }
 
@@ -2468,9 +2467,12 @@ function initResourcesMemory() {
 
 }
 
+// Global state for table sorting
+let tablesSortColumn = 'faults';
+let tablesSortDesc = true;
+
 function initTables() {
     const unified = DATA.unified_tables;
-    const dfa = DATA.direct_fault_attribution;
 
     if (!unified || unified.length === 0) {
         document.getElementById('tables-no-data').style.display = 'block';
@@ -2478,119 +2480,100 @@ function initTables() {
         return;
     }
 
-    // Populate summary cards
-    const totalFaults = unified.reduce((sum, t) => sum + t.faults, 0);
-    const totalIO = unified.reduce((sum, t) => sum + t.time_lost_ms, 0);
-    const hottest = unified[0];
+    // Initial render
+    renderTablesTable(unified);
 
-    document.getElementById('tables-total-faults').textContent = fmt(totalFaults);
-    document.getElementById('tables-io-time').textContent = totalIO >= 1000
-        ? (totalIO / 1000).toFixed(1) + 's'
-        : totalIO.toFixed(0) + 'ms';
-    document.getElementById('tables-hottest').textContent = hottest ? hottest.name : '-';
-    document.getElementById('tables-count').textContent = unified.length;
+    // Setup sortable column headers
+    document.querySelectorAll('#unified-tables th.sortable, #unified-tables th[data-sort]').forEach(th => {
+        th.style.cursor = 'pointer';
+        th.addEventListener('click', () => {
+            const sortKey = th.dataset.sort;
+            if (!sortKey || sortKey === 'name') return; // Don't sort by name or expand column
 
-    // Attribution summary
-    if (dfa && dfa.has_data) {
-        const total = dfa.directly_attributed_count + dfa.timestamp_fallback_count + dfa.uncorrelated_count;
-        const directPct = (dfa.directly_attributed_count / total * 100).toFixed(1);
-        document.getElementById('tables-attribution-summary').innerHTML =
-            `<strong>${fmt(dfa.directly_attributed_count)}</strong> directly attributed (${directPct}%) · ` +
-            `${fmt(dfa.uncorrelated_count)} uncorrelated`;
-    }
+            // Toggle direction if same column, else default to desc
+            if (tablesSortColumn === sortKey) {
+                tablesSortDesc = !tablesSortDesc;
+            } else {
+                tablesSortColumn = sortKey;
+                tablesSortDesc = true;
+            }
 
-    // CPU Profile summary
-    const cpu = DATA.cpu_profile;
-    if (cpu && cpu.has_data) {
-        document.getElementById('cpu-profile-banner').style.display = 'flex';
-
-        const bottleneckEl = document.getElementById('cpu-bottleneck');
-        bottleneckEl.textContent = cpu.bottleneck;
-        bottleneckEl.className = 'cpu-profile-bottleneck' +
-            (cpu.cpu_efficiency < 0.5 ? ' io-bound' : (cpu.cpu_efficiency > 0.8 ? ' cpu-bound' : ''));
-
-        const fmtTime = (ms) => ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : ms.toFixed(0) + 'ms';
-        document.getElementById('cpu-profile-detail').textContent =
-            `CPU: ${fmtTime(cpu.total_cpu_time_ms)} · I/O Wait: ${fmtTime(cpu.total_io_wait_ms)} · Efficiency: ${(cpu.cpu_efficiency * 100).toFixed(1)}%`;
-    }
-
-    // Draw fault distribution and I/O time charts
-    if (unified.length > 0) {
-        document.getElementById('fault-dist-row').style.display = 'grid';
-
-        // Defer chart drawing to ensure panel is visible and has dimensions
-        // Use requestAnimationFrame to wait for layout, then draw
-        requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-                // Fault distribution chart (top 8 by faults, sorted descending)
-                const faultCanvas = document.getElementById('fault-dist-chart');
-                if (faultCanvas) {
-                    const topByFaults = [...unified]
-                        .sort((a, b) => b.faults - a.faults)
-                        .slice(0, 8);
-                    drawFaultDistChart(faultCanvas,
-                        topByFaults.map(t => t.name),
-                        topByFaults.map(t => t.faults),
-                        topByFaults.map(t => t.major_faults)
-                    );
-                }
-
-                // I/O time chart (top 8 by time lost, filtered to those with actual I/O time)
-                const ioCanvas = document.getElementById('io-time-chart');
-                if (ioCanvas) {
-                    const topByIO = unified.filter(t => t.time_lost_ms > 0)
-                        .sort((a, b) => b.time_lost_ms - a.time_lost_ms)
-                        .slice(0, 8);
-                    if (topByIO.length > 0) {
-                        drawIOTimeChart(ioCanvas,
-                            topByIO.map(t => t.name),
-                            topByIO.map(t => t.time_lost_ms),
-                            topByIO.map(t => t.slow_ops)
-                        );
-                    }
-                }
+            // Update header styles
+            document.querySelectorAll('#unified-tables th').forEach(h => {
+                h.classList.remove('sorted-asc', 'sorted-desc');
+                const icon = h.querySelector('.sort-icon');
+                if (icon) icon.remove();
             });
+            th.classList.add(tablesSortDesc ? 'sorted-desc' : 'sorted-asc');
+            th.innerHTML = th.textContent.trim() + ` <span class="sort-icon">${tablesSortDesc ? '▼' : '▲'}</span>`;
+
+            // Re-render table
+            renderTablesTable(unified);
         });
-    }
+    });
+}
 
-    // Build unified table with expandable rows
+function renderTablesTable(unified) {
     const tbody = document.querySelector('#unified-tables tbody');
+    tbody.innerHTML = '';
 
-    unified.forEach((t, idx) => {
+    // Prepare sortable data
+    const tableData = unified.map((t, originalIdx) => {
+        const treeTable = DATA.tree_traversal?.tables?.find(tt => tt.name === t.name);
+        const wsTable = DATA.working_set?.per_table?.find(wt => wt.name === t.name);
+        return {
+            ...t,
+            originalIdx,
+            majorPct: t.faults > 0 ? t.major_faults / t.faults * 100 : 0,
+            blRatio: treeTable ? treeTable.branch_leaf_ratio : -1,
+            workingSetNum: wsTable ? wsTable.unique_pages : 0,
+            reusePct: wsTable ? wsTable.reuse_ratio * 100 : 0,
+            cpuPct: t.cpu_efficiency * 100
+        };
+    });
+
+    // Sort
+    tableData.sort((a, b) => {
+        let aVal, bVal;
+        switch (tablesSortColumn) {
+            case 'faults': aVal = a.faults; bVal = b.faults; break;
+            case 'major_pct': aVal = a.majorPct; bVal = b.majorPct; break;
+            case 'bl_ratio': aVal = a.blRatio; bVal = b.blRatio; break;
+            case 'working_set': aVal = a.workingSetNum; bVal = b.workingSetNum; break;
+            case 'reuse': aVal = a.reusePct; bVal = b.reusePct; break;
+            case 'io_time': aVal = a.time_lost_ms; bVal = b.time_lost_ms; break;
+            case 'cpu': aVal = a.cpuPct; bVal = b.cpuPct; break;
+            default: aVal = a.faults; bVal = b.faults;
+        }
+        return tablesSortDesc ? bVal - aVal : aVal - bVal;
+    });
+
+    // Render rows
+    tableData.forEach((t, idx) => {
         // Main row
         const tr = document.createElement('tr');
         tr.className = 'table-row';
-        tr.dataset.idx = idx;
+        tr.dataset.idx = t.originalIdx;
 
         const ioTime = t.time_lost_ms >= 1000
             ? (t.time_lost_ms / 1000).toFixed(1) + 's'
             : t.time_lost_ms.toFixed(0) + 'ms';
 
-        const majorPct = t.faults > 0 ? (t.major_faults / t.faults * 100).toFixed(1) : '0.0';
-
-        // Get B:L ratio from tree_traversal data
-        const treeTable = DATA.tree_traversal?.tables?.find(tt => tt.name === t.name);
-        const blRatio = treeTable ? treeTable.branch_leaf_ratio.toFixed(2) : '-';
-
-        // Get working set from working_set data
-        const wsTable = DATA.working_set?.per_table?.find(wt => wt.name === t.name);
-        const workingSet = wsTable ? fmt(wsTable.unique_pages) : '-';
-        const reusePct = wsTable ? (wsTable.reuse_ratio * 100).toFixed(1) + '%' : '-';
-
-        // CPU efficiency: higher = more CPU bound, lower = more I/O bound
-        const cpuPct = (t.cpu_efficiency * 100).toFixed(1);
+        const blRatioStr = t.blRatio >= 0 ? t.blRatio.toFixed(2) : '-';
+        const workingSet = t.workingSetNum > 0 ? fmt(t.workingSetNum) : '-';
+        const reusePctStr = t.workingSetNum > 0 ? t.reusePct.toFixed(1) + '%' : '-';
         const cpuClass = t.is_io_bound ? 'io-bound' : (t.cpu_efficiency > 0.8 ? 'cpu-bound' : '');
 
         tr.innerHTML = `
             <td><span class="expand-icon">▶</span></td>
             <td>${t.name}</td>
             <td>${fmt(t.faults)}</td>
-            <td>${majorPct}%</td>
-            <td>${blRatio}</td>
+            <td>${t.majorPct.toFixed(1)}%</td>
+            <td>${blRatioStr}</td>
             <td>${workingSet}</td>
-            <td>${reusePct}</td>
+            <td>${reusePctStr}</td>
             <td class="io-time">${t.time_lost_ms > 0 ? ioTime : '-'}</td>
-            <td class="${cpuClass}">${t.total_wall_time_ms > 0 ? cpuPct + '%' : '-'}</td>
+            <td class="${cpuClass}">${t.total_wall_time_ms > 0 ? t.cpuPct.toFixed(1) + '%' : '-'}</td>
         `;
         tbody.appendChild(tr);
 
