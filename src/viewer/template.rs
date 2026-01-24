@@ -74,12 +74,7 @@ pub fn generate_html(data: &ViewerData) -> String {
                     </div>
                 </div>
 
-                <!-- Fault Timeline (full width) -->
-                <div class="card" style="margin-bottom: 16px;">
-                    <div class="card-header">Fault Timeline <span class="axis-hint">(drag to zoom, dbl-click to reset)</span></div>
-                    <div class="card-body uplot-container" id="timeline-chart">
-                    </div>
-                </div>
+
 
                 <!-- Access Patterns -->
                 <div class="two-col">
@@ -1914,11 +1909,11 @@ function initPlotlyHeatmap(container, data, timelineData, durationSecs) {
             mode: 'lines',
             name: 'Fault Rate',
             line: {
-                color: 'rgba(251, 146, 60, 0.5)',  // Orange with 50% opacity
-                width: 2
+                color: 'rgba(251, 146, 60, 0.25)',  // Orange with 25% opacity
+                width: 1.5
             },
             fill: 'tozeroy',
-            fillcolor: 'rgba(251, 146, 60, 0.15)',
+            fillcolor: 'rgba(251, 146, 60, 0.06)',  // Very subtle fill
             hoverinfo: 'skip',  // Don't show hover for timeline
             yaxis: 'y'  // Use same y-axis
         };
@@ -1966,7 +1961,7 @@ function initPlotlyHeatmap(container, data, timelineData, durationSecs) {
     const config = {
         responsive: true,
         displayModeBar: true,
-        modeBarButtonsToRemove: ['lasso2d', 'select2d', 'autoScale2d', 'pan2d'],  // Remove pan
+        modeBarButtonsToRemove: ['lasso2d', 'select2d', 'autoScale2d', 'pan2d', 'zoomIn2d', 'zoomOut2d'],  // Remove pan and zoom buttons
         displaylogo: false,
         doubleClick: 'reset',
         scrollZoom: false  // Disable scroll zoom to prevent accidental panning
@@ -2349,14 +2344,7 @@ function initOverview() {
             fmtBlock(s.block_range.min_block) + ' → ' + fmtBlock(s.block_range.max_block);
     }
 
-    // Timeline (uPlot interactive)
-    if (DATA.timeline.length) {
-        createUPlotChart('timeline-chart', DATA.timeline.map(t => t.faults), {
-            durationSecs: s.duration_secs,
-            color: '#3b82f6',
-            label: 'Faults'
-        });
-    }
+
 
     // Plotly Heatmap with built-in zoom/pan/tooltips and timeline overlay
     if (DATA.heatmap.data.length) {
