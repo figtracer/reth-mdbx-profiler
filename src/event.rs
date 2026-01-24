@@ -570,6 +570,8 @@ pub struct CursorEvent {
     pub max_tree_depth: u32,
     /// Cumulative time spent in fault handlers during this operation (nanoseconds)
     pub fault_latency_ns: u64,
+    /// Cursor pointer (for linking ops to cursor lifecycle, 0 for direct ops)
+    pub cursor_ptr: u64,
 }
 
 // Custom Serialize implementation for CursorEvent since [u8; 64] doesn't impl Serialize
@@ -579,7 +581,7 @@ impl Serialize for CursorEvent {
         S: serde::Serializer,
     {
         use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("CursorEvent", 19)?;
+        let mut state = serializer.serialize_struct("CursorEvent", 20)?;
         state.serialize_field("timestamp_ns", &self.timestamp_ns)?;
         state.serialize_field("pid", &self.pid)?;
         state.serialize_field("tid", &self.tid)?;
@@ -602,6 +604,8 @@ impl Serialize for CursorEvent {
         // B+ tree depth tracking
         state.serialize_field("max_tree_depth", &self.max_tree_depth)?;
         state.serialize_field("fault_latency_ns", &self.fault_latency_ns)?;
+        // Cursor pointer for lifecycle tracking
+        state.serialize_field("cursor_ptr", &self.cursor_ptr)?;
         state.end()
     }
 }
@@ -642,6 +646,8 @@ impl<'de> Deserialize<'de> for CursorEvent {
             max_tree_depth: u32,
             #[serde(default)]
             fault_latency_ns: u64,
+            #[serde(default)]
+            cursor_ptr: u64,
         }
 
         let helper = CursorEventHelper::deserialize(deserializer)?;
@@ -672,6 +678,7 @@ impl<'de> Deserialize<'de> for CursorEvent {
             overflow_faults: helper.overflow_faults,
             max_tree_depth: helper.max_tree_depth,
             fault_latency_ns: helper.fault_latency_ns,
+            cursor_ptr: helper.cursor_ptr,
         })
     }
 }

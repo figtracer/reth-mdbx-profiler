@@ -769,7 +769,7 @@ fn run_trace(
         // We differentiate by checking event_type at both possible offsets
 
         const PAGE_FAULT_EVENT_SIZE: usize = 72;
-        const CURSOR_EVENT_SIZE: usize = 120;
+        const CURSOR_EVENT_SIZE: usize = 128; // 120 + 8 for cursor_ptr
         const TXN_EVENT_SIZE: usize = 56;
         const PAGE_FAULT_EVENT_TYPE_OFFSET: usize = 48;
         const CURSOR_EVENT_TYPE_OFFSET: usize = 16;

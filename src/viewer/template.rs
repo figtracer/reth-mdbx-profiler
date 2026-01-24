@@ -157,12 +157,8 @@ pub fn generate_html(data: &ViewerData) -> String {
                     <div class="metrics-row" style="margin-bottom: 16px;">
                         <div class="metrics-group">
                             <div class="metric">
-                                <span class="metric-label">Cursors Opened</span>
+                                <span class="metric-label">Total Cursors</span>
                                 <span class="metric-value" id="cursor-opens">-</span>
-                            </div>
-                            <div class="metric">
-                                <span class="metric-label">Closed</span>
-                                <span class="metric-value" id="cursor-closes">-</span>
                             </div>
                             <div class="metric">
                                 <span class="metric-label">Avg Lifetime</span>
@@ -180,6 +176,10 @@ pub fn generate_html(data: &ViewerData) -> String {
                                 <span class="metric-label">P99</span>
                                 <span class="metric-value" id="cursor-p99-lifetime">-</span>
                             </div>
+                            <div class="metric">
+                                <span class="metric-label">Avg Ops/Cursor</span>
+                                <span class="metric-value" id="cursor-avg-ops">-</span>
+                            </div>
                         </div>
                     </div>
                     <div class="card full-width">
@@ -192,8 +192,8 @@ pub fn generate_html(data: &ViewerData) -> String {
                                 <thead>
                                     <tr>
                                         <th data-sort="table" class="sortable">Table</th>
-                                        <th data-sort="opens" class="sortable sorted-desc">Opens <span class="sort-icon">▼</span></th>
-                                        <th data-sort="closes" class="sortable">Closes</th>
+                                        <th data-sort="opens" class="sortable sorted-desc">Cursors <span class="sort-icon">▼</span></th>
+                                        <th data-sort="avg_ops" class="sortable">Avg Ops</th>
                                         <th data-sort="avg_lifetime" class="sortable">Avg Lifetime</th>
                                     </tr>
                                 </thead>
@@ -3749,11 +3749,11 @@ function initCursorLifecycle() {
 
     // Populate metrics
     document.getElementById('cursor-opens').textContent = fmt(cl.total_opens);
-    document.getElementById('cursor-closes').textContent = fmt(cl.total_closes);
     document.getElementById('cursor-avg-lifetime').textContent = fmtLifetime(cl.avg_lifetime_us);
     document.getElementById('cursor-p50-lifetime').textContent = fmtLifetime(cl.p50_lifetime_us);
     document.getElementById('cursor-p95-lifetime').textContent = fmtLifetime(cl.p95_lifetime_us);
     document.getElementById('cursor-p99-lifetime').textContent = fmtLifetime(cl.p99_lifetime_us);
+    document.getElementById('cursor-avg-ops').textContent = cl.avg_ops_per_cursor.toFixed(1);
 
     // Initial table render
     renderCursorLifecycleTable(cl.by_table);
@@ -3808,7 +3808,7 @@ function renderCursorLifecycleTable(data) {
         switch (cursorLifecycleSortColumn) {
             case 'table': aVal = a.table; bVal = b.table; break;
             case 'opens': aVal = a.opens; bVal = b.opens; break;
-            case 'closes': aVal = a.closes; bVal = b.closes; break;
+            case 'avg_ops': aVal = a.avg_ops_per_cursor; bVal = b.avg_ops_per_cursor; break;
             case 'avg_lifetime': aVal = a.avg_lifetime_us; bVal = b.avg_lifetime_us; break;
             default: aVal = a.opens; bVal = b.opens;
         }
@@ -3824,7 +3824,7 @@ function renderCursorLifecycleTable(data) {
         row.innerHTML = `
             <td>${t.table}</td>
             <td>${fmt(t.opens)}</td>
-            <td>${fmt(t.closes)}</td>
+            <td>${t.avg_ops_per_cursor.toFixed(1)}</td>
             <td>${fmtLifetime(t.avg_lifetime_us)}</td>
         `;
         tbody.appendChild(row);

@@ -478,6 +478,10 @@ pub struct CursorLifecycleData {
     pub p95_lifetime_us: f64,
     /// 99th percentile cursor lifetime in microseconds
     pub p99_lifetime_us: f64,
+    /// Total operations performed across all cursors
+    pub total_ops: u64,
+    /// Average operations per cursor
+    pub avg_ops_per_cursor: f64,
     /// Per-table cursor lifecycle statistics
     pub by_table: Vec<CursorLifecycleTableStats>,
 }
@@ -495,6 +499,10 @@ pub struct CursorLifecycleTableStats {
     pub closes: u64,
     /// Average cursor lifetime in microseconds (for this table)
     pub avg_lifetime_us: f64,
+    /// Total operations performed by cursors on this table
+    pub total_ops: u64,
+    /// Average operations per cursor for this table
+    pub avg_ops_per_cursor: f64,
 }
 
 /// Statistics for slow operations (>100μs) per table

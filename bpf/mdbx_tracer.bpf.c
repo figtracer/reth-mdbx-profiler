@@ -132,6 +132,7 @@ struct cursor_event {
     __u32 overflow_faults;        // Faults on overflow pages (large values)
     __u32 max_tree_depth;         // Maximum B+ tree depth observed (branch faults before first leaf)
     __u64 fault_latency_ns;       // Cumulative time spent in fault handlers
+    __u64 cursor_ptr;             // Cursor pointer (for linking ops to cursor lifecycle)
 };
 
 // Transaction event sent to userspace
@@ -186,6 +187,7 @@ struct cursor_context {
     __u32 value_size;        // Value size (for put operations)
     __u32 write_flags;       // Write flags (for put operations)
     __u8  key_data[MAX_KEY_SIZE];  // Key data
+    __u64 cursor_ptr;        // Cursor pointer for lifecycle tracking
 };
 
 // Context for correlating uprobe entry with uretprobe return for cursor put ops
@@ -198,6 +200,7 @@ struct cursor_put_context {
     __u32 value_size;        // Value size
     __u32 write_flags;       // Write flags (UPSERT, APPEND, etc.)
     __u8  key_data[MAX_KEY_SIZE];  // Key data
+    __u64 cursor_ptr;        // Cursor pointer for lifecycle tracking
 };
 
 // Context for correlating uprobe entry with uretprobe return for cursor del ops
@@ -207,6 +210,7 @@ struct cursor_del_context {
     __u32 tid;
     __u32 dbi;               // Database index
     __u32 write_flags;       // Delete flags (CURRENT, NO_DUP_DATA)
+    __u64 cursor_ptr;        // Cursor pointer for lifecycle tracking
 };
 
 // Context for transaction begin operations
@@ -854,6 +858,7 @@ int BPF_UPROBE(trace_cursor_get, void *cursor, struct mdbx_val *key,
     }
 
     __u64 now = bpf_ktime_get_ns();
+    __u64 cursor_addr = cursor ? (__u64)cursor : 0;
 
     // Build cursor context (named cctx to avoid conflict with BPF_UPROBE's ctx)
     struct cursor_context cctx = {
@@ -863,6 +868,7 @@ int BPF_UPROBE(trace_cursor_get, void *cursor, struct mdbx_val *key,
         .cursor_op = op,
         .dbi = 0,  // Will try to read from cursor struct
         .key_size = 0,
+        .cursor_ptr = cursor_addr,
     };
 
     // Look up the DBI from cursor_to_dbi map (populated by mdbx_cursor_open uprobe)
@@ -1046,6 +1052,9 @@ int BPF_URETPROBE(trace_cursor_get_ret, int ret)
         e->max_tree_depth = 0;
         e->fault_latency_ns = 0;
     }
+
+    // Copy cursor pointer for lifecycle tracking
+    e->cursor_ptr = cctx->cursor_ptr;
 
     bpf_ringbuf_submit(e, 0);
 
@@ -1327,6 +1336,9 @@ int BPF_URETPROBE(trace_direct_get_ret, int ret)
         e->fault_latency_ns = 0;
     }
 
+    // Direct get has no cursor
+    e->cursor_ptr = 0;
+
     bpf_ringbuf_submit(e, 0);
 
     // Clean up
@@ -1361,6 +1373,7 @@ int BPF_UPROBE(trace_cursor_put, void *cursor, struct mdbx_val *key,
     inc_stat(STAT_CURSOR_PUTS);
 
     __u64 now = bpf_ktime_get_ns();
+    __u64 cursor_addr = cursor ? (__u64)cursor : 0;
 
     struct cursor_put_context pctx = {
         .timestamp_ns = now,
@@ -1370,11 +1383,11 @@ int BPF_UPROBE(trace_cursor_put, void *cursor, struct mdbx_val *key,
         .key_size = 0,
         .value_size = 0,
         .write_flags = flags,
+        .cursor_ptr = cursor_addr,
     };
 
     // Look up the DBI from cursor_to_dbi map
     if (cursor) {
-        __u64 cursor_addr = (__u64)cursor;
         __u32 *dbi_ptr = bpf_map_lookup_elem(&cursor_to_dbi, &cursor_addr);
         if (dbi_ptr) {
             pctx.dbi = *dbi_ptr;
@@ -1499,6 +1512,8 @@ int BPF_URETPROBE(trace_cursor_put_ret, int ret)
         e->fault_latency_ns = 0;
     }
 
+    e->cursor_ptr = pctx->cursor_ptr;
+
     bpf_ringbuf_submit(e, 0);
     bpf_map_delete_elem(&pending_cursor_puts, &pid_tgid);
     bpf_map_delete_elem(&op_fault_stats_map, &pid_tgid);
@@ -1528,6 +1543,7 @@ int BPF_UPROBE(trace_cursor_del, void *cursor, __u32 flags)
     inc_stat(STAT_CURSOR_DELS);
 
     __u64 now = bpf_ktime_get_ns();
+    __u64 cursor_addr = cursor ? (__u64)cursor : 0;
 
     struct cursor_del_context dctx = {
         .timestamp_ns = now,
@@ -1535,11 +1551,11 @@ int BPF_UPROBE(trace_cursor_del, void *cursor, __u32 flags)
         .tid = (__u32)pid_tgid,
         .dbi = 0,
         .write_flags = flags,
+        .cursor_ptr = cursor_addr,
     };
 
     // Look up the DBI from cursor_to_dbi map
     if (cursor) {
-        __u64 cursor_addr = (__u64)cursor;
         __u32 *dbi_ptr = bpf_map_lookup_elem(&cursor_to_dbi, &cursor_addr);
         if (dbi_ptr) {
             dctx.dbi = *dbi_ptr;
@@ -1634,6 +1650,8 @@ int BPF_URETPROBE(trace_cursor_del_ret, int ret)
         e->max_tree_depth = 0;
         e->fault_latency_ns = 0;
     }
+
+    e->cursor_ptr = dctx->cursor_ptr;
 
     bpf_ringbuf_submit(e, 0);
     bpf_map_delete_elem(&pending_cursor_dels, &pid_tgid);
@@ -1991,6 +2009,9 @@ int BPF_URETPROBE(trace_direct_put_ret, int ret)
         e->fault_latency_ns = 0;
     }
 
+    // Direct put has no cursor
+    e->cursor_ptr = 0;
+
     bpf_ringbuf_submit(e, 0);
     bpf_map_delete_elem(&pending_direct_puts, &pid_tgid);
     bpf_map_delete_elem(&op_fault_stats_map, &pid_tgid);
@@ -2130,6 +2151,9 @@ int BPF_URETPROBE(trace_direct_del_ret, int ret)
         e->max_tree_depth = 0;
         e->fault_latency_ns = 0;
     }
+
+    // Direct del has no cursor
+    e->cursor_ptr = 0;
 
     bpf_ringbuf_submit(e, 0);
     bpf_map_delete_elem(&pending_direct_dels, &pid_tgid);

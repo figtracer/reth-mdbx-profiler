@@ -985,6 +985,11 @@ impl StreamingAggregator {
             return;
         }
 
+        // Track ops per cursor (for lifecycle tracking)
+        if event.cursor_ptr != 0 {
+            *self.cursor_op_counts.entry(event.cursor_ptr).or_insert(0) += 1;
+        }
+
         self.cursor_count += 1;
         let cursor_op = CursorOp::from_raw(event.cursor_op);
 
@@ -1181,10 +1186,16 @@ impl StreamingAggregator {
         } else if event.is_close() {
             self.cursor_close_count += 1;
 
+            // Get op count for this cursor
+            let op_count = self.cursor_op_counts.remove(&event.cursor_ptr).unwrap_or(0);
+
             // Calculate lifetime if we tracked this cursor's open
             if let Some((open_ts, dbi, _tid)) = self.active_cursors.remove(&event.cursor_ptr) {
                 let lifetime_ns = ts.saturating_sub(open_ts);
                 self.cursor_lifetime_sampler.add(lifetime_ns);
+
+                // Track ops-per-cursor histogram
+                *self.ops_per_cursor_histogram.entry(op_count).or_insert(0) += 1;
 
                 // Per-table stats
                 let table_stats = self
@@ -1193,6 +1204,7 @@ impl StreamingAggregator {
                     .or_insert((0, 0, 0, 0));
                 table_stats.1 += 1; // closes
                 table_stats.2 += lifetime_ns; // total_lifetime_ns
+                table_stats.3 += op_count; // total_ops
             } else {
                 // Cursor was opened before tracing started - still count the close
                 let table_stats = self
@@ -1200,6 +1212,7 @@ impl StreamingAggregator {
                     .entry(event.dbi)
                     .or_insert((0, 0, 0, 0));
                 table_stats.1 += 1; // closes
+                table_stats.3 += op_count; // total_ops
             }
         }
     }
@@ -1882,9 +1895,14 @@ impl StreamingAggregator {
         let mut by_table: Vec<CursorLifecycleTableStats> = self
             .cursor_lifecycle_by_table
             .iter()
-            .map(|(&dbi, &(opens, closes, total_lifetime_ns, _ops))| {
+            .map(|(&dbi, &(opens, closes, total_lifetime_ns, total_ops))| {
                 let avg_lifetime_us = if closes > 0 && total_lifetime_ns > 0 {
                     (total_lifetime_ns as f64 / closes as f64) / 1000.0
+                } else {
+                    0.0
+                };
+                let avg_ops_per_cursor = if closes > 0 {
+                    total_ops as f64 / closes as f64
                 } else {
                     0.0
                 };
@@ -1894,12 +1912,22 @@ impl StreamingAggregator {
                     opens,
                     closes,
                     avg_lifetime_us,
+                    total_ops,
+                    avg_ops_per_cursor,
                 }
             })
             .collect();
 
         // Sort by opens descending
         by_table.sort_by(|a, b| b.opens.cmp(&a.opens));
+
+        // Calculate total ops and avg ops per cursor
+        let total_ops: u64 = by_table.iter().map(|t| t.total_ops).sum();
+        let avg_ops_per_cursor = if self.cursor_close_count > 0 {
+            total_ops as f64 / self.cursor_close_count as f64
+        } else {
+            0.0
+        };
 
         CursorLifecycleData {
             has_data: true,
@@ -1910,6 +1938,8 @@ impl StreamingAggregator {
             p50_lifetime_us: p50,
             p95_lifetime_us: p95,
             p99_lifetime_us: p99,
+            total_ops,
+            avg_ops_per_cursor,
             by_table,
         }
     }
