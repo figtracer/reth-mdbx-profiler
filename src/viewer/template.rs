@@ -3628,14 +3628,35 @@ function initResourcesThreads() {
 
     const traces = [];
 
+    // Determine bucket size from data (typically 50ms)
+    const bucketMs = DATA.patterns?.burst?.bucket_ms || 50;
+    const totalBuckets = Math.ceil((durationSecs * 1000) / bucketMs);
+
     // Add traces for each thread (minor faults as area)
     sortedThreads.forEach((thread, idx) => {
         const timeline = thread.timeline || [];
         if (timeline.length === 0) return;
 
-        const x = timeline.map(p => p.time_ms / 60000); // convert to minutes
-        const yMinor = timeline.map(p => p.faults - p.major_faults);
-        const yMajor = timeline.map(p => p.major_faults);
+        // Create a map of time_ms -> data for quick lookup
+        const dataMap = new Map();
+        timeline.forEach(p => dataMap.set(p.time_ms, p));
+
+        // Fill in continuous data with zeros for missing buckets
+        const x = [];
+        const yMinor = [];
+        const yMajor = [];
+        for (let bucket = 0; bucket < totalBuckets; bucket++) {
+            const timeMs = bucket * bucketMs;
+            x.push(timeMs / 60000); // convert to minutes
+            const point = dataMap.get(timeMs);
+            if (point) {
+                yMinor.push(point.faults - point.major_faults);
+                yMajor.push(point.major_faults);
+            } else {
+                yMinor.push(0);
+                yMajor.push(0);
+            }
+        }
 
         // Minor faults (blue area)
         traces.push({
