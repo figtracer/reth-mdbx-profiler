@@ -3633,7 +3633,7 @@ function initResourcesThreads() {
         const timeline = thread.timeline || [];
         if (timeline.length === 0) return;
 
-        const x = timeline.map(p => p.time_ms / 1000); // convert to seconds
+        const x = timeline.map(p => p.time_ms / 60000); // convert to minutes
         const yMinor = timeline.map(p => p.faults - p.major_faults);
         const yMajor = timeline.map(p => p.major_faults);
 
@@ -3645,10 +3645,10 @@ function initResourcesThreads() {
             type: 'scatter',
             mode: 'lines',
             fill: 'tozeroy',
-            fillcolor: 'rgba(96, 165, 250, 0.4)',
-            line: { color: 'rgba(96, 165, 250, 0.8)', width: 1 },
+            fillcolor: 'rgba(96, 165, 250, 0.7)',
+            line: { color: 'rgba(96, 165, 250, 1)', width: 1 },
             yaxis: 'y' + (idx + 1),
-            hovertemplate: 'T' + thread.tid + '<br>Minor: %{y}<br>Time: %{x:.1f}s<extra></extra>',
+            hovertemplate: 'T' + thread.tid + '<br>Minor: %{y}<br>Time: %{x:.2f}m<extra></extra>',
             showlegend: idx === 0
         });
 
@@ -3660,10 +3660,10 @@ function initResourcesThreads() {
             type: 'scatter',
             mode: 'lines',
             fill: 'tozeroy',
-            fillcolor: 'rgba(239, 68, 68, 0.5)',
-            line: { color: 'rgba(239, 68, 68, 0.8)', width: 1 },
+            fillcolor: 'rgba(239, 68, 68, 0.8)',
+            line: { color: 'rgba(239, 68, 68, 1)', width: 1 },
             yaxis: 'y' + (idx + 1),
-            hovertemplate: 'T' + thread.tid + '<br>Major: %{y}<br>Time: %{x:.1f}s<extra></extra>',
+            hovertemplate: 'T' + thread.tid + '<br>Major: %{y}<br>Time: %{x:.2f}m<extra></extra>',
             showlegend: idx === 0
         });
     });
@@ -3671,8 +3671,8 @@ function initResourcesThreads() {
     // Add RW commit markers as vertical lines (shapes)
     const shapes = rwCommits.map(commit => ({
         type: 'line',
-        x0: commit.time_secs,
-        x1: commit.time_secs,
+        x0: commit.time_secs / 60, // convert to minutes
+        x1: commit.time_secs / 60,
         y0: 0,
         y1: 1,
         yref: 'paper',
@@ -3719,14 +3719,19 @@ function initResourcesThreads() {
             tickfont: { size: 10, color: '#71717a' },
             gridcolor: '#1e1e2a',
             linecolor: '#1e1e2a',
-            ticksuffix: 's',
-            range: [0, durationSecs],
+            ticksuffix: 'm',
+            range: [0, durationSecs / 60],
             fixedrange: false
         },
         ...yaxes,
         shapes: shapes,
         annotations: annotations,
-        hovermode: 'x unified',
+        hovermode: 'closest',
+        hoverlabel: {
+            bgcolor: '#27272a',
+            bordercolor: '#3f3f46',
+            font: { color: '#fafafa', size: 12 }
+        },
         showlegend: false
     };
 
