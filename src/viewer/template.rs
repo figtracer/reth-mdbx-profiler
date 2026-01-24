@@ -3628,16 +3628,66 @@ function initResourcesThreads() {
 
     const traces = [];
 
+    // Determine bucket size from data (typically 50ms)
+    const bucketMs = DATA.patterns?.burst?.bucket_ms || 50;
+    // Downsample if we have too many points - target ~1000 points max per thread
+    const maxPointsPerThread = 1000;
+
     // Add traces for each thread (minor faults as area)
     sortedThreads.forEach((thread, idx) => {
         const timeline = thread.timeline || [];
         if (timeline.length === 0) return;
 
-        // Sort timeline by time and convert to minutes
+        // Sort timeline by time
         const sorted = [...timeline].sort((a, b) => a.time_ms - b.time_ms);
-        const x = sorted.map(p => p.time_ms / 60000);
-        const yMinor = sorted.map(p => p.faults - p.major_faults);
-        const yMajor = sorted.map(p => p.major_faults);
+
+        // Calculate step size for downsampling if needed
+        const step = Math.max(1, Math.floor(sorted.length / maxPointsPerThread));
+
+        // Build continuous data with zeros filled in
+        const x = [];
+        const yMinor = [];
+        const yMajor = [];
+
+        // Add zero at start
+        if (sorted.length > 0) {
+            x.push(0);
+            yMinor.push(0);
+            yMajor.push(0);
+        }
+
+        for (let i = 0; i < sorted.length; i += step) {
+            const curr = sorted[i];
+
+            // If there's a gap from the previous point, add zeros at boundaries
+            if (x.length > 1) {
+                const prevTimeMin = x[x.length - 1];
+                const currTimeMin = curr.time_ms / 60000;
+                const gapMin = currTimeMin - prevTimeMin;
+
+                // If gap is significant (> 2 bucket widths), add zero boundaries
+                if (gapMin > (bucketMs * 2) / 60000) {
+                    // Zero right after previous data
+                    x.push(prevTimeMin + bucketMs / 60000);
+                    yMinor.push(0);
+                    yMajor.push(0);
+                    // Zero right before current data
+                    x.push(currTimeMin - bucketMs / 60000);
+                    yMinor.push(0);
+                    yMajor.push(0);
+                }
+            }
+
+            // Add the actual data point
+            x.push(curr.time_ms / 60000);
+            yMinor.push(curr.faults - curr.major_faults);
+            yMajor.push(curr.major_faults);
+        }
+
+        // Add zero at end
+        x.push(durationSecs / 60);
+        yMinor.push(0);
+        yMajor.push(0);
 
         // Minor faults (blue area)
         traces.push({
