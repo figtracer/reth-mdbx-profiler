@@ -3644,25 +3644,23 @@ function initResourcesThreads() {
         // Calculate step size for downsampling if needed
         const step = Math.max(1, Math.floor(sorted.length / maxPointsPerThread));
 
-        // Build continuous data with zeros filled in
+        // Build data arrays
         const x = [];
         const yMinor = [];
         const yMajor = [];
 
-        // Add zero at start
-        if (sorted.length > 0) {
-            x.push(0);
-            yMinor.push(0);
-            yMajor.push(0);
-        }
-
         for (let i = 0; i < sorted.length; i += step) {
             const curr = sorted[i];
+            const currTimeMin = curr.time_ms / 60000;
 
-            // If there's a gap from the previous point, add zeros at boundaries
-            if (x.length > 1) {
+            // Add zero boundary before this point if there's a gap
+            if (x.length === 0) {
+                // First point - add zero just before it
+                x.push(currTimeMin - bucketMs / 60000);
+                yMinor.push(0);
+                yMajor.push(0);
+            } else {
                 const prevTimeMin = x[x.length - 1];
-                const currTimeMin = curr.time_ms / 60000;
                 const gapMin = currTimeMin - prevTimeMin;
 
                 // If gap is significant (> 2 bucket widths), add zero boundaries
@@ -3679,9 +3677,17 @@ function initResourcesThreads() {
             }
 
             // Add the actual data point
-            x.push(curr.time_ms / 60000);
+            x.push(currTimeMin);
             yMinor.push(curr.faults - curr.major_faults);
             yMajor.push(curr.major_faults);
+        }
+
+        // Add zero after last point
+        if (x.length > 0) {
+            const lastTimeMin = x[x.length - 1];
+            x.push(lastTimeMin + bucketMs / 60000);
+            yMinor.push(0);
+            yMajor.push(0);
         }
 
 
