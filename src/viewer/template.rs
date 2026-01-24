@@ -34,39 +34,42 @@ pub fn generate_html(data: &ViewerData) -> String {
         <main>
             <!-- OVERVIEW TAB -->
             <section id="overview" class="panel active">
-                <!-- Top metrics row -->
+                <!-- Compact metrics row with grouped related data -->
                 <div class="metrics-row">
                     <div class="metric">
-                        <span class="metric-value" id="duration"></span>
                         <span class="metric-label">Duration</span>
+                        <span class="metric-value" id="duration"></span>
                     </div>
                     <div class="metric" id="block-range-metric" style="display:none;">
-                        <span class="metric-value" id="block-range"></span>
                         <span class="metric-label">Blocks</span>
+                        <span class="metric-value" id="block-range"></span>
+                    </div>
+                    <div class="metrics-group">
+                        <div class="metric">
+                            <span class="metric-label">Faults</span>
+                            <span class="metric-value" id="total-faults"></span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-label">Major</span>
+                            <span class="metric-value major" id="major-faults"></span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-label">Minor</span>
+                            <span class="metric-value minor" id="minor-faults"></span>
+                        </div>
                     </div>
                     <div class="metric">
-                        <span class="metric-value" id="total-faults"></span>
-                        <span class="metric-label">Page Faults</span>
-                    </div>
-                    <div class="metric">
-                        <span class="metric-value major" id="major-faults"></span>
-                        <span class="metric-label">Major (Disk)</span>
-                    </div>
-                    <div class="metric">
-                        <span class="metric-value minor" id="minor-faults"></span>
-                        <span class="metric-label">Minor (Cache)</span>
-                    </div>
-                    <div class="metric">
+                        <span class="metric-label">Rate</span>
                         <span class="metric-value" id="fault-rate"></span>
-                        <span class="metric-label">Faults/sec</span>
+                        <span class="metric-unit">/s</span>
                     </div>
                     <div class="metric">
+                        <span class="metric-label">I/O Ratio</span>
                         <span class="metric-value" id="major-ratio"></span>
-                        <span class="metric-label">Major Ratio</span>
                     </div>
                 </div>
 
-                <!-- Access Heatmap (full width, larger) - on top for correlation with timeline -->
+                <!-- Access Heatmap (full width, larger) -->
                 <div class="card" style="margin-bottom: 16px;">
                     <div class="card-header">Access Heatmap <span class="axis-hint">(drag to zoom, dbl-click to reset)</span></div>
                     <div class="card-body heatmap-container" style="position: relative;">
@@ -74,13 +77,11 @@ pub fn generate_html(data: &ViewerData) -> String {
                     </div>
                 </div>
 
-
-
-                <!-- Access Patterns -->
-                <div class="two-col">
-                    <div class="card">
-                        <div class="card-header">Access Pattern</div>
-                        <div class="card-body">
+                <!-- Access Pattern - single card, full width -->
+                <div class="card">
+                    <div class="card-header">Access Pattern</div>
+                    <div class="card-body">
+                        <div class="access-pattern-row">
                             <div class="pattern-section">
                                 <div class="pattern-bar">
                                     <span class="pattern-label">Sequential</span>
@@ -97,18 +98,9 @@ pub fn generate_html(data: &ViewerData) -> String {
                                     <span class="pattern-value" id="rand-ratio"></span>
                                 </div>
                             </div>
-                            <div class="stride-section" id="stride-section" style="margin-top: 16px;">
+                            <div class="stride-section" id="stride-section">
                                 <div class="section-title">Top Stride Patterns</div>
                                 <div id="stride-list"></div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="card">
-                        <div class="card-header">Page Type Distribution</div>
-                        <div class="card-body" style="padding: 16px;">
-                            <div class="donut-container" style="display: flex; align-items: center; gap: 24px;">
-                                <canvas id="overview-page-type-donut" width="180" height="180"></canvas>
-                                <div class="donut-legend" id="overview-page-type-legend"></div>
                             </div>
                         </div>
                     </div>
@@ -204,149 +196,110 @@ pub fn generate_html(data: &ViewerData) -> String {
                 </div>
             </section>
 
-            <!-- RESOURCES TAB - Memory, Transactions, Threads -->
+            <!-- RESOURCES TAB - Compact layout -->
             <section id="resources" class="panel">
                 <div id="resources-content">
-                    <!-- Memory Section -->
-                    <div class="section-header">Memory & Working Set</div>
+                    <!-- Combined Memory + Txn metrics in single row -->
+                    <div class="metrics-row">
+                        <div class="metrics-group" id="memory-metrics-group">
+                            <div class="metric">
+                                <span class="metric-label">Working Set</span>
+                                <span class="metric-value" id="mem-working-set">-</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">Unique Pages</span>
+                                <span class="metric-value" id="mem-unique-pages">-</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">Reuse</span>
+                                <span class="metric-value" id="mem-reuse-ratio">-</span>
+                            </div>
+                        </div>
+                        <div class="metrics-group" id="txn-metrics-group">
+                            <div class="metric">
+                                <span class="metric-label">Txns</span>
+                                <span class="metric-value" id="txn-total">-</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">RO</span>
+                                <span class="metric-value minor" id="txn-ro">-</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">RW</span>
+                                <span class="metric-value major" id="txn-rw">-</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">Commits</span>
+                                <span class="metric-value" id="txn-commits">-</span>
+                            </div>
+                        </div>
+                        <div class="metrics-group" id="concurrency-metrics-group">
+                            <div class="metric">
+                                <span class="metric-label">Max RO</span>
+                                <span class="metric-value" id="txn-max-ro">-</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">Max RW</span>
+                                <span class="metric-value" id="txn-max-rw">-</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">Avg RO</span>
+                                <span class="metric-value" id="txn-avg-ro">-</span>
+                            </div>
+                        </div>
+                    </div>
 
                     <div id="memory-no-data" class="no-data" style="display:none;">
                         No working set data available.
                     </div>
-
-                    <div id="memory-content">
-                        <!-- Memory summary banner -->
-                        <div class="memory-summary-banner" id="memory-summary-banner">
-                            <span id="memory-summary-text"></span>
-                        </div>
-
-                        <!-- Memory metrics -->
-                        <div class="metrics-row">
-                            <div class="metric">
-                                <span class="metric-value" id="mem-unique-pages">0</span>
-                                <span class="metric-label">Unique Pages</span>
-                            </div>
-                            <div class="metric">
-                                <span class="metric-value" id="mem-working-set">0 GB</span>
-                                <span class="metric-label">Working Set</span>
-                            </div>
-                            <div class="metric">
-                                <span class="metric-value" id="mem-reuse-ratio">0%</span>
-                                <span class="metric-label">Page Reuse</span>
-                            </div>
-                            <div class="metric">
-                                <span class="metric-value" id="mem-avg-accesses">0</span>
-                                <span class="metric-label">Avg Accesses/Page</span>
-                            </div>
-                        </div>
-
-                        <!-- Access count distribution -->
-                        <div class="card">
-                            <div class="card-header">Pages by Access Count</div>
-                            <div class="card-body">
-                                <div class="access-count-chart" id="access-count-chart"></div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Transactions Section -->
-                    <div class="section-header" style="margin-top: 24px;">Transactions</div>
-
                     <div id="txn-no-data" class="no-data" style="display:none;">
                         No transaction data available.
                     </div>
 
-                    <div id="txn-content">
-                        <div class="metrics-row">
-                            <div class="metric">
-                                <span class="metric-value" id="txn-total"></span>
-                                <span class="metric-label">Total Txns</span>
-                            </div>
-                            <div class="metric">
-                                <span class="metric-value" id="txn-rate"></span>
-                                <span class="metric-label">Txns/sec</span>
-                            </div>
-                            <div class="metric">
-                                <span class="metric-value minor" id="txn-ro"></span>
-                                <span class="metric-label">Read-Only</span>
-                            </div>
-                            <div class="metric">
-                                <span class="metric-value major" id="txn-rw"></span>
-                                <span class="metric-label">Read-Write</span>
-                            </div>
-                            <div class="metric">
-                                <span class="metric-value" id="txn-commits"></span>
-                                <span class="metric-label">Commits</span>
-                            </div>
-                            <div class="metric">
-                                <span class="metric-value" id="txn-aborts"></span>
-                                <span class="metric-label">Aborts</span>
+                    <!-- Charts row -->
+                    <div class="two-col" id="resource-charts-row">
+                        <div class="card" id="memory-content">
+                            <div class="card-header">Page Access Distribution</div>
+                            <div class="card-body">
+                                <div class="access-count-chart" id="access-count-chart"></div>
                             </div>
                         </div>
-
-                        <div class="two-col">
-                            <div class="card">
-                                <div class="card-header">Concurrency</div>
-                                <div class="card-body">
-                                    <div class="concurrency-stats">
-                                        <div class="conc-stat">
-                                            <span class="conc-label">Max RO</span>
-                                            <span class="conc-value" id="txn-max-ro"></span>
-                                        </div>
-                                        <div class="conc-stat">
-                                            <span class="conc-label">Max RW</span>
-                                            <span class="conc-value" id="txn-max-rw"></span>
-                                        </div>
-                                        <div class="conc-stat">
-                                            <span class="conc-label">Avg RO</span>
-                                            <span class="conc-value" id="txn-avg-ro"></span>
-                                        </div>
-                                    </div>
-                                    <div class="uplot-container" id="txn-concurrency-chart">
-                                    </div>
-                                </div>
+                        <div class="card" id="txn-content">
+                            <div class="card-header">Commit Latency
+                                <span class="latency-inline-stats">
+                                    <span class="lat-inline"><span class="lat-label">AVG</span> <span id="txn-avg-latency">-</span></span>
+                                    <span class="lat-inline"><span class="lat-label">P95</span> <span id="txn-p95-latency">-</span></span>
+                                    <span class="lat-inline major"><span class="lat-label">P99</span> <span id="txn-p99-latency">-</span></span>
+                                    <span class="lat-inline major"><span class="lat-label">MAX</span> <span id="txn-max-latency">-</span></span>
+                                </span>
                             </div>
-                            <div class="card">
-                                <div class="card-header">RW Commit Latency (ms)</div>
-                                <div class="card-body">
-                                    <div class="latency-stats" style="margin-bottom: 16px;">
-                                        <div class="lat-stat">
-                                            <span class="lat-label">AVG</span>
-                                            <span class="lat-value" id="txn-avg-latency"></span>
-                                        </div>
-                                        <div class="lat-stat">
-                                            <span class="lat-label">P95</span>
-                                            <span class="lat-value" id="txn-p95-latency"></span>
-                                        </div>
-                                        <div class="lat-stat">
-                                            <span class="lat-label">P99</span>
-                                            <span class="lat-value major" id="txn-p99-latency"></span>
-                                        </div>
-                                        <div class="lat-stat">
-                                            <span class="lat-label">MAX</span>
-                                            <span class="lat-value major" id="txn-max-latency"></span>
-                                        </div>
-                                    </div>
-                                    <div class="uplot-container" id="txn-latency-chart" style="height: 180px;">
-                                    </div>
-                                </div>
+                            <div class="card-body">
+                                <div class="uplot-container" id="txn-latency-chart" style="height: 200px;"></div>
                             </div>
                         </div>
                     </div>
 
+                    <!-- Hidden fields for JS compatibility -->
+                    <div style="display:none;">
+                        <span id="txn-rate"></span>
+                        <span id="txn-aborts"></span>
+                        <span id="mem-avg-accesses"></span>
+                        <span id="memory-summary-text"></span>
+                    </div>
+
                     <!-- Threads Section -->
-                    <div class="section-header" style="margin-top: 24px;">Threads</div>
+                    <div class="section-header" style="margin-top: 16px;">Threads</div>
 
                     <div class="two-col">
                         <div class="card">
                             <div class="card-header">Page Faults by Thread</div>
-                            <div class="card-body compact-table-container" style="max-height: 300px; padding: 0;">
+                            <div class="card-body compact-table-container" style="max-height: 250px; padding: 0;">
                                 <table class="compact-table" id="threads-faults-table">
                                     <thead>
                                         <tr>
                                             <th>Thread</th>
                                             <th>Faults</th>
-                                            <th>% of Total</th>
+                                            <th>%</th>
                                         </tr>
                                     </thead>
                                     <tbody></tbody>
@@ -406,81 +359,126 @@ body {
     padding: 16px 24px;
 }
 
-/* Tabs */
+/* Header/Tabs */
 .tabs {
     display: flex;
-    gap: 6px;
-    margin-bottom: 16px;
-    background: #12121a;
-    padding: 6px;
-    border-radius: 10px;
+    align-items: center;
+    gap: 4px;
+    margin-bottom: 20px;
+    background: rgba(18, 18, 26, 0.6);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    padding: 4px;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .tab {
-    padding: 10px 20px;
+    padding: 8px 16px;
     background: transparent;
     border: none;
     color: #71717a;
     cursor: pointer;
-    border-radius: 8px;
-    font-size: 14px;
+    border-radius: 6px;
+    font-size: 13px;
     font-weight: 500;
     transition: all 0.15s;
 }
 
-.tab:hover { background: #1a1a24; color: #a1a1aa; }
-.tab.active { background: #3b82f6; color: #fff; }
+.tab:hover { background: rgba(255, 255, 255, 0.05); color: #a1a1aa; }
+.tab.active { background: rgba(59, 130, 246, 0.15); color: #60a5fa; }
 
 .export-btn {
     margin-left: auto;
-    padding: 10px 18px;
-    background: #059669;
-    color: #fff;
-    border: none;
-    border-radius: 8px;
+    padding: 8px 14px;
+    background: rgba(59, 130, 246, 0.1);
+    color: #60a5fa;
+    border: 1px solid rgba(59, 130, 246, 0.2);
+    border-radius: 6px;
     cursor: pointer;
-    font-size: 13px;
-    font-weight: 600;
+    font-size: 12px;
+    font-weight: 500;
+    transition: all 0.15s;
 }
-.export-btn:hover { background: #10b981; }
+.export-btn:hover { background: rgba(59, 130, 246, 0.2); border-color: rgba(59, 130, 246, 0.3); }
 
 /* Panels */
 .panel { display: none; }
 .panel.active { display: block; }
 
-/* Metrics row */
+/* Metrics row - compact inline design */
 .metrics-row {
     display: flex;
-    gap: 12px;
+    gap: 8px;
     margin-bottom: 16px;
     flex-wrap: wrap;
 }
 
 .metric {
-    background: #12121a;
-    padding: 14px 18px;
-    border-radius: 8px;
-    text-align: center;
-    min-width: 110px;
-    flex: 1;
+    background: rgba(18, 18, 26, 0.6);
+    padding: 10px 14px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.04);
 }
 
 .metric-value {
-    display: block;
-    font-size: 20px;
-    font-weight: 700;
-    color: #3b82f6;
+    font-size: 16px;
+    font-weight: 600;
+    color: #e4e4e7;
+    font-variant-numeric: tabular-nums;
 }
 .metric-value.major { color: #f87171; }
 .metric-value.minor { color: #34d399; }
 
 .metric-label {
-    display: block;
     font-size: 11px;
-    color: #71717a;
+    color: #52525b;
     text-transform: uppercase;
-    margin-top: 4px;
-    letter-spacing: 0.5px;
+    letter-spacing: 0.3px;
+}
+
+/* Grouped metrics for correlated data */
+.metrics-group {
+    display: flex;
+    gap: 2px;
+    background: rgba(18, 18, 26, 0.6);
+    border-radius: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.04);
+    overflow: hidden;
+}
+
+.metrics-group .metric {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    border-right: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.metrics-group .metric:last-child {
+    border-right: none;
+}
+
+.metric-unit {
+    font-size: 11px;
+    color: #52525b;
+    margin-left: -4px;
+}
+
+/* Access pattern row layout */
+.access-pattern-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 32px;
+}
+
+@media (max-width: 800px) {
+    .access-pattern-row {
+        grid-template-columns: 1fr;
+        gap: 20px;
+    }
 }
 
 /* Section headers for Resources tab */
@@ -965,34 +963,30 @@ body {
 
 .thread-item:last-child { border-bottom: none; }
 
-/* Concurrency stats */
-.concurrency-stats, .latency-stats {
+/* Latency inline stats in card header */
+.latency-inline-stats {
     display: flex;
-    gap: 24px;
-    margin-bottom: 16px;
-    flex-wrap: wrap;
-}
-
-.conc-stat, .lat-stat {
-    text-align: center;
-}
-
-.conc-label, .lat-label {
-    display: block;
+    gap: 12px;
     font-size: 11px;
-    color: #71717a;
-    text-transform: uppercase;
-    margin-bottom: 4px;
+    font-weight: 400;
+    text-transform: none;
+    color: #a1a1aa;
 }
 
-.conc-value, .lat-value {
-    display: block;
-    font-size: 24px;
-    font-weight: 700;
-    color: #3b82f6;
+.lat-inline {
+    display: flex;
+    gap: 4px;
+    align-items: center;
 }
 
-.lat-value.major { color: #f87171; }
+.lat-inline .lat-label {
+    color: #52525b;
+    font-size: 10px;
+}
+
+.lat-inline.major {
+    color: #f87171;
+}
 
 /* No data state */
 .no-data {
@@ -2376,55 +2370,6 @@ function initOverview() {
         document.getElementById('stride-section').style.display = 'none';
     }
 
-    // Page type donut in overview
-    const pt = DATA.page_type_stats;
-    if (pt && pt.has_data && pt.by_type && pt.by_type.length > 0) {
-        const canvas = document.getElementById('overview-page-type-donut');
-        const ctx = canvas.getContext('2d');
-        const colors = {
-            'Branch': '#f59e0b',
-            'Leaf': '#22c55e',
-            'Overflow': '#8b5cf6',
-            'Meta': '#6366f1',
-            'Unknown': '#71717a'
-        };
-
-        // Sort by total_faults descending (highest first)
-        const sortedTypes = [...pt.by_type].sort((a, b) => b.total_faults - a.total_faults);
-
-        const total = sortedTypes.reduce((sum, t) => sum + t.total_faults, 0);
-        let startAngle = -Math.PI / 2;
-        const cx = canvas.width / 2;
-        const cy = canvas.height / 2;
-        const outerR = Math.min(cx, cy) - 10;
-        const innerR = outerR * 0.6;
-
-        sortedTypes.forEach(t => {
-            if (t.total_faults === 0) return;
-            const sliceAngle = (t.total_faults / total) * Math.PI * 2;
-            ctx.beginPath();
-            ctx.arc(cx, cy, outerR, startAngle, startAngle + sliceAngle);
-            ctx.arc(cx, cy, innerR, startAngle + sliceAngle, startAngle, true);
-            ctx.closePath();
-            ctx.fillStyle = colors[t.page_type] || colors['Unknown'];
-            ctx.fill();
-            startAngle += sliceAngle;
-        });
-
-        // Legend (sorted by total_faults descending)
-        const legend = document.getElementById('overview-page-type-legend');
-        sortedTypes.filter(t => t.total_faults > 0).forEach(t => {
-            const row = document.createElement('div');
-            row.className = 'legend-row';
-            row.innerHTML = `
-                <span class="legend-dot" style="background: ${colors[t.page_type] || colors['Unknown']}"></span>
-                <span class="legend-name">${t.page_type}</span>
-                <span class="legend-value">${fmt(t.total_faults)}</span>
-                <span class="legend-pct">${t.percentage.toFixed(1)}%</span>
-            `;
-            legend.appendChild(row);
-        });
-    }
 }
 
 // Reth table source links for navigation
