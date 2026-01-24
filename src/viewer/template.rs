@@ -1641,17 +1641,12 @@ function createUPlotChart(container, data, opts = {}) {
 }
 
 // Plotly bar chart for commit latency timeline
-// Store references for linked zoom/pan
-let commitLatencyPlot = null;
-let threadActivityPlot = null;
-let isUpdatingZoom = false;
-
-function createCommitLatencyChart(container, commitData, durationSecs) {
+function createCommitLatencyChart(container, commitData) {
     const el = typeof container === 'string' ? document.getElementById(container) : container;
     if (!el || !commitData.length) return null;
 
-    // Extract timestamps (convert to minutes) and latencies (ms)
-    const timestamps = commitData.map(p => p.time_secs / 60);
+    // Extract timestamps (seconds) and latencies (ms)
+    const timestamps = commitData.map(p => p.time_secs);
     const latencies = commitData.map(p => p.latency_ms);
 
     // Calculate p95 threshold for coloring outliers
@@ -1670,7 +1665,7 @@ function createCommitLatencyChart(container, commitData, durationSecs) {
             color: colors,
             line: { width: 0 }
         },
-        hovertemplate: '<b>%{y:.1f}ms</b> at %{x:.2f}m<extra></extra>'
+        hovertemplate: '<b>%{y:.1f}ms</b> at %{x:.1f}s<extra></extra>'
     };
 
     const layout = {
@@ -1682,8 +1677,7 @@ function createCommitLatencyChart(container, commitData, durationSecs) {
             tickfont: { size: 10, color: '#71717a' },
             gridcolor: '#1e1e2a',
             linecolor: '#1e1e2a',
-            ticksuffix: 'm',
-            range: [0, (durationSecs || 60) / 60]
+            ticksuffix: 's'
         },
         yaxis: {
             title: { text: '', font: { size: 10, color: '#52525b' } },
@@ -1699,34 +1693,10 @@ function createCommitLatencyChart(container, commitData, durationSecs) {
 
     const config = {
         responsive: true,
-        displayModeBar: true,
-        modeBarButtonsToRemove: ['lasso2d', 'select2d', 'autoScale2d'],
-        displaylogo: false
+        displayModeBar: false
     };
 
     Plotly.newPlot(el, [trace], layout, config);
-    commitLatencyPlot = el;
-
-    // Link zoom/pan with thread activity
-    el.on('plotly_relayout', function(eventData) {
-        if (isUpdatingZoom || !threadActivityPlot) return;
-        isUpdatingZoom = true;
-
-        const update = {};
-        if (eventData['xaxis.range[0]'] !== undefined) {
-            update['xaxis.range[0]'] = eventData['xaxis.range[0]'];
-            update['xaxis.range[1]'] = eventData['xaxis.range[1]'];
-        } else if (eventData['xaxis.autorange']) {
-            update['xaxis.autorange'] = true;
-        }
-
-        if (Object.keys(update).length > 0) {
-            Plotly.relayout(threadActivityPlot, update);
-        }
-        isUpdatingZoom = false;
-    });
-
-    return el;
 }
 
 // Resize handler for all uPlot charts
@@ -3625,8 +3595,7 @@ function initResourcesTxns() {
 
     // RW Commit latency timeline (shows WHEN commits happen and their latency)
     if (t.rw_commit_timeline && t.rw_commit_timeline.length > 0) {
-        const durationSecs = DATA.summary.duration_secs || 60;
-        createCommitLatencyChart('txn-latency-chart', t.rw_commit_timeline, durationSecs);
+        createCommitLatencyChart('txn-latency-chart', t.rw_commit_timeline);
     }
 }
 
@@ -3776,26 +3745,6 @@ function initResourcesThreads() {
     };
 
     Plotly.newPlot(container, traces, layout, config);
-    threadActivityPlot = container;
-
-    // Link zoom/pan with commit latency chart
-    container.on('plotly_relayout', function(eventData) {
-        if (isUpdatingZoom || !commitLatencyPlot) return;
-        isUpdatingZoom = true;
-
-        const update = {};
-        if (eventData['xaxis.range[0]'] !== undefined) {
-            update['xaxis.range[0]'] = eventData['xaxis.range[0]'];
-            update['xaxis.range[1]'] = eventData['xaxis.range[1]'];
-        } else if (eventData['xaxis.autorange']) {
-            update['xaxis.autorange'] = true;
-        }
-
-        if (Object.keys(update).length > 0) {
-            Plotly.relayout(commitLatencyPlot, update);
-        }
-        isUpdatingZoom = false;
-    });
 }
 
 // Init overview on load
