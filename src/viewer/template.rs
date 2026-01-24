@@ -1979,12 +1979,22 @@ function initPlotlyHeatmap(container, data, timelineData, durationSecs) {
         yValues.push(offset);
     }
 
+    // Calculate p99 of non-zero values to cap the colorscale (prevents outliers from washing out the heatmap)
+    const nonZeroValues = z.flat().filter(v => v > 0).sort((a, b) => a - b);
+    let zMax = max_count;
+    if (nonZeroValues.length > 10) {
+        const p99Idx = Math.floor(nonZeroValues.length * 0.99);
+        zMax = nonZeroValues[p99Idx] || max_count;
+    }
+
     // Heatmap trace
     const heatmapTrace = {
         z: z,
         x: xValues,
         y: yValues,
         type: 'heatmap',
+        zmin: 0,
+        zmax: zMax,
         colorscale: [
             [0, '#000000'],
             [0.1, '#1a1a3e'],
