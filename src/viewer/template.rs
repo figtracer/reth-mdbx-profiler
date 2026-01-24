@@ -1930,21 +1930,13 @@ class InteractiveHeatmap {
     }
 
     getCellAtPixel(pos) {
-        // O(1) lookup using 2D pixel-to-cell mapping
-        // Each pixel maps to exactly the cell that was drawn there
-        if (!this.pixelToCell || !this.lookupW) return null;
-
-        const px = Math.floor(pos.x);
-        const py = Math.floor(pos.y);
-
-        // Check bounds
-        if (px < 0 || py < 0 || px >= this.lookupW || py >= this.lookupH) return null;
-
-        // Direct 2D lookup - guaranteed to match what was drawn
-        const cellKey = this.pixelToCell[py * this.lookupW + px];
-        if (!cellKey) return null;
-
-        return this.cellMetadata[cellKey] || null;
+        // Simple lookup: find the cell whose stored bounds contain this pixel
+        if (!this.drawnCells) return null;
+        
+        const px = pos.x;
+        const py = pos.y;
+        
+        return this.drawnCells.find(c => px >= c.x1 && px < c.x2 && py >= c.y1 && py < c.y2) || null;
     }
 
     getAttribution(cellIdx) {
@@ -2158,19 +2150,8 @@ class InteractiveHeatmap {
         }
         if (visibleMaxCount === 0) visibleMaxCount = max_count;
 
-        // Build 2D pixel-to-cell lookup for O(1) deterministic hit testing
-        // Each pixel maps to exactly the cell key that was drawn there
         const chartPixelW = Math.floor(chartW);
         const chartPixelH = Math.floor(chartH);
-        
-        // Store canvas dimensions for lookup consistency
-        this.lookupW = Math.ceil(this.w);
-        this.lookupH = Math.ceil(this.h);
-        const canvasW = this.lookupW;
-
-        // Initialize 2D lookup array (stores cell keys directly)
-        this.pixelToCell = new Array(this.lookupW * this.lookupH).fill(null);
-        this.cellMetadata = {};
 
         // Calculate visible bucket range
         const startT = Math.max(0, startTimeBucket);
@@ -2183,9 +2164,10 @@ class InteractiveHeatmap {
 
         if (visibleTimeBuckets <= 0 || visibleOffsetBuckets <= 0) return;
 
-        // Draw cells and build pixel lookup arrays simultaneously.
-        // By populating the lookup arrays during drawing, we guarantee
-        // that each pixel maps to exactly the cell that was drawn there.
+        // Store drawn cells with their bounds for simple hit-testing
+        this.drawnCells = [];
+
+        // Draw cells
         for (let t = startT; t < endT; t++) {
             for (let o = startO; o < endO; o++) {
                 const idx = t * offset_buckets + o;
@@ -2212,31 +2194,22 @@ class InteractiveHeatmap {
                 const drawW = x2 - x1;
                 const drawH = y2 - y1;
 
-                // Store cell metadata for tooltip lookup
-                const cellKey = t + ',' + o;
-                this.cellMetadata[cellKey] = {
-                    count: count,
-                    cellIdx: idx,
-                    timeIdx: t,
-                    offsetIdx: o,
-                    bucketTimeMin,
-                    bucketTimeMax,
-                    bucketOffsetMin,
-                    bucketOffsetMax
-                };
-
                 if (drawW > 0 && drawH > 0) {
                     this.ctx.fillStyle = this.heatColor(intensity);
                     this.ctx.fillRect(x1, y1, drawW, drawH);
 
-                    // Populate 2D pixel lookup for the exact pixels we just drew
-                    // This guarantees getCellAtPixel returns exactly this cell
-                    for (let py = y1; py < y2; py++) {
-                        const rowOffset = py * canvasW;
-                        for (let px = x1; px < x2; px++) {
-                            this.pixelToCell[rowOffset + px] = cellKey;
-                        }
-                    }
+                    // Store cell with its bounds and data - what you draw is what you get
+                    this.drawnCells.push({
+                        x1, y1, x2, y2,
+                        count,
+                        cellIdx: idx,
+                        timeIdx: t,
+                        offsetIdx: o,
+                        bucketTimeMin,
+                        bucketTimeMax,
+                        bucketOffsetMin,
+                        bucketOffsetMax
+                    });
                 }
             }
         }
