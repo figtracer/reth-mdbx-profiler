@@ -869,6 +869,16 @@ pub struct ThreadStats {
     pub percentage: f64,
     /// Per-thread timeline: fault counts per time bucket
     pub timeline: Vec<ThreadTimelinePoint>,
+    /// Per-thread table breakdown: which tables this thread accessed
+    pub top_tables: Vec<ThreadTableStats>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ThreadTableStats {
+    pub table_name: String,
+    pub faults: u64,
+    pub major_faults: u64,
+    pub major_pct: f64,
 }
 
 #[derive(Debug, Serialize)]

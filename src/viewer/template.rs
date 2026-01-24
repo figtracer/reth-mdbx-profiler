@@ -251,6 +251,26 @@ pub fn generate_html(data: &ViewerData) -> String {
                         No thread activity data available.
                     </div>
 
+                    <!-- Thread Table Attribution -->
+                    <div class="card" id="thread-tables-card" style="margin-top: 16px; display: none;">
+                        <div class="card-header">Thread Table Attribution
+                            <span class="card-hint">Which tables each thread accesses</span>
+                        </div>
+                        <div class="card-body compact-table-container" style="padding: 0;">
+                            <table class="compact-table" id="thread-tables">
+                                <thead>
+                                    <tr>
+                                        <th>Thread</th>
+                                        <th>Total Faults</th>
+                                        <th>Major %</th>
+                                        <th>Top Tables</th>
+                                    </tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+
                     <!-- Hidden tables for JS compatibility -->
                     <div style="display:none;">
                         <table id="threads-faults-table"><tbody></tbody></table>
@@ -3798,6 +3818,40 @@ function initResourcesThreads() {
     };
 
     Plotly.newPlot(container, traces, layout, config);
+
+    // Populate thread table attribution table
+    const tableCard = document.getElementById('thread-tables-card');
+    const tableBody = document.querySelector('#thread-tables tbody');
+
+    // Check if any thread has table data
+    const hasTableData = sortedThreads.some(t => t.top_tables && t.top_tables.length > 0);
+
+    if (hasTableData) {
+        tableCard.style.display = 'block';
+        tableBody.innerHTML = '';
+
+        sortedThreads.forEach(thread => {
+            const majorPct = thread.faults > 0
+                ? (thread.major_faults / thread.faults * 100).toFixed(1)
+                : '0.0';
+
+            const topTablesHtml = (thread.top_tables || [])
+                .map(t => {
+                    const color = t.major_pct > 50 ? '#f87171' : '#a1a1aa';
+                    return `<span style="color: ${color}; margin-right: 8px;">${t.table_name} (${t.major_pct.toFixed(0)}% major)</span>`;
+                })
+                .join('');
+
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td style="font-family: monospace;">T${thread.tid}</td>
+                <td>${thread.faults.toLocaleString()}</td>
+                <td style="color: ${parseFloat(majorPct) > 50 ? '#f87171' : '#a1a1aa'};">${majorPct}%</td>
+                <td style="font-size: 11px;">${topTablesHtml || '<span style="color: #52525b;">No table data</span>'}</td>
+            `;
+            tableBody.appendChild(row);
+        });
+    }
 }
 
 // Init overview on load

@@ -17,9 +17,9 @@ use crate::viewer::{
     OperationPageTypeBreakdown, OperationStats, PageTypeFaultCount, PageTypeStats, ParetoPoint,
     PatternAnalysis, RwCommitPoint, SlowKeyStats, SlowOpBreakdown, SlowOpsTableStats, StrideInfo,
     TableDepthStats, TableDrillDown, TableHotKey, TableTreeStats, TableWorkingSet, ThreadStats,
-    ThreadTimelinePoint, TimeWindowedWSS, TimelinePoint, TraceSummary, TreeDepthEstimate,
-    TreeDepthStats, TreeTraversalViz, TxnConcurrencyStats, TxnData, TxnSummary, TxnThreadStats,
-    TxnTimelineEntry, UnifiedTableStats, ViewerData, WorkingSetAnalysis,
+    ThreadTableStats, ThreadTimelinePoint, TimeWindowedWSS, TimelinePoint, TraceSummary,
+    TreeDepthEstimate, TreeDepthStats, TreeTraversalViz, TxnConcurrencyStats, TxnData, TxnSummary,
+    TxnThreadStats, TxnTimelineEntry, UnifiedTableStats, ViewerData, WorkingSetAnalysis,
 };
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::io::{BufRead, BufReader};
@@ -193,6 +193,8 @@ struct ThreadStreamStats {
     major_faults: u64,
     /// Per-thread timeline: bucket_index -> (faults, major_faults)
     timeline_buckets: HashMap<u64, (u32, u32)>,
+    /// Per-thread table breakdown: dbi -> (faults, major_faults)
+    table_faults: HashMap<u32, (u64, u64)>,
     // Transaction stats
     total_txns: u64,
     ro_txns: u64,
@@ -745,6 +747,18 @@ impl StreamingAggregator {
         thread.faults += 1;
         if is_major {
             thread.major_faults += 1;
+        }
+
+        // Per-thread table breakdown
+        if event.has_active_op() {
+            let table_entry = thread
+                .table_faults
+                .entry(event.active_dbi)
+                .or_insert((0, 0));
+            table_entry.0 += 1;
+            if is_major {
+                table_entry.1 += 1;
+            }
         }
 
         // Per-thread timeline bucket (reuse the same bucket calculation)
@@ -1394,6 +1408,24 @@ impl StreamingAggregator {
                     .collect();
                 timeline.sort_by_key(|p| p.time_ms);
 
+                // Build top tables for this thread (sorted by faults, top 5)
+                let mut top_tables: Vec<_> = stats
+                    .table_faults
+                    .iter()
+                    .map(|(&dbi, &(faults, major_faults))| ThreadTableStats {
+                        table_name: dbi_to_table_name(dbi).to_string(),
+                        faults,
+                        major_faults,
+                        major_pct: if faults > 0 {
+                            major_faults as f64 / faults as f64 * 100.0
+                        } else {
+                            0.0
+                        },
+                    })
+                    .collect();
+                top_tables.sort_by(|a, b| b.faults.cmp(&a.faults));
+                top_tables.truncate(5);
+
                 ThreadStats {
                     tid,
                     faults: stats.faults,
@@ -1404,6 +1436,7 @@ impl StreamingAggregator {
                         0.0
                     },
                     timeline,
+                    top_tables,
                 }
             })
             .collect();
