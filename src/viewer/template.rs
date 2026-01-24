@@ -1820,9 +1820,13 @@ class InteractiveHeatmap {
         // Zoom history for back navigation
         this.zoomHistory = [];
 
-        // Rendered cells - stores pixel bounds for each drawn cell for accurate hit testing
-        // This array is populated during draw() and used for tooltip lookup
-        this.renderedCells = [];
+        // Pixel-to-cell lookup grid: pixelToCellX[pixelX] = time bucket index
+        // pixelToCellY[pixelY] = offset bucket index
+        // This provides O(1) deterministic lookup from pixel to cell
+        this.pixelToCellX = null;
+        this.pixelToCellY = null;
+        // Cell metadata for tooltip display
+        this.cellMetadata = {};
 
         // Interaction state
         this.isDragging = false;
@@ -1926,17 +1930,27 @@ class InteractiveHeatmap {
     }
 
     getCellAtPixel(pos) {
-        // Simple hit-test against rendered cells stored during draw()
-        // This guarantees the tooltip matches exactly what's drawn on screen
-        // Iterate in reverse so later-drawn (topmost) cells are matched first
-        for (let i = this.renderedCells.length - 1; i >= 0; i--) {
-            const cell = this.renderedCells[i];
-            if (pos.x >= cell.x1 && pos.x < cell.x2 &&
-                pos.y >= cell.y1 && pos.y < cell.y2) {
-                return cell;
-            }
-        }
-        return null;
+        // O(1) lookup using pixel-to-cell mapping arrays
+        // This is deterministic - each pixel maps to exactly one cell
+        if (!this.pixelToCellX || !this.pixelToCellY) return null;
+
+        const px = Math.floor(pos.x);
+        const py = Math.floor(pos.y);
+
+        // Check bounds
+        if (px < this.pad.l || px >= this.w - this.pad.r) return null;
+        if (py < this.pad.t || py >= this.h - this.pad.b) return null;
+
+        // Get cell indices from lookup arrays
+        const timeIdx = this.pixelToCellX[px];
+        const offsetIdx = this.pixelToCellY[py];
+
+        if (timeIdx === undefined || offsetIdx === undefined) return null;
+        if (timeIdx < 0 || offsetIdx < 0) return null;
+
+        // Get cell metadata
+        const cellKey = timeIdx + ',' + offsetIdx;
+        return this.cellMetadata[cellKey] || null;
     }
 
     getAttribution(cellIdx) {
@@ -2150,72 +2164,93 @@ class InteractiveHeatmap {
         }
         if (visibleMaxCount === 0) visibleMaxCount = max_count;
 
-        // Clear rendered cells array before drawing
-        this.renderedCells = [];
+        // Build pixel-to-cell lookup arrays for O(1) deterministic hit testing
+        // Every pixel in the chart area maps to exactly one cell
+        const chartPixelW = Math.floor(chartW);
+        const chartPixelH = Math.floor(chartH);
 
-        // Build a 2D grid for pixel-perfect cell lookup
-        // This maps each pixel column (x) to a time bucket index, and each pixel row (y) to an offset bucket index
-        // This ensures no gaps or overlaps in hit testing
+        // Initialize lookup arrays
+        this.pixelToCellX = new Array(Math.ceil(this.w)).fill(-1);
+        this.pixelToCellY = new Array(Math.ceil(this.h)).fill(-1);
+        this.cellMetadata = {};
 
-        // Calculate pixel-to-bucket mappings for the visible area
-        const visibleTimeBuckets = Math.min(time_buckets, endTimeBucket) - Math.max(0, startTimeBucket);
-        const visibleOffsetBuckets = Math.min(offset_buckets, endOffsetBucket) - Math.max(0, startOffsetBucket);
-        const cellPixelW = chartW / visibleTimeBuckets;
-        const cellPixelH = chartH / visibleOffsetBuckets;
+        // Calculate visible bucket range
+        const startT = Math.max(0, startTimeBucket);
+        const endT = Math.min(time_buckets, endTimeBucket);
+        const startO = Math.max(0, startOffsetBucket);
+        const endO = Math.min(offset_buckets, endOffsetBucket);
 
-        // Draw cells and store their bounds for hit testing
-        for (let t = Math.max(0, startTimeBucket); t < Math.min(time_buckets, endTimeBucket); t++) {
-            for (let o = Math.max(0, startOffsetBucket); o < Math.min(offset_buckets, endOffsetBucket); o++) {
+        const visibleTimeBuckets = endT - startT;
+        const visibleOffsetBuckets = endO - startO;
+
+        if (visibleTimeBuckets <= 0 || visibleOffsetBuckets <= 0) return;
+
+        // Build X lookup: for each pixel column, which time bucket does it belong to?
+        for (let px = 0; px < chartPixelW; px++) {
+            const screenX = this.pad.l + px;
+            // Which bucket does this pixel belong to?
+            const bucketFloat = (px / chartPixelW) * visibleTimeBuckets;
+            const bucketIdx = Math.floor(bucketFloat);
+            const t = startT + Math.min(bucketIdx, visibleTimeBuckets - 1);
+            this.pixelToCellX[screenX] = t;
+        }
+
+        // Build Y lookup: for each pixel row, which offset bucket does it belong to?
+        // Note: Y is inverted (top = high offset, bottom = low offset)
+        for (let py = 0; py < chartPixelH; py++) {
+            const screenY = this.pad.t + py;
+            // Which bucket does this pixel belong to? (inverted)
+            const bucketFloat = (py / chartPixelH) * visibleOffsetBuckets;
+            const bucketIdx = Math.floor(bucketFloat);
+            // Invert: top of screen = highest offset bucket
+            const o = endO - 1 - Math.min(bucketIdx, visibleOffsetBuckets - 1);
+            this.pixelToCellY[screenY] = o;
+        }
+
+        // Draw cells and store metadata
+        for (let t = startT; t < endT; t++) {
+            for (let o = startO; o < endO; o++) {
                 const idx = t * offset_buckets + o;
                 const count = cells[idx] || 0;
                 const intensity = visibleMaxCount > 0 ? count / visibleMaxCount : 0;
 
-                // Map bucket to view coordinates
+                // Map bucket to data coordinates for tooltip
                 const bucketTimeMin = this.fullTimeMin + (t / time_buckets) * fullTimeRange;
                 const bucketTimeMax = this.fullTimeMin + ((t + 1) / time_buckets) * fullTimeRange;
                 const bucketOffsetMin = this.fullOffsetMin + (o / offset_buckets) * fullOffsetRange;
                 const bucketOffsetMax = this.fullOffsetMin + ((o + 1) / offset_buckets) * fullOffsetRange;
 
-                // Calculate pixel position relative to visible bucket range
-                // Use integer pixel boundaries for crisp rendering and accurate hit testing
-                const tRel = t - Math.max(0, startTimeBucket);
-                const oRel = o - Math.max(0, startOffsetBucket);
+                // Calculate pixel boundaries for drawing
+                const tRel = t - startT;
+                const oRel = o - startO;
 
-                // Pixel boundaries - use floor/ceil to avoid gaps between cells
-                const pixelX1 = Math.floor(this.pad.l + tRel * cellPixelW);
-                const pixelX2 = Math.floor(this.pad.l + (tRel + 1) * cellPixelW);
-                const pixelY1 = Math.floor(this.pad.t + (visibleOffsetBuckets - 1 - oRel) * cellPixelH);
-                const pixelY2 = Math.floor(this.pad.t + (visibleOffsetBuckets - oRel) * cellPixelH);
+                // Use consistent pixel boundaries
+                const x1 = Math.floor(this.pad.l + (tRel / visibleTimeBuckets) * chartPixelW);
+                const x2 = Math.floor(this.pad.l + ((tRel + 1) / visibleTimeBuckets) * chartPixelW);
+                // Y is inverted: oRel=0 (lowest offset) should be at bottom
+                const y1 = Math.floor(this.pad.t + ((visibleOffsetBuckets - 1 - oRel) / visibleOffsetBuckets) * chartPixelH);
+                const y2 = Math.floor(this.pad.t + ((visibleOffsetBuckets - oRel) / visibleOffsetBuckets) * chartPixelH);
 
-                // Clip to chart area
-                const drawX1 = Math.max(this.pad.l, pixelX1);
-                const drawY1 = Math.max(this.pad.t, pixelY1);
-                const drawX2 = Math.min(this.w - this.pad.r, pixelX2);
-                const drawY2 = Math.min(this.h - this.pad.b, pixelY2);
-
-                const drawW = drawX2 - drawX1;
-                const drawH = drawY2 - drawY1;
+                const drawW = x2 - x1;
+                const drawH = y2 - y1;
 
                 if (drawW > 0 && drawH > 0) {
                     this.ctx.fillStyle = this.heatColor(intensity);
-                    this.ctx.fillRect(drawX1, drawY1, drawW, drawH);
-
-                    // Store the rendered cell bounds for accurate hit testing
-                    this.renderedCells.push({
-                        x1: drawX1,
-                        y1: drawY1,
-                        x2: drawX2,
-                        y2: drawY2,
-                        count: count,
-                        cellIdx: idx,
-                        timeIdx: t,
-                        offsetIdx: o,
-                        bucketTimeMin,
-                        bucketTimeMax,
-                        bucketOffsetMin,
-                        bucketOffsetMax
-                    });
+                    this.ctx.fillRect(x1, y1, drawW, drawH);
                 }
+
+                // Store cell metadata for tooltip lookup
+                const cellKey = t + ',' + o;
+                this.cellMetadata[cellKey] = {
+                    count: count,
+                    cellIdx: idx,
+                    timeIdx: t,
+                    offsetIdx: o,
+                    bucketTimeMin,
+                    bucketTimeMax,
+                    bucketOffsetMin,
+                    bucketOffsetMax
+                };
             }
         }
 
@@ -2734,14 +2769,17 @@ function initOverview() {
             'Unknown': '#71717a'
         };
 
-        const total = pt.by_type.reduce((sum, t) => sum + t.total_faults, 0);
+        // Sort by total_faults descending (highest first)
+        const sortedTypes = [...pt.by_type].sort((a, b) => b.total_faults - a.total_faults);
+
+        const total = sortedTypes.reduce((sum, t) => sum + t.total_faults, 0);
         let startAngle = -Math.PI / 2;
         const cx = canvas.width / 2;
         const cy = canvas.height / 2;
         const outerR = Math.min(cx, cy) - 10;
         const innerR = outerR * 0.6;
 
-        pt.by_type.forEach(t => {
+        sortedTypes.forEach(t => {
             if (t.total_faults === 0) return;
             const sliceAngle = (t.total_faults / total) * Math.PI * 2;
             ctx.beginPath();
@@ -2753,9 +2791,9 @@ function initOverview() {
             startAngle += sliceAngle;
         });
 
-        // Legend
+        // Legend (sorted by total_faults descending)
         const legend = document.getElementById('overview-page-type-legend');
-        pt.by_type.filter(t => t.total_faults > 0).forEach(t => {
+        sortedTypes.filter(t => t.total_faults > 0).forEach(t => {
             const row = document.createElement('div');
             row.className = 'legend-row';
             row.innerHTML = `
