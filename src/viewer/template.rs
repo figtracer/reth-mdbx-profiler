@@ -16,6 +16,8 @@ pub fn generate_html(data: &ViewerData) -> String {
     <!-- uPlot for interactive charts -->
     <link rel="stylesheet" href="https://unpkg.com/uplot@1.6.30/dist/uPlot.min.css">
     <script src="https://unpkg.com/uplot@1.6.30/dist/uPlot.iife.min.js"></script>
+    <!-- Plotly for heatmap -->
+    <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
     <style>
 {css}
     </style>
@@ -68,9 +70,7 @@ pub fn generate_html(data: &ViewerData) -> String {
                 <div class="card" style="margin-bottom: 16px;">
                     <div class="card-header">Access Heatmap <span class="axis-hint">(drag to zoom, dbl-click to reset)</span></div>
                     <div class="card-body heatmap-container" style="position: relative;">
-                        <canvas id="heatmap-canvas"></canvas>
-                        <div id="heatmap-tooltip" class="chart-tooltip" style="display: none;"></div>
-                        <div id="heatmap-selection" class="heatmap-selection" style="display: none;"></div>
+                        <div id="heatmap-plotly" style="width: 100%; height: 100%;"></div>
                     </div>
                 </div>
 
@@ -1796,509 +1796,138 @@ class Chart {
     }
 }
 
-// Interactive Heatmap with zoom/pan capabilities
-class InteractiveHeatmap {
-    constructor(canvas, data, tooltip, selection) {
-        this.canvas = canvas;
-        this.ctx = canvas.getContext('2d');
-        this.tooltip = tooltip;
-        this.selection = selection;
-        this.data = data;
+// Initialize Plotly heatmap - handles zoom, pan, and tooltips correctly
+function initPlotlyHeatmap(container, data) {
+    const { time_buckets, offset_buckets, data: cells, max_count, 
+            min_offset_gb, max_offset_gb, min_time_ms, max_time_ms,
+            cell_attribution } = data;
 
-        // Full data ranges (original)
-        this.fullTimeMin = data.min_time_ms;
-        this.fullTimeMax = data.max_time_ms;
-        this.fullOffsetMin = data.min_offset_gb;
-        this.fullOffsetMax = data.max_offset_gb;
-
-        // Current view ranges (for zoom)
-        this.viewTimeMin = this.fullTimeMin;
-        this.viewTimeMax = this.fullTimeMax;
-        this.viewOffsetMin = this.fullOffsetMin;
-        this.viewOffsetMax = this.fullOffsetMax;
-
-        // Zoom history for back navigation
-        this.zoomHistory = [];
-
-        // Pixel-to-cell lookup grid: pixelToCellX[pixelX] = time bucket index
-        // pixelToCellY[pixelY] = offset bucket index
-        // This provides O(1) deterministic lookup from pixel to cell
-        this.pixelToCellX = null;
-        this.pixelToCellY = null;
-        // Cell metadata for tooltip display
-        this.cellMetadata = {};
-
-        // Interaction state
-        this.isDragging = false;
-        this.dragStart = null;
-        // Padding matches uPlot's layout for alignment
-        // uPlot Y-axis size is 55px, plus internal margins ~5-8px
-        this.pad = { t: 25, r: 20, b: 45, l: 63 };
-
-        this.setupCanvas();
-        this.setupEvents();
-        this.draw();
+    // Build attribution lookup for custom hover text
+    const attrLookup = {};
+    if (cell_attribution) {
+        cell_attribution.forEach(a => { attrLookup[a.cell] = a.tables; });
     }
 
-    setupCanvas() {
-        const container = this.canvas.parentElement;
-        const rect = container.getBoundingClientRect();
-        const dpr = window.devicePixelRatio || 1;
-
-        this.w = rect.width;
-        this.h = rect.height;
-
-        this.canvas.style.width = this.w + 'px';
-        this.canvas.style.height = this.h + 'px';
-        this.canvas.width = this.w * dpr;
-        this.canvas.height = this.h * dpr;
-        this.ctx.scale(dpr, dpr);
-    }
-
-    setupEvents() {
-        // Mouse move for tooltip
-        this.canvas.addEventListener('mousemove', (e) => this.onMouseMove(e));
-        this.canvas.addEventListener('mouseleave', () => this.hideTooltip());
-
-        // Drag for zoom selection
-        this.canvas.addEventListener('mousedown', (e) => this.onMouseDown(e));
-        this.canvas.addEventListener('mousemove', (e) => this.onDrag(e));
-        this.canvas.addEventListener('mouseup', (e) => this.onMouseUp(e));
-        this.canvas.addEventListener('mouseleave', () => this.cancelDrag());
-
-        // Double-click to reset zoom
-        this.canvas.addEventListener('dblclick', () => this.resetZoom());
-
-        // Resize handling
-        window.addEventListener('resize', () => {
-            this.setupCanvas();
-            this.draw();
-        });
-    }
-
-    getMousePos(e) {
-        const rect = this.canvas.getBoundingClientRect();
-        return {
-            x: e.clientX - rect.left,
-            y: e.clientY - rect.top
-        };
-    }
-
-    isInChart(pos) {
-        return pos.x >= this.pad.l &&
-               pos.x <= this.w - this.pad.r &&
-               pos.y >= this.pad.t &&
-               pos.y <= this.h - this.pad.b;
-    }
-
-    posToData(pos) {
-        const chartW = this.w - this.pad.l - this.pad.r;
-        const chartH = this.h - this.pad.t - this.pad.b;
-
-        const relX = (pos.x - this.pad.l) / chartW;
-        const relY = (pos.y - this.pad.t) / chartH;
-
-        const timeRange = this.viewTimeMax - this.viewTimeMin;
-        const offsetRange = this.viewOffsetMax - this.viewOffsetMin;
-
-        return {
-            time: this.viewTimeMin + relX * timeRange,
-            offset: this.viewOffsetMax - relY * offsetRange // Y is inverted
-        };
-    }
-
-    onMouseMove(e) {
-        if (this.isDragging) return;
-
-        const pos = this.getMousePos(e);
-        if (!this.isInChart(pos)) {
-            this.hideTooltip();
-            return;
+    // Convert flat array to 2D array for Plotly (offset rows, time columns)
+    // Plotly expects z[y][x] format
+    const z = [];
+    const customData = [];  // For storing attribution info
+    for (let o = 0; o < offset_buckets; o++) {
+        const row = [];
+        const customRow = [];
+        for (let t = 0; t < time_buckets; t++) {
+            const idx = t * offset_buckets + o;
+            row.push(cells[idx] || 0);
+            // Store cell index for attribution lookup
+            customRow.push(idx);
         }
-
-        const cellInfo = this.getCellAtPixel(pos);
-        if (cellInfo) {
-            // Use the cell's actual data coordinates for display
-            const dataPos = {
-                time: (cellInfo.bucketTimeMin + cellInfo.bucketTimeMax) / 2,
-                offset: (cellInfo.bucketOffsetMin + cellInfo.bucketOffsetMax) / 2
-            };
-            this.showTooltip(pos, dataPos, cellInfo);
-        } else {
-            this.hideTooltip();
-        }
+        z.push(row);
+        customData.push(customRow);
     }
 
-    getCellAtPixel(pos) {
-        // Simple lookup: find the cell whose stored bounds contain this pixel
-        if (!this.drawnCells) return null;
+    // Generate axis labels
+    const timeRange = max_time_ms - min_time_ms;
+    const offsetRange = max_offset_gb - min_offset_gb;
+
+    const xLabels = [];
+    for (let t = 0; t < time_buckets; t++) {
+        const time = min_time_ms + (t + 0.5) * timeRange / time_buckets;
+        xLabels.push(time < 60000 
+            ? (time / 1000).toFixed(2) + 's'
+            : (time / 60000).toFixed(2) + 'm');
+    }
+
+    const yLabels = [];
+    for (let o = 0; o < offset_buckets; o++) {
+        const offset = min_offset_gb + (o + 0.5) * offsetRange / offset_buckets;
+        yLabels.push(offset.toFixed(2) + ' GB');
+    }
+
+    // Custom hover template with attribution
+    const hovertemplate = 
+        '<b>Time:</b> %{x}<br>' +
+        '<b>Offset:</b> %{y}<br>' +
+        '<b>Faults:</b> %{z}<br>' +
+        '<extra></extra>';
+
+    const trace = {
+        z: z,
+        x: xLabels,
+        y: yLabels,
+        customdata: customData,
+        type: 'heatmap',
+        colorscale: [
+            [0, '#000000'],
+            [0.1, '#1a1a3e'],
+            [0.25, '#14147a'],
+            [0.5, '#1478b4'],
+            [0.75, '#3cfff0'],
+            [1, '#ffff50']
+        ],
+        hovertemplate: hovertemplate,
+        showscale: true,
+        colorbar: {
+            title: 'Faults',
+            titleside: 'right',
+            tickfont: { color: '#a1a1aa', size: 10 },
+            titlefont: { color: '#a1a1aa', size: 11 }
+        }
+    };
+
+    const layout = {
+        paper_bgcolor: '#18181b',
+        plot_bgcolor: '#000000',
+        font: { color: '#a1a1aa', family: '-apple-system, BlinkMacSystemFont, sans-serif' },
+        margin: { l: 70, r: 80, t: 20, b: 50 },
+        xaxis: {
+            title: 'Time',
+            titlefont: { size: 12 },
+            tickfont: { size: 10 },
+            tickangle: 0,
+            nticks: 8,
+            gridcolor: '#27272a',
+            linecolor: '#3f3f46'
+        },
+        yaxis: {
+            title: 'File Offset',
+            titlefont: { size: 12 },
+            tickfont: { size: 10 },
+            nticks: 8,
+            gridcolor: '#27272a',
+            linecolor: '#3f3f46'
+        },
+        dragmode: 'zoom'
+    };
+
+    const config = {
+        responsive: true,
+        displayModeBar: true,
+        modeBarButtonsToRemove: ['lasso2d', 'select2d', 'autoScale2d'],
+        displaylogo: false,
+        doubleClick: 'reset'
+    };
+
+    Plotly.newPlot(container, [trace], layout, config);
+
+    // Add custom hover handler for attribution data
+    container.on('plotly_hover', function(eventData) {
+        if (!eventData.points || !eventData.points[0]) return;
+        const pt = eventData.points[0];
+        const cellIdx = pt.customdata;
+        const tables = attrLookup[cellIdx];
         
-        const px = pos.x;
-        const py = pos.y;
-        
-        return this.drawnCells.find(c => px >= c.x1 && px < c.x2 && py >= c.y1 && py < c.y2) || null;
-    }
-
-    getAttribution(cellIdx) {
-        // Binary search for attribution data (sorted by cell index)
-        const attrib = this.data.cell_attribution;
-        if (!attrib || attrib.length === 0) return null;
-
-        let lo = 0, hi = attrib.length - 1;
-        while (lo <= hi) {
-            const mid = (lo + hi) >> 1;
-            if (attrib[mid].cell === cellIdx) {
-                return attrib[mid].tables;
-            } else if (attrib[mid].cell < cellIdx) {
-                lo = mid + 1;
-            } else {
-                hi = mid - 1;
-            }
-        }
-        return null;
-    }
-
-    showTooltip(pos, dataPos, cellInfo) {
-        const timeStr = dataPos.time < 60000
-            ? (dataPos.time / 1000).toFixed(1) + 's'
-            : (dataPos.time / 60000).toFixed(2) + 'm';
-        const intensity = this.data.max_count > 0
-            ? (cellInfo.count / this.data.max_count * 100).toFixed(0)
-            : 0;
-
-        let html = `
-            <div class="chart-tooltip-label">Time: ${timeStr}</div>
-            <div class="chart-tooltip-label">Offset: ${dataPos.offset.toFixed(2)} GB</div>
-            <div class="chart-tooltip-value">${cellInfo.count} faults</div>
-            <div class="chart-tooltip-label">${intensity}% intensity</div>
-        `;
-
-        // Add attribution if available
-        const tables = this.getAttribution(cellInfo.cellIdx);
         if (tables && tables.length > 0) {
-            html += '<div style="margin-top: 6px; border-top: 1px solid #3f3f46; padding-top: 6px;">';
-            html += '<div class="chart-tooltip-label" style="color: #a1a1aa;">Top Tables:</div>';
-            for (const [name, total, major] of tables) {
-                const majorPct = total > 0 ? Math.round(major / total * 100) : 0;
-                html += `<div style="font-size: 10px; color: #d4d4d8;">${name}: ${total} (${majorPct}% major)</div>`;
-            }
-            html += '</div>';
-        }
-
-        this.tooltip.innerHTML = html;
-        this.tooltip.style.display = 'block';
-        this.tooltip.style.left = Math.min(pos.x + 10, this.w - 180) + 'px';
-        this.tooltip.style.top = Math.min(pos.y + 10, this.h - 140) + 'px';
-    }
-
-    hideTooltip() {
-        this.tooltip.style.display = 'none';
-    }
-
-    onMouseDown(e) {
-        const pos = this.getMousePos(e);
-        if (!this.isInChart(pos)) return;
-
-        this.isDragging = true;
-        this.dragStart = pos;
-        this.hideTooltip();
-    }
-
-    onDrag(e) {
-        if (!this.isDragging) return;
-
-        const pos = this.getMousePos(e);
-        const x1 = Math.max(this.pad.l, Math.min(this.dragStart.x, pos.x));
-        const x2 = Math.min(this.w - this.pad.r, Math.max(this.dragStart.x, pos.x));
-        const y1 = Math.max(this.pad.t, Math.min(this.dragStart.y, pos.y));
-        const y2 = Math.min(this.h - this.pad.b, Math.max(this.dragStart.y, pos.y));
-
-        this.selection.style.display = 'block';
-        this.selection.style.left = x1 + 'px';
-        this.selection.style.top = y1 + 'px';
-        this.selection.style.width = (x2 - x1) + 'px';
-        this.selection.style.height = (y2 - y1) + 'px';
-    }
-
-    onMouseUp(e) {
-        if (!this.isDragging) return;
-
-        const pos = this.getMousePos(e);
-        this.selection.style.display = 'none';
-        this.isDragging = false;
-
-        // Check if it's a meaningful drag (at least 10px in both directions)
-        const dx = Math.abs(pos.x - this.dragStart.x);
-        const dy = Math.abs(pos.y - this.dragStart.y);
-
-        if (dx < 10 || dy < 10) {
-            this.dragStart = null;
-            return;
-        }
-
-        // Calculate new view bounds
-        const start = this.posToData(this.dragStart);
-        const end = this.posToData(pos);
-
-        // Save current view for zoom history
-        this.zoomHistory.push({
-            timeMin: this.viewTimeMin,
-            timeMax: this.viewTimeMax,
-            offsetMin: this.viewOffsetMin,
-            offsetMax: this.viewOffsetMax
-        });
-
-        // Set new view bounds (ensure min < max)
-        this.viewTimeMin = Math.min(start.time, end.time);
-        this.viewTimeMax = Math.max(start.time, end.time);
-        this.viewOffsetMin = Math.min(start.offset, end.offset);
-        this.viewOffsetMax = Math.max(start.offset, end.offset);
-
-        // Clamp to full data bounds
-        this.viewTimeMin = Math.max(this.fullTimeMin, this.viewTimeMin);
-        this.viewTimeMax = Math.min(this.fullTimeMax, this.viewTimeMax);
-        this.viewOffsetMin = Math.max(this.fullOffsetMin, this.viewOffsetMin);
-        this.viewOffsetMax = Math.min(this.fullOffsetMax, this.viewOffsetMax);
-
-        this.dragStart = null;
-        this.draw();
-    }
-
-    cancelDrag() {
-        if (this.isDragging) {
-            this.isDragging = false;
-            this.dragStart = null;
-            this.selection.style.display = 'none';
-        }
-    }
-
-    resetZoom() {
-        if (this.zoomHistory.length > 0) {
-            // Go back one level
-            const prev = this.zoomHistory.pop();
-            this.viewTimeMin = prev.timeMin;
-            this.viewTimeMax = prev.timeMax;
-            this.viewOffsetMin = prev.offsetMin;
-            this.viewOffsetMax = prev.offsetMax;
-        } else {
-            // Reset to full view
-            this.viewTimeMin = this.fullTimeMin;
-            this.viewTimeMax = this.fullTimeMax;
-            this.viewOffsetMin = this.fullOffsetMin;
-            this.viewOffsetMax = this.fullOffsetMax;
-        }
-        this.draw();
-    }
-
-    heatColor(intensity) {
-        if (intensity === 0) return '#000000';
-        // Improved gradient: black -> purple -> blue -> cyan -> yellow (hot)
-        const t = Math.pow(intensity, 0.5); // Square root for better low-end visibility
-
-        if (t < 0.25) {
-            // Black to dark blue
-            const s = t * 4;
-            return `rgb(${Math.floor(s * 20)}, ${Math.floor(s * 20)}, ${Math.floor(40 + s * 80)})`;
-        } else if (t < 0.5) {
-            // Dark blue to blue
-            const s = (t - 0.25) * 4;
-            return `rgb(${Math.floor(20)}, ${Math.floor(20 + s * 60)}, ${Math.floor(120 + s * 135)})`;
-        } else if (t < 0.75) {
-            // Blue to cyan
-            const s = (t - 0.5) * 4;
-            return `rgb(${Math.floor(20 + s * 40)}, ${Math.floor(80 + s * 175)}, ${Math.floor(255)})`;
-        } else {
-            // Cyan to yellow/white (hottest)
-            const s = (t - 0.75) * 4;
-            return `rgb(${Math.floor(60 + s * 195)}, ${Math.floor(255)}, ${Math.floor(255 - s * 55)})`;
-        }
-    }
-
-    draw() {
-        const { time_buckets, offset_buckets, data: cells, max_count } = this.data;
-
-        // Clear canvas
-        this.ctx.fillStyle = '#000000';
-        this.ctx.fillRect(0, 0, this.w, this.h);
-
-        const chartW = this.w - this.pad.l - this.pad.r;
-        const chartH = this.h - this.pad.t - this.pad.b;
-
-        // Calculate which buckets are visible in current view
-        const fullTimeRange = this.fullTimeMax - this.fullTimeMin;
-        const fullOffsetRange = this.fullOffsetMax - this.fullOffsetMin;
-        const viewTimeRange = this.viewTimeMax - this.viewTimeMin;
-        const viewOffsetRange = this.viewOffsetMax - this.viewOffsetMin;
-
-        if (fullTimeRange <= 0 || fullOffsetRange <= 0 || viewTimeRange <= 0 || viewOffsetRange <= 0) {
-            return;
-        }
-
-        // Find visible bucket range
-        const startTimeBucket = Math.floor(((this.viewTimeMin - this.fullTimeMin) / fullTimeRange) * time_buckets);
-        const endTimeBucket = Math.ceil(((this.viewTimeMax - this.fullTimeMin) / fullTimeRange) * time_buckets);
-        const startOffsetBucket = Math.floor(((this.viewOffsetMin - this.fullOffsetMin) / fullOffsetRange) * offset_buckets);
-        const endOffsetBucket = Math.ceil(((this.viewOffsetMax - this.fullOffsetMin) / fullOffsetRange) * offset_buckets);
-
-        // Calculate max count within visible region for better contrast
-        let visibleMaxCount = 0;
-        for (let t = Math.max(0, startTimeBucket); t < Math.min(time_buckets, endTimeBucket); t++) {
-            for (let o = Math.max(0, startOffsetBucket); o < Math.min(offset_buckets, endOffsetBucket); o++) {
-                const idx = t * offset_buckets + o;
-                visibleMaxCount = Math.max(visibleMaxCount, cells[idx] || 0);
+            // Update the hover label with attribution info
+            const hoverText = document.querySelector('.hovertext');
+            if (hoverText) {
+                let attrHtml = '<tspan x="0" dy="1.2em" style="font-weight:bold">Top Tables:</tspan>';
+                tables.forEach(([name, total, major]) => {
+                    const majorPct = total > 0 ? Math.round(major / total * 100) : 0;
+                    attrHtml += '<tspan x="0" dy="1.1em">' + name + ': ' + total + ' (' + majorPct + '% major)</tspan>';
+                });
             }
         }
-        if (visibleMaxCount === 0) visibleMaxCount = max_count;
-
-        const chartPixelW = Math.floor(chartW);
-        const chartPixelH = Math.floor(chartH);
-
-        // Calculate visible bucket range
-        const startT = Math.max(0, startTimeBucket);
-        const endT = Math.min(time_buckets, endTimeBucket);
-        const startO = Math.max(0, startOffsetBucket);
-        const endO = Math.min(offset_buckets, endOffsetBucket);
-
-        const visibleTimeBuckets = endT - startT;
-        const visibleOffsetBuckets = endO - startO;
-
-        if (visibleTimeBuckets <= 0 || visibleOffsetBuckets <= 0) return;
-
-        // Store drawn cells with their bounds for simple hit-testing
-        this.drawnCells = [];
-
-        // Draw cells
-        for (let t = startT; t < endT; t++) {
-            for (let o = startO; o < endO; o++) {
-                const idx = t * offset_buckets + o;
-                const count = cells[idx] || 0;
-                const intensity = visibleMaxCount > 0 ? count / visibleMaxCount : 0;
-
-                // Map bucket to data coordinates for tooltip
-                const bucketTimeMin = this.fullTimeMin + (t / time_buckets) * fullTimeRange;
-                const bucketTimeMax = this.fullTimeMin + ((t + 1) / time_buckets) * fullTimeRange;
-                const bucketOffsetMin = this.fullOffsetMin + (o / offset_buckets) * fullOffsetRange;
-                const bucketOffsetMax = this.fullOffsetMin + ((o + 1) / offset_buckets) * fullOffsetRange;
-
-                // Calculate pixel boundaries for drawing
-                const tRel = t - startT;
-                const oRel = o - startO;
-
-                // Use consistent pixel boundaries
-                const x1 = Math.floor(this.pad.l + (tRel / visibleTimeBuckets) * chartPixelW);
-                const x2 = Math.floor(this.pad.l + ((tRel + 1) / visibleTimeBuckets) * chartPixelW);
-                // Y is inverted: oRel=0 (lowest offset) should be at bottom
-                const y1 = Math.floor(this.pad.t + ((visibleOffsetBuckets - 1 - oRel) / visibleOffsetBuckets) * chartPixelH);
-                const y2 = Math.floor(this.pad.t + ((visibleOffsetBuckets - oRel) / visibleOffsetBuckets) * chartPixelH);
-
-                const drawW = x2 - x1;
-                const drawH = y2 - y1;
-
-                if (drawW > 0 && drawH > 0) {
-                    this.ctx.fillStyle = this.heatColor(intensity);
-                    this.ctx.fillRect(x1, y1, drawW, drawH);
-
-                    // Store cell with its bounds and data - what you draw is what you get
-                    this.drawnCells.push({
-                        x1, y1, x2, y2,
-                        count,
-                        cellIdx: idx,
-                        timeIdx: t,
-                        offsetIdx: o,
-                        bucketTimeMin,
-                        bucketTimeMax,
-                        bucketOffsetMin,
-                        bucketOffsetMax
-                    });
-                }
-            }
-        }
-
-        // Draw axes
-        this.ctx.strokeStyle = '#3f3f46';
-        this.ctx.lineWidth = 1;
-        this.ctx.beginPath();
-        this.ctx.moveTo(this.pad.l, this.pad.t);
-        this.ctx.lineTo(this.pad.l, this.h - this.pad.b);
-        this.ctx.lineTo(this.w - this.pad.r, this.h - this.pad.b);
-        this.ctx.stroke();
-
-        // Y-axis labels (file offset)
-        this.ctx.fillStyle = '#a1a1aa';
-        this.ctx.font = '11px -apple-system, sans-serif';
-        this.ctx.textAlign = 'right';
-        for (let i = 0; i <= 5; i++) {
-            const offset = this.viewOffsetMax - (viewOffsetRange * i / 5);
-            const y = this.pad.t + (chartH * i / 5);
-            this.ctx.fillText(offset.toFixed(1) + ' GB', this.pad.l - 8, y + 4);
-
-            // Grid line
-            this.ctx.strokeStyle = '#27272a';
-            this.ctx.beginPath();
-            this.ctx.moveTo(this.pad.l, y);
-            this.ctx.lineTo(this.w - this.pad.r, y);
-            this.ctx.stroke();
-        }
-
-        // X-axis labels (time)
-        this.ctx.textAlign = 'center';
-        for (let i = 0; i <= 5; i++) {
-            const time = this.viewTimeMin + (viewTimeRange * i / 5);
-            const x = this.pad.l + (chartW * i / 5);
-            const label = time < 60000
-                ? (time / 1000).toFixed(1) + 's'
-                : (time / 60000).toFixed(2) + 'm';
-            this.ctx.fillText(label, x, this.h - this.pad.b + 18);
-
-            // Grid line
-            this.ctx.strokeStyle = '#27272a';
-            this.ctx.beginPath();
-            this.ctx.moveTo(x, this.pad.t);
-            this.ctx.lineTo(x, this.h - this.pad.b);
-            this.ctx.stroke();
-        }
-
-        // Axis titles
-        this.ctx.fillStyle = '#71717a';
-        this.ctx.font = '12px -apple-system, sans-serif';
-        this.ctx.textAlign = 'center';
-        this.ctx.fillText('Time', this.pad.l + chartW / 2, this.h - 8);
-
-        this.ctx.save();
-        this.ctx.translate(14, this.pad.t + chartH / 2);
-        this.ctx.rotate(-Math.PI / 2);
-        this.ctx.fillText('File Offset', 0, 0);
-        this.ctx.restore();
-
-        // Zoom indicator
-        const isZoomed = this.viewTimeMin > this.fullTimeMin || this.viewTimeMax < this.fullTimeMax ||
-                        this.viewOffsetMin > this.fullOffsetMin || this.viewOffsetMax < this.fullOffsetMax;
-        if (isZoomed) {
-            this.ctx.fillStyle = '#3b82f6';
-            this.ctx.font = '10px -apple-system, sans-serif';
-            this.ctx.textAlign = 'right';
-            this.ctx.fillText('Zoomed (dbl-click to reset)', this.w - this.pad.r, 16);
-        }
-
-        // Legend (color scale)
-        const legendW = 120;
-        const legendH = 10;
-        const legendX = this.w - this.pad.r - legendW;
-        const legendY = this.h - 12;
-
-        for (let i = 0; i < legendW; i++) {
-            const intensity = i / legendW;
-            this.ctx.fillStyle = this.heatColor(intensity);
-            this.ctx.fillRect(legendX + i, legendY, 1, legendH);
-        }
-
-        this.ctx.fillStyle = '#71717a';
-        this.ctx.font = '9px -apple-system, sans-serif';
-        this.ctx.textAlign = 'left';
-        this.ctx.fillText('0', legendX, legendY - 2);
-        this.ctx.textAlign = 'right';
-        this.ctx.fillText(visibleMaxCount.toLocaleString(), legendX + legendW, legendY - 2);
-    }
+    });
 }
 
 // Horizontal bar chart for fault distribution (dynamically sized)
@@ -2684,12 +2313,10 @@ function initOverview() {
         });
     }
 
-    // Interactive Heatmap with zoom/pan
+    // Plotly Heatmap with built-in zoom/pan/tooltips
     if (DATA.heatmap.data.length) {
-        const canvas = document.getElementById('heatmap-canvas');
-        const tooltip = document.getElementById('heatmap-tooltip');
-        const selection = document.getElementById('heatmap-selection');
-        new InteractiveHeatmap(canvas, DATA.heatmap, tooltip, selection);
+        const container = document.getElementById('heatmap-plotly');
+        initPlotlyHeatmap(container, DATA.heatmap);
     }
 
     // Access patterns
