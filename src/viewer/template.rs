@@ -2227,198 +2227,198 @@ document.querySelectorAll('.tab').forEach(tab => {
 });
 
 document.getElementById('export-compact-btn').addEventListener('click', () => {
-    // Build compact export (removes large arrays, keeps key metrics)
-    // Helper to get measured depth for a table from cursor stats
-    const getTableDepthStats = (tableName) => {
-        const tableStats = DATA.cursor_data?.table_stats?.find(t => t.name === tableName);
-        if (!tableStats) return null;
-        // If we have per-table depth tracking in the future, add it here
-        return null;
+    // Build ultra-compact export optimized for LLM analysis (<300KB target)
+    // Focuses on actionable insights, removes redundant/verbose data
+
+    // Helper: round numbers to reduce JSON size
+    const r2 = (n) => n != null ? Math.round(n * 100) / 100 : null;
+    const r1 = (n) => n != null ? Math.round(n * 10) / 10 : null;
+    const r0 = (n) => n != null ? Math.round(n) : null;
+
+    // Helper: compact operation breakdown (top 3 only, minimal fields)
+    const compactOps = (ops) => {
+        if (!ops || !ops.length) return [];
+        return ops.slice(0, 3).map(o => ({
+            op: o.operation,
+            faults: o.faults,
+            major: o.major_faults,
+            major_pct: o.faults > 0 ? r1(o.major_faults / o.faults * 100) : 0
+        }));
+    };
+
+    // Helper: compact slow keys (top 5, truncated)
+    const compactKeys = (keys) => {
+        if (!keys || !keys.length) return [];
+        return keys.slice(0, 5).map(k => ({
+            key: k.key_hex?.substring(0, 24) || k.key_prefix?.substring(0, 24) || '?',
+            slow: k.slow_count || k.slow_access_count,
+            avg_ms: r2((k.avg_latency_us || 0) / 1000)
+        }));
     };
 
     const compact = {
-        _meta: {
-            export_version: 2,
-            description: "MDBX profiler trace - optimized for LLM analysis",
-            generated_at: new Date().toISOString()
-        },
-        analysis_summary: {
-            top_bottleneck_tables: DATA.unified_tables.slice(0, 5).map(t => t.name),
-            total_page_faults: DATA.summary.page_faults,
-            major_fault_pct: DATA.summary.major_fault_ratio,
-            tree_depth: DATA.cursor_data?.summary?.tree_depth_stats?.ops_with_depth_data > 0 ? {
-                max_observed: DATA.cursor_data.summary.tree_depth_stats.max_depth_observed,
-                avg: DATA.cursor_data.summary.tree_depth_stats.avg_depth,
-                ops_measured: DATA.cursor_data.summary.tree_depth_stats.ops_with_depth_data
-            } : null,
-            branch_leaf_ratio: DATA.page_type_stats?.traversal_to_data_ratio || null,
-            io_bound: DATA.summary.major_fault_ratio > 50,
-            high_traversal_overhead: (DATA.page_type_stats?.traversal_to_data_ratio || 0) > 1.0
-        },
-        trace: {
-            duration_secs: DATA.summary.duration_secs,
-            total_events: DATA.summary.total_events,
-            file_size_gb: DATA.summary.file_size_gb,
-            block_range: DATA.summary.block_range
-        },
-        page_faults: {
-            total: DATA.summary.page_faults,
-            major: DATA.summary.major_faults,
-            minor: DATA.summary.minor_faults,
-            major_ratio: DATA.summary.major_fault_ratio,
-            rate_per_sec: DATA.summary.fault_rate_per_sec,
+        _format: "mdbx-trace-v3",
+        _generated: new Date().toISOString(),
+
+        // === SUMMARY (key metrics for quick understanding) ===
+        summary: {
+            duration_mins: r2(DATA.summary.duration_secs / 60),
+            blocks: DATA.summary.block_range ?
+                `${DATA.summary.block_range.min_block}-${DATA.summary.block_range.max_block}` : null,
+            db_size_gb: r1(DATA.summary.file_size_gb),
+            // Faults
+            faults_total: DATA.summary.page_faults,
+            faults_major: DATA.summary.major_faults,
+            faults_minor: DATA.summary.minor_faults,
+            major_pct: r1(DATA.summary.major_fault_ratio),
+            fault_rate: r0(DATA.summary.fault_rate_per_sec),
+            // Access pattern
+            random_pct: r1(DATA.patterns.random_ratio),
+            sequential_pct: r1(DATA.patterns.sequential_ratio),
+            // Working set
             unique_pages: DATA.summary.unique_pages,
-            sequential_ratio: DATA.patterns.sequential_ratio,
-            random_ratio: DATA.patterns.random_ratio,
-            top_strides: DATA.patterns.top_strides
+            working_set_gb: r2(DATA.summary.unique_pages * 4096 / 1024 / 1024 / 1024),
         },
+
+        // === TABLES (the core analysis data) ===
         tables: DATA.unified_tables.map(t => {
-            // Find tree traversal stats for this table
-            const treeStats = DATA.tree_traversal?.tables?.find(tt => tt.name === t.name);
-            return {
+            const entry = {
                 name: t.name,
                 faults: t.faults,
-                major_faults: t.major_faults,
-                fault_pct: t.fault_percentage,
-                slow_ops: t.slow_ops,
-                time_lost_ms: t.time_lost_ms,
-                top_op: t.top_operation,
-                faults_by_op: t.details.faults_by_op,
-                // B+ tree traversal stats
-                branch_faults: treeStats?.branch_faults || 0,
-                leaf_faults: treeStats?.leaf_faults || 0,
-                branch_leaf_ratio: treeStats?.branch_leaf_ratio || null
+                fault_pct: r1(t.fault_percentage),
+                major_pct: t.faults > 0 ? r1(t.major_faults / t.faults * 100) : 0,
+                // Working set for this table
+                unique_pages: t.details?.unique_pages || null,
+                reuse_pct: t.details?.reuse_ratio != null ? r1(t.details.reuse_ratio * 100) : null,
+                // Operations breakdown (most important for optimization)
+                ops: compactOps(t.details?.faults_by_op),
+                // I/O time
+                io_time_secs: r2((t.time_lost_ms || 0) / 1000),
+                cpu_pct: r1((t.cpu_efficiency || 0) * 100),
             };
+            // Add slow keys if present
+            const keys = compactKeys(t.details?.hot_keys);
+            if (keys.length > 0) entry.slow_keys = keys;
+            return entry;
         }),
-        threads: DATA.threads.slice(0, 10),
-        cursor_ops: DATA.cursor_data.has_data ? {
-            total: DATA.cursor_data.summary.total_ops,
-            rate_per_sec: DATA.cursor_data.summary.op_rate_per_sec,
-            seek_ratio: DATA.cursor_data.summary.seek_ratio,
-            latency_avg_us: DATA.cursor_data.summary.avg_latency_us,
-            latency_p95_us: DATA.cursor_data.summary.p95_latency_us,
-            latency_p99_us: DATA.cursor_data.summary.p99_latency_us,
-            by_operation: DATA.cursor_data.operations.slice(0, 10),
-            by_table: DATA.cursor_data.table_stats.slice(0, 15).map(t => ({
-                name: t.name,
-                ops: t.ops,
-                pct: t.percentage,
-                avg_latency_us: t.avg_latency_us,
-                p95_latency_us: t.p95_latency_us
-            })),
-            slow_tables: DATA.cursor_data.slow_ops_by_table.slice(0, 10).map(s => ({
-                table: s.table,
-                slow_ops: s.slow_op_count,
-                time_lost_ms: s.total_slow_time_ms,
-                by_op: s.by_operation.slice(0, 5)
-            })),
-            slow_keys: DATA.cursor_data.slow_keys.slice(0, 20),
-            tree_depth_stats: DATA.cursor_data.summary.tree_depth_stats ? {
-                ops_with_depth_data: DATA.cursor_data.summary.tree_depth_stats.ops_with_depth_data,
-                max_depth_observed: DATA.cursor_data.summary.tree_depth_stats.max_depth_observed,
-                avg_depth: DATA.cursor_data.summary.tree_depth_stats.avg_depth,
-                depth_histogram: DATA.cursor_data.summary.tree_depth_stats.depth_histogram,
-                // Per-table depth stats (sorted by avg depth descending)
-                by_table: DATA.cursor_data.summary.tree_depth_stats.by_table?.slice(0, 20).map(t => ({
-                    table: t.table_name,
-                    ops: t.ops_count,
-                    max_depth: t.max_depth,
-                    avg_depth: t.avg_depth,
-                    avg_faults: t.avg_faults,
-                    avg_latency_us: t.avg_latency_us
-                })) || [],
-                // Per-operation depth stats (sorted by avg depth descending)
-                by_operation: DATA.cursor_data.summary.tree_depth_stats.by_operation?.map(op => ({
-                    operation: op.operation,
-                    is_seek: op.is_seek,
-                    ops: op.ops_count,
-                    max_depth: op.max_depth,
-                    avg_depth: op.avg_depth,
-                    avg_faults: op.avg_faults
-                })) || []
-            } : null
-        } : null,
-        transactions: DATA.txn_data.has_data ? {
+
+        // === THREADS (which threads cause which faults) ===
+        threads: DATA.threads.slice(0, 10).map(t => ({
+            tid: t.tid,
+            faults: t.faults,
+            major_pct: t.faults > 0 ? r1(t.major_faults / t.faults * 100) : 0,
+            tables: (t.top_tables || []).slice(0, 5).map(tt => ({
+                name: tt.table_name,
+                faults: tt.faults,
+                major_pct: r1(tt.major_pct)
+            }))
+        })),
+
+        // === TRANSACTIONS (commit patterns) ===
+        txns: DATA.txn_data?.has_data ? {
             total: DATA.txn_data.summary.begin_count,
-            rate_per_sec: DATA.txn_data.summary.txn_rate_per_sec,
-            ro_count: DATA.txn_data.summary.ro_count,
-            rw_count: DATA.txn_data.summary.rw_count,
+            ro: DATA.txn_data.summary.ro_count,
+            rw: DATA.txn_data.summary.rw_count,
             commits: DATA.txn_data.summary.commit_count,
-            aborts: DATA.txn_data.summary.abort_count,
-            commit_latency_avg_us: DATA.txn_data.summary.avg_commit_latency_us,
-            commit_latency_p95_us: DATA.txn_data.summary.p95_commit_latency_us,
-            commit_latency_p99_us: DATA.txn_data.summary.p99_commit_latency_us,
-            commit_latency_max_us: DATA.txn_data.summary.max_commit_latency_us,
-            concurrency: {
-                max_ro: DATA.txn_data.concurrency.max_concurrent_ro,
-                max_rw: DATA.txn_data.concurrency.max_concurrent_rw,
-                avg_ro: DATA.txn_data.concurrency.avg_concurrent_ro
+            commit_latency_ms: {
+                avg: r2(DATA.txn_data.summary.avg_commit_latency_us / 1000),
+                p95: r2(DATA.txn_data.summary.p95_commit_latency_us / 1000),
+                p99: r2(DATA.txn_data.summary.p99_commit_latency_us / 1000),
+                max: r2(DATA.txn_data.summary.max_commit_latency_us / 1000)
             },
-            top_threads: DATA.txn_data.thread_stats.slice(0, 10)
+            max_concurrent_ro: DATA.txn_data.concurrency.max_concurrent_ro,
+            avg_concurrent_ro: r1(DATA.txn_data.concurrency.avg_concurrent_ro)
         } : null,
-        attribution: DATA.direct_fault_attribution.has_data ? {
-            directly_attributed: DATA.direct_fault_attribution.directly_attributed_count,
-            timestamp_fallback: DATA.direct_fault_attribution.timestamp_fallback_count,
-            uncorrelated: DATA.direct_fault_attribution.uncorrelated_count,
-            by_op_type: DATA.direct_fault_attribution.faults_by_op_type,
-            by_cursor_op: DATA.direct_fault_attribution.faults_by_cursor_op
+
+        // === ACCESS PATTERNS (stride analysis) ===
+        strides: (DATA.patterns.top_strides || []).slice(0, 5).map(s => ({
+            type: s.pattern_type,
+            pages: s.stride_pages,
+            count: s.count,
+            pct: r1(s.percentage)
+        })),
+
+        // === CURSOR OPERATIONS (if available) ===
+        cursor_ops: DATA.cursor_data?.has_data ? {
+            total: DATA.cursor_data.summary.total_ops,
+            rate: r0(DATA.cursor_data.summary.op_rate_per_sec),
+            seek_pct: r1(DATA.cursor_data.summary.seek_ratio * 100),
+            latency_us: {
+                avg: r1(DATA.cursor_data.summary.avg_latency_us),
+                p95: r1(DATA.cursor_data.summary.p95_latency_us),
+                p99: r1(DATA.cursor_data.summary.p99_latency_us)
+            },
+            by_op: (DATA.cursor_data.operations || []).slice(0, 8).map(o => ({
+                op: o.name,
+                count: o.count,
+                pct: r1(o.percentage),
+                avg_us: r1(o.avg_latency_us)
+            }))
         } : null,
-        // B+ Tree Visualization data (BTREE_VIZ_PLAN)
-        btree: DATA.btree_viz && DATA.btree_viz.has_data ? {
-            traversal_efficiency_score: DATA.btree_viz.traversal_efficiency_score,
-            tree_depth_estimates: DATA.btree_viz.tree_depth_estimates,
-            operation_page_types: DATA.btree_viz.operation_page_types.slice(0, 10),
-            attribution_stats: DATA.btree_viz.attribution_stats ? {
-                total_faults: DATA.btree_viz.attribution_stats.total_faults,
-                batch_attributed_faults: DATA.btree_viz.attribution_stats.batch_attributed_faults,
-                block_attributed_faults: DATA.btree_viz.attribution_stats.block_attributed_faults,
-                unattributed_faults: DATA.btree_viz.attribution_stats.unattributed_faults,
-                batch_attribution_pct: DATA.btree_viz.attribution_stats.batch_attribution_pct,
-                block_attribution_pct: DATA.btree_viz.attribution_stats.block_attribution_pct,
-                rw_commits_detected: DATA.btree_viz.attribution_stats.rw_commits_detected,
-                blocks_with_writes: DATA.btree_viz.attribution_stats.blocks_with_writes
+
+        // === SLOW KEYS (global top offenders) ===
+        slow_keys: (DATA.cursor_data?.slow_keys || []).slice(0, 15).map(k => ({
+            table: k.table,
+            key: k.key_hex?.substring(0, 24) || '?',
+            slow_count: k.slow_access_count,
+            avg_ms: r2(k.avg_latency_us / 1000)
+        })),
+
+        // === WORKING SET (memory analysis) ===
+        working_set: DATA.working_set?.has_data ? {
+            total_unique_pages: DATA.working_set.total_unique_pages,
+            total_accesses: DATA.working_set.total_accesses,
+            reuse_pct: r1(DATA.working_set.reuse_ratio * 100),
+            hot_pages: DATA.working_set.hot_page_analysis ? {
+                for_80pct: DATA.working_set.hot_page_analysis.pages_for_80pct,
+                for_90pct: DATA.working_set.hot_page_analysis.pages_for_90pct,
+                pareto_ratio: r2(DATA.working_set.hot_page_analysis.pareto_ratio)
             } : null,
-            batch_analysis: DATA.btree_viz.batch_analysis ? DATA.btree_viz.batch_analysis.map(b => ({
-                batch_index: b.batch_index,
-                first_block: b.first_block,
-                last_block: b.last_block,
-                block_count: b.block_count,
-                total_faults: b.total_faults,
-                branch_faults: b.branch_faults,
-                leaf_faults: b.leaf_faults,
-                major_faults: b.major_faults,
-                io_time_us: b.io_time_us,
-                tables_touched: b.tables_touched,
-                start_time_ns: b.start_time_ns,
-                end_time_ns: b.end_time_ns,
-                commit_latency_us: b.commit_latency_us
-            })) : [],
-            block_analysis: DATA.btree_viz.block_analysis.slice(0, 20).map(b => ({
-                block: b.block_number,
-                total: b.total_faults,
-                branch: b.branch_faults,
-                leaf: b.leaf_faults,
-                major: b.major_faults,
-                io_time_us: b.io_time_us,
-                tables: b.tables_touched
-            })),
-            tree_traversal: DATA.tree_traversal && DATA.tree_traversal.has_data ?
-                DATA.tree_traversal.tables.slice(0, 15).map(t => ({
-                    name: t.name,
-                    total_faults: t.total_faults,
-                    branch_faults: t.branch_faults,
-                    leaf_faults: t.leaf_faults,
-                    branch_leaf_ratio: t.branch_leaf_ratio
-                })) : null
+            per_table: (DATA.working_set.per_table || []).slice(0, 10).map(t => ({
+                name: t.name,
+                unique_pages: t.unique_pages,
+                hot_pages: t.hot_pages,
+                working_set_mb: r1(t.working_set_mb)
+            }))
         } : null,
-        page_types: DATA.page_type_stats && DATA.page_type_stats.has_data ? {
-            total_faults: DATA.page_type_stats.total_faults,
-            traversal_to_data_ratio: DATA.page_type_stats.traversal_to_data_ratio,
-            by_type: DATA.page_type_stats.by_type
+
+        // === ATTRIBUTION (fault source tracking) ===
+        attribution: DATA.direct_fault_attribution?.has_data ? {
+            direct: DATA.direct_fault_attribution.directly_attributed_count,
+            fallback: DATA.direct_fault_attribution.timestamp_fallback_count,
+            uncorrelated: DATA.direct_fault_attribution.uncorrelated_count,
+            by_op: (DATA.direct_fault_attribution.faults_by_op_type || []).map(o => ({
+                op: o.op_type,
+                faults: o.total_faults,
+                major: o.major_faults,
+                pct: r1(o.percentage)
+            }))
         } : null
     };
 
-    const json = JSON.stringify(compact, null, 2);
+    // Remove null values to save space
+    const removeNulls = (obj) => {
+        if (Array.isArray(obj)) {
+            return obj.map(removeNulls).filter(v => v != null);
+        } else if (obj && typeof obj === 'object') {
+            const cleaned = {};
+            for (const [k, v] of Object.entries(obj)) {
+                const cleanedV = removeNulls(v);
+                if (cleanedV != null && !(Array.isArray(cleanedV) && cleanedV.length === 0)) {
+                    cleaned[k] = cleanedV;
+                }
+            }
+            return Object.keys(cleaned).length > 0 ? cleaned : null;
+        }
+        return obj;
+    };
+
+    const cleanedCompact = removeNulls(compact);
+    const json = JSON.stringify(cleanedCompact, null, 2);
+
+    // Log size for debugging
+    console.log(`Export size: ${(json.length / 1024).toFixed(1)} KB`);
+
     const blob = new Blob([json], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
