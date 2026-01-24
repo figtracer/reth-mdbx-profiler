@@ -123,6 +123,10 @@ pub fn generate_html(data: &ViewerData) -> String {
                         <div class="card-header">
                             Tables
                             <span class="card-hint">Click column headers to sort, click row to expand</span>
+                            <span class="expand-controls">
+                                <button class="expand-btn" id="expand-all-btn" title="Expand all rows">Expand All</button>
+                                <button class="expand-btn" id="collapse-all-btn" title="Collapse all rows">Collapse All</button>
+                            </span>
                         </div>
                         <div class="card-body compact-table-container" style="max-height: none; padding: 0;">
                             <table class="compact-table expandable-table sortable-table" id="unified-tables">
@@ -563,6 +567,32 @@ body {
     font-weight: 400;
     text-transform: none;
     margin-left: auto;
+}
+
+/* Expand/Collapse controls */
+.expand-controls {
+    display: flex;
+    gap: 6px;
+    margin-left: 12px;
+}
+
+.expand-btn {
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: 500;
+    color: #a1a1aa;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s;
+    text-transform: none;
+}
+
+.expand-btn:hover {
+    color: #e4e4e7;
+    background: rgba(255, 255, 255, 0.1);
+    border-color: rgba(255, 255, 255, 0.2);
 }
 
 /* Chart legend (inline in header) */
@@ -2700,23 +2730,40 @@ function renderTablesTable(unified) {
         detailsTr.innerHTML = detailsHtml;
         tbody.appendChild(detailsTr);
 
-        // Click handler to expand/collapse
+        // Click handler to expand/collapse (allows multiple rows to be expanded)
         tr.addEventListener('click', () => {
             const isExpanded = tr.classList.contains('expanded');
 
-            // Collapse all other rows
-            document.querySelectorAll('#unified-tables .table-row.expanded').forEach(r => {
-                r.classList.remove('expanded');
-            });
-            document.querySelectorAll('#unified-tables .details-row').forEach(r => {
-                r.classList.add('hidden');
-            });
-
-            // Toggle this row
-            if (!isExpanded) {
+            // Toggle this row only (don't collapse others)
+            if (isExpanded) {
+                tr.classList.remove('expanded');
+                detailsTr.classList.add('hidden');
+            } else {
                 tr.classList.add('expanded');
                 detailsTr.classList.remove('hidden');
             }
+        });
+    });
+
+    // Expand All button
+    document.getElementById('expand-all-btn')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        document.querySelectorAll('#unified-tables .table-row').forEach(r => {
+            r.classList.add('expanded');
+        });
+        document.querySelectorAll('#unified-tables .details-row').forEach(r => {
+            r.classList.remove('hidden');
+        });
+    });
+
+    // Collapse All button
+    document.getElementById('collapse-all-btn')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        document.querySelectorAll('#unified-tables .table-row').forEach(r => {
+            r.classList.remove('expanded');
+        });
+        document.querySelectorAll('#unified-tables .details-row').forEach(r => {
+            r.classList.add('hidden');
         });
     });
 }
