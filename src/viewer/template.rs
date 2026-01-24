@@ -1909,7 +1909,7 @@ function initPlotlyHeatmap(container, data, timelineData, durationSecs) {
             mode: 'lines',
             name: 'Fault Rate',
             line: {
-                color: 'rgba(251, 146, 60, 0.25)',  // Orange with 25% opacity
+                color: 'rgba(251, 146, 60, 0.08)',  // Orange with 15% opacity
                 width: 1.5
             },
             fill: 'tozeroy',
