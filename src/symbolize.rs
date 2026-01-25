@@ -240,13 +240,14 @@ impl SymbolResolver {
                     file: code_info
                         .and_then(|c| {
                             c.dir.as_ref().map(|d| {
-                                let file = c.file.to_string();
-                                format!("{}/{}", d, file)
+                                let file = c.file.to_string_lossy();
+                                let dir = d.to_string_lossy();
+                                format!("{}/{}", dir, file)
                             })
                         })
-                        .or_else(|| code_info.map(|c| c.file.to_string())),
+                        .or_else(|| code_info.map(|c| c.file.to_string_lossy().into_owned())),
                     line: code_info.and_then(|c| c.line),
-                    offset: Some(sym.offset),
+                    offset: Some(sym.offset as u64),
                 }
             }
             _ => ResolvedFrame::unresolved(address),
