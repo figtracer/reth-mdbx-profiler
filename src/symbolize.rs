@@ -294,45 +294,53 @@ impl SymbolResolver {
     /// Convert a runtime address to a file offset for PIE binaries
     ///
     /// For PIE (Position Independent Executable) binaries:
-    /// - Runtime address = ASLR_base + file_offset
-    /// - ASLR_base is typically 0x55xxxxxxxxxx or 0x56xxxxxxxxxx on Linux
-    /// - File offsets are relative to the ELF file, usually < 256MB for most binaries
+    /// - Runtime address = ASLR_base + virtual_offset
+    /// - For PIE binaries where ELF base vaddr is 0, virtual_offset == file_offset
+    /// - ASLR_base must be provided via --base-address (from /proc/pid/maps first segment)
     ///
-    /// We detect the base by looking at the high bits of the address.
+    /// To find the base address:
+    /// 1. Run: cat /proc/<pid>/maps | head -1
+    /// 2. The first column before the dash is the base address
+    /// Example: "56cfee37b000-56cfef659000 r--p 00000000" -> base is 0x56cfee37b000
     fn runtime_addr_to_file_offset(&mut self, address: u64) -> u64 {
-        // If we've already detected a base, use it
+        // If we have a known base address, use it directly
         if let Some(base) = self.detected_base {
-            return address.saturating_sub(base);
+            let offset = address.saturating_sub(base);
+            return offset;
         }
 
-        // Detect the ASLR base from the address pattern
-        // Linux PIE executables are typically loaded at addresses starting with 0x55 or 0x56
+        // No base address provided - we cannot reliably detect ASLR base from addresses alone
+        // because ASLR randomizes to arbitrary page boundaries, not predictable alignments.
+        //
+        // As a fallback, if the address looks like a PIE address (0x55xx or 0x56xx prefix),
+        // we'll try to use it directly and hope blazesym can handle it, or return a
+        // likely-wrong offset that at least won't crash.
         let high_bytes = address >> 40;
 
         if high_bytes == 0x55 || high_bytes == 0x56 {
-            // This looks like a PIE executable address
-            // For an address like 0x56cff0b892e3:
-            // - The base is 0x56cff0000000 (upper 28 bits, aligned to 16MB boundary)
-            // - The file offset is 0xb892e3 (~12MB) which is reasonable for code
+            // This is a PIE address but we don't know the base.
+            // Log a warning on first occurrence and return the address as-is.
+            // Symbol resolution will likely fail, but at least we tried.
             //
-            // ASLR typically randomizes bits 12-47 (36 bits), but the mapping
-            // is at a large alignment. We'll mask to keep the upper portion.
-            //
-            // Mask: 0xFFFFFFFF000000 keeps upper 40 bits, giving max 16MB offset
-            // But 16MB might be too small for large binaries.
-            // Mask: 0xFFFFFFF0000000 keeps upper 36 bits, giving max 256MB offset
-            let base = address & 0xFFFFFFF0000000; // Align to 256MB boundary
-            self.detected_base = Some(base);
-            return address.saturating_sub(base);
-        }
-
-        // For non-standard addresses, try using lower 28 bits as file offset
-        // This handles cases where the address might already be a file offset
-        // or uses a different ASLR pattern
-        if address > 0x100000000 {
-            // Address is > 4GB, likely has ASLR base
-            // Use lower 28 bits as conservative estimate (max 256MB offset)
-            address & 0x0FFFFFFF
+            // The user should use --base-address to provide the correct base.
+            // They can find it with: cat /proc/<pid>/maps | head -1
+            static WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                eprintln!(
+                    "Warning: PIE address detected (0x{:x}) but no --base-address provided.",
+                    address
+                );
+                eprintln!("Symbol resolution may fail. To fix:");
+                eprintln!("  1. Find base: cat /proc/<pid>/maps | head -1");
+                eprintln!("  2. Add: --base-address <first_hex_address>");
+            }
+            // Return address as-is - blazesym might handle absolute addresses
+            address
+        } else if address > 0x100000000 {
+            // Address is > 4GB but not standard PIE range
+            // Might be a different memory region, return as-is
+            address
         } else {
             // Small address, might already be a file offset or non-PIE address
             address
