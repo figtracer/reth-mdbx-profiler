@@ -202,6 +202,54 @@ pub fn generate_html(data: &ViewerData) -> String {
                         </div>
                     </div>
                 </div>
+
+                <!-- Call Site Analysis Section (Stack Traces on Slow Operations) -->
+                <div id="call-site-section" style="display:none;">
+                    <div class="section-separator">
+                        <span class="separator-label">Call Site Analysis</span>
+                    </div>
+                    <div class="metrics-row" style="margin-bottom: 16px;">
+                        <div class="metrics-group">
+                            <div class="metric">
+                                <span class="metric-label">Slow Ops</span>
+                                <span class="metric-value" id="callsite-total-slow">-</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">Unique Sites</span>
+                                <span class="metric-value" id="callsite-unique">-</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">Critical Path</span>
+                                <span class="metric-value major" id="callsite-critical-pct">-</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">Background</span>
+                                <span class="metric-value minor" id="callsite-background-pct">-</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="card full-width">
+                        <div class="card-header">
+                            Top Call Sites
+                            <span class="card-hint">Stack traces from slow DB operations (>1ms)</span>
+                        </div>
+                        <div class="card-body compact-table-container" style="padding: 0;">
+                            <table class="compact-table sortable-table" id="call-site-table">
+                                <thead>
+                                    <tr>
+                                        <th style="width:30px;"></th>
+                                        <th data-sort="call_path">Call Path</th>
+                                        <th data-sort="count" class="sortable sorted-desc">Count <span class="sort-icon">▼</span></th>
+                                        <th data-sort="avg_latency" class="sortable">Avg Latency</th>
+                                        <th data-sort="total_faults" class="sortable">Faults</th>
+                                        <th data-sort="path_type" class="sortable">Path Type</th>
+                                    </tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
             </section>
 
             <!-- Hidden Tables tab for compatibility (data still loads here) -->
@@ -2502,6 +2550,7 @@ function initTab(name) {
         initOverview();
         initTables();  // Tables are now part of overview
         initCursorLifecycle();  // Cursor lifecycle is in overview
+        initCallSiteAnalysis();  // Call site analysis from slow op stack traces
     }
     else if (name === 'resources') initResources();
 }
@@ -3828,6 +3877,167 @@ function renderCursorLifecycleTable(data) {
             <td>${fmtLifetime(t.avg_lifetime_us)}</td>
         `;
         tbody.appendChild(row);
+    });
+}
+
+// Global state for call site sorting
+let callSiteSortColumn = 'count';
+let callSiteSortDesc = true;
+
+function initCallSiteAnalysis() {
+    const cs = DATA.call_site_analysis;
+
+    if (!cs || !cs.has_data) {
+        // Hide the section if no data
+        document.getElementById('call-site-section').style.display = 'none';
+        return;
+    }
+
+    // Show the section
+    document.getElementById('call-site-section').style.display = 'block';
+
+    // Populate metrics
+    document.getElementById('callsite-total-slow').textContent = fmt(cs.total_slow_ops);
+    document.getElementById('callsite-unique').textContent = fmt(cs.unique_call_sites);
+
+    const totalOps = cs.path_summary.critical_path_count + cs.path_summary.background_count + cs.path_summary.unknown_count;
+    const criticalPct = totalOps > 0 ? (cs.path_summary.critical_path_count / totalOps * 100).toFixed(1) : '0';
+    const backgroundPct = totalOps > 0 ? (cs.path_summary.background_count / totalOps * 100).toFixed(1) : '0';
+
+    document.getElementById('callsite-critical-pct').textContent = criticalPct + '%';
+    document.getElementById('callsite-background-pct').textContent = backgroundPct + '%';
+
+    // Initial table render
+    renderCallSiteTable(cs.top_call_sites);
+
+    // Setup sortable column headers
+    document.querySelectorAll('#call-site-table th[data-sort]').forEach(th => {
+        th.style.cursor = 'pointer';
+        th.addEventListener('click', () => {
+            const sortKey = th.dataset.sort;
+            if (!sortKey || sortKey === 'call_path') return;
+
+            // Toggle direction if same column, else default to desc
+            if (callSiteSortColumn === sortKey) {
+                callSiteSortDesc = !callSiteSortDesc;
+            } else {
+                callSiteSortColumn = sortKey;
+                callSiteSortDesc = true;
+            }
+
+            // Update header styles
+            document.querySelectorAll('#call-site-table th').forEach(h => {
+                h.classList.remove('sorted-asc', 'sorted-desc');
+                const icon = h.querySelector('.sort-icon');
+                if (icon) icon.remove();
+            });
+            th.classList.add(callSiteSortDesc ? 'sorted-desc' : 'sorted-asc');
+            const label = th.textContent.trim();
+            th.innerHTML = label + ` <span class="sort-icon">${callSiteSortDesc ? '▼' : '▲'}</span>`;
+
+            // Re-render table
+            renderCallSiteTable(cs.top_call_sites);
+        });
+    });
+}
+
+function renderCallSiteTable(data) {
+    const tbody = document.querySelector('#call-site-table tbody');
+    tbody.innerHTML = '';
+
+    if (!data || data.length === 0) return;
+
+    // Sort data
+    const sorted = [...data].sort((a, b) => {
+        let aVal, bVal;
+        switch (callSiteSortColumn) {
+            case 'count': aVal = a.count; bVal = b.count; break;
+            case 'avg_latency': aVal = a.avg_latency_us; bVal = b.avg_latency_us; break;
+            case 'total_faults': aVal = a.total_faults; bVal = b.total_faults; break;
+            case 'path_type':
+                aVal = a.is_critical_path === true ? 2 : (a.is_critical_path === false ? 1 : 0);
+                bVal = b.is_critical_path === true ? 2 : (b.is_critical_path === false ? 1 : 0);
+                break;
+            default: aVal = a.count; bVal = b.count;
+        }
+        return callSiteSortDesc ? bVal - aVal : aVal - bVal;
+    });
+
+    // Render rows (limit to top 50)
+    sorted.slice(0, 50).forEach((cs, idx) => {
+        // Main row
+        const tr = document.createElement('tr');
+        tr.className = 'table-row';
+        tr.dataset.idx = idx;
+
+        // Truncate call path for display
+        const callPathShort = cs.call_path.length > 60
+            ? cs.call_path.substring(0, 57) + '...'
+            : cs.call_path;
+
+        // Path type badge
+        let pathTypeBadge = '<span style="color:#71717a;">Unknown</span>';
+        if (cs.is_critical_path === true) {
+            pathTypeBadge = '<span style="color:#f87171;font-weight:600;">Critical</span>';
+        } else if (cs.is_critical_path === false) {
+            pathTypeBadge = '<span style="color:#34d399;">Background</span>';
+        }
+
+        tr.innerHTML = `
+            <td><span class="expand-icon">▶</span></td>
+            <td title="${cs.call_path}" style="font-family:monospace;font-size:11px;">${callPathShort}</td>
+            <td>${fmt(cs.count)}</td>
+            <td>${fmtLat(cs.avg_latency_us)}</td>
+            <td>${fmt(cs.total_faults)}</td>
+            <td>${pathTypeBadge}</td>
+        `;
+        tbody.appendChild(tr);
+
+        // Details row (hidden by default)
+        const detailsTr = document.createElement('tr');
+        detailsTr.className = 'details-row hidden';
+        detailsTr.dataset.idx = idx;
+
+        let detailsHtml = '<td colspan="6"><div class="details-content" style="grid-template-columns: 1fr 1fr;">';
+
+        // Stats
+        detailsHtml += '<div class="details-section"><div class="details-section-title">Statistics</div><div class="details-list">';
+        detailsHtml += `<div class="details-item"><span class="details-item-name">Total Operations</span><span class="details-item-value">${fmt(cs.count)}</span></div>`;
+        detailsHtml += `<div class="details-item"><span class="details-item-name">Total Latency</span><span class="details-item-value">${(cs.total_latency_ns / 1e6).toFixed(1)}ms</span></div>`;
+        detailsHtml += `<div class="details-item"><span class="details-item-name">Avg Latency</span><span class="details-item-value">${fmtLat(cs.avg_latency_us)}</span></div>`;
+        detailsHtml += `<div class="details-item"><span class="details-item-name">Max Latency</span><span class="details-item-value">${fmtLat(cs.max_latency_us)}</span></div>`;
+        detailsHtml += `<div class="details-item"><span class="details-item-name">Total Faults</span><span class="details-item-value">${fmt(cs.total_faults)}</span></div>`;
+        detailsHtml += `<div class="details-item"><span class="details-item-name">Major Faults</span><span class="details-item-value major">${fmt(cs.major_faults)}</span></div>`;
+        detailsHtml += `<div class="details-item"><span class="details-item-name">Avg Faults/Op</span><span class="details-item-value">${cs.avg_faults.toFixed(2)}</span></div>`;
+        detailsHtml += '</div></div>';
+
+        // Sample Stack Trace
+        detailsHtml += '<div class="details-section"><div class="details-section-title">Sample Stack Trace</div><div class="details-list" style="font-family:monospace;font-size:10px;">';
+        if (cs.sample_stack && cs.sample_stack.length > 0) {
+            cs.sample_stack.slice(0, 10).forEach((frame, i) => {
+                const frameShort = frame.length > 50 ? frame.substring(0, 47) + '...' : frame;
+                detailsHtml += `<div class="details-item" style="padding:2px 0;"><span style="color:#52525b;margin-right:8px;">${i}:</span><span title="${frame}">${frameShort}</span></div>`;
+            });
+        } else {
+            detailsHtml += '<div class="details-item"><span style="color:#52525b;">No stack trace available</span></div>';
+        }
+        detailsHtml += '</div></div>';
+
+        detailsHtml += '</div></td>';
+        detailsTr.innerHTML = detailsHtml;
+        tbody.appendChild(detailsTr);
+
+        // Click handler to expand/collapse
+        tr.addEventListener('click', () => {
+            const isExpanded = tr.classList.contains('expanded');
+            if (isExpanded) {
+                tr.classList.remove('expanded');
+                detailsTr.classList.add('hidden');
+            } else {
+                tr.classList.add('expanded');
+                detailsTr.classList.remove('hidden');
+            }
+        });
     });
 }
 
