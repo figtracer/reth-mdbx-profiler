@@ -50,6 +50,8 @@ pub struct StreamingConfig {
     pub heatmap_offset_buckets: u32,
     /// Path to binary for symbol resolution in call site analysis
     pub binary_path: Option<std::path::PathBuf>,
+    /// Base address of the binary in memory (for symbol resolution)
+    pub binary_base_address: Option<u64>,
 }
 
 impl Default for StreamingConfig {
@@ -66,6 +68,7 @@ impl Default for StreamingConfig {
             heatmap_time_buckets: 500,
             heatmap_offset_buckets: 200,
             binary_path: None,
+            binary_base_address: None,
         }
     }
 }
@@ -3133,11 +3136,13 @@ impl StreamingAggregator {
         }
 
         // Create symbol resolver if binary path is provided
-        let mut resolver = self
-            .config
-            .binary_path
-            .as_ref()
-            .map(|path| SymbolResolver::with_binary(path.clone()));
+        let mut resolver = self.config.binary_path.as_ref().map(|path| {
+            if let Some(base) = self.config.binary_base_address {
+                SymbolResolver::with_binary_and_base(path.clone(), base)
+            } else {
+                SymbolResolver::with_binary(path.clone())
+            }
+        });
 
         // Helper to parse hex addresses from strings like "0x56cff0b892e3"
         fn parse_hex_address(s: &str) -> Option<u64> {

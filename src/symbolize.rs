@@ -192,6 +192,11 @@ pub struct SymbolResolver {
     cache: HashMap<(u32, u64), ResolvedFrame>,
     /// Path to the binary for symbol resolution (optional, uses /proc/pid/exe if not set)
     binary_path: Option<PathBuf>,
+    /// Base load address for the binary (for PIE executables)
+    /// This is detected from the first address we see that looks like a valid code address
+    detected_base: Option<u64>,
+    /// The virtual address of the first loadable segment from the ELF
+    elf_base_vaddr: Option<u64>,
 }
 
 impl SymbolResolver {
@@ -201,15 +206,136 @@ impl SymbolResolver {
             symbolizer: Symbolizer::new(),
             cache: HashMap::new(),
             binary_path: None,
+            detected_base: None,
+            elf_base_vaddr: None,
         }
     }
 
     /// Create a resolver with a specific binary path
     pub fn with_binary(binary_path: PathBuf) -> Self {
+        // Try to read the ELF base virtual address from the binary
+        let elf_base_vaddr = Self::read_elf_base_vaddr(&binary_path);
+
         Self {
             symbolizer: Symbolizer::new(),
             cache: HashMap::new(),
             binary_path: Some(binary_path),
+            detected_base: None,
+            elf_base_vaddr,
+        }
+    }
+
+    /// Create a resolver with a specific binary path and known base address
+    /// Use this when you know the exact ASLR base address from /proc/pid/maps
+    pub fn with_binary_and_base(binary_path: PathBuf, base_address: u64) -> Self {
+        let elf_base_vaddr = Self::read_elf_base_vaddr(&binary_path);
+
+        Self {
+            symbolizer: Symbolizer::new(),
+            cache: HashMap::new(),
+            binary_path: Some(binary_path),
+            detected_base: Some(base_address),
+            elf_base_vaddr,
+        }
+    }
+
+    /// Set the base address for address translation
+    /// This overrides automatic base detection
+    pub fn set_base_address(&mut self, base: u64) {
+        self.detected_base = Some(base);
+    }
+
+    /// Read the base virtual address from an ELF file's first PT_LOAD segment
+    fn read_elf_base_vaddr(path: &PathBuf) -> Option<u64> {
+        use std::fs::File;
+        use std::io::Read;
+
+        let mut file = File::open(path).ok()?;
+        let mut header = [0u8; 64]; // ELF64 header is 64 bytes
+        file.read_exact(&mut header).ok()?;
+
+        // Check ELF magic
+        if &header[0..4] != b"\x7fELF" {
+            return None;
+        }
+
+        // Check 64-bit
+        if header[4] != 2 {
+            return None; // Not 64-bit
+        }
+
+        // Read program header offset (e_phoff) at offset 32
+        let phoff = u64::from_le_bytes(header[32..40].try_into().ok()?);
+        // Read number of program headers (e_phnum) at offset 56
+        let phnum = u16::from_le_bytes(header[56..58].try_into().ok()?) as u64;
+
+        // Read program headers to find first PT_LOAD
+        use std::io::{Seek, SeekFrom};
+        file.seek(SeekFrom::Start(phoff)).ok()?;
+
+        for _ in 0..phnum {
+            let mut phdr = [0u8; 56]; // Elf64_Phdr is 56 bytes
+            if file.read_exact(&mut phdr).is_err() {
+                break;
+            }
+
+            let p_type = u32::from_le_bytes(phdr[0..4].try_into().ok()?);
+            // PT_LOAD = 1
+            if p_type == 1 {
+                // p_vaddr is at offset 16 in Elf64_Phdr
+                let p_vaddr = u64::from_le_bytes(phdr[16..24].try_into().ok()?);
+                return Some(p_vaddr);
+            }
+        }
+
+        None
+    }
+
+    /// Convert a runtime address to a file offset for PIE binaries
+    ///
+    /// For PIE (Position Independent Executable) binaries:
+    /// - Runtime address = ASLR_base + file_offset
+    /// - ASLR_base is typically 0x55xxxxxxxxxx or 0x56xxxxxxxxxx on Linux
+    /// - File offsets are relative to the ELF file, usually < 256MB for most binaries
+    ///
+    /// We detect the base by looking at the high bits of the address.
+    fn runtime_addr_to_file_offset(&mut self, address: u64) -> u64 {
+        // If we've already detected a base, use it
+        if let Some(base) = self.detected_base {
+            return address.saturating_sub(base);
+        }
+
+        // Detect the ASLR base from the address pattern
+        // Linux PIE executables are typically loaded at addresses starting with 0x55 or 0x56
+        let high_bytes = address >> 40;
+
+        if high_bytes == 0x55 || high_bytes == 0x56 {
+            // This looks like a PIE executable address
+            // For an address like 0x56cff0b892e3:
+            // - The base is 0x56cff0000000 (upper 28 bits, aligned to 16MB boundary)
+            // - The file offset is 0xb892e3 (~12MB) which is reasonable for code
+            //
+            // ASLR typically randomizes bits 12-47 (36 bits), but the mapping
+            // is at a large alignment. We'll mask to keep the upper portion.
+            //
+            // Mask: 0xFFFFFFFF000000 keeps upper 40 bits, giving max 16MB offset
+            // But 16MB might be too small for large binaries.
+            // Mask: 0xFFFFFFF0000000 keeps upper 36 bits, giving max 256MB offset
+            let base = address & 0xFFFFFFF0000000; // Align to 256MB boundary
+            self.detected_base = Some(base);
+            return address.saturating_sub(base);
+        }
+
+        // For non-standard addresses, try using lower 28 bits as file offset
+        // This handles cases where the address might already be a file offset
+        // or uses a different ASLR pattern
+        if address > 0x100000000 {
+            // Address is > 4GB, likely has ASLR base
+            // Use lower 28 bits as conservative estimate (max 256MB offset)
+            address & 0x0FFFFFFF
+        } else {
+            // Small address, might already be a file offset or non-PIE address
+            address
         }
     }
 
@@ -221,15 +347,28 @@ impl SymbolResolver {
         }
 
         // Resolve using blazesym
-        let source = if let Some(ref path) = self.binary_path {
-            Source::Elf(Elf::new(path))
+        let (source, input) = if let Some(ref path) = self.binary_path {
+            // For ELF files with PIE, convert runtime addresses to file offsets
+            let file_offset = if self.elf_base_vaddr == Some(0) || self.elf_base_vaddr.is_none() {
+                // PIE binary or unknown - convert address
+                self.runtime_addr_to_file_offset(address)
+            } else {
+                // Non-PIE binary - address might be usable directly
+                address
+            };
+
+            (
+                Source::Elf(Elf::new(path)),
+                blazesym::symbolize::Input::FileOffset(file_offset),
+            )
         } else {
-            Source::Process(Process::new(pid.into()))
+            (
+                Source::Process(Process::new(pid.into())),
+                blazesym::symbolize::Input::AbsAddr(address),
+            )
         };
 
-        let result = self
-            .symbolizer
-            .symbolize_single(&source, blazesym::symbolize::Input::AbsAddr(address));
+        let result = self.symbolizer.symbolize_single(&source, input);
 
         let frame = match result {
             Ok(Symbolized::Sym(sym)) => {

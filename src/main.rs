@@ -6,6 +6,16 @@
 
 use clap::{Parser, Subcommand};
 use libbpf_rs::{MapCore, MapFlags, ObjectBuilder, RingBufferBuilder};
+
+/// Parse a hexadecimal address string (with or without 0x prefix)
+fn parse_hex_address(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    let s = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
+    u64::from_str_radix(s, 16).map_err(|e| format!("Invalid hex address: {}", e))
+}
 use std::{
     path::PathBuf,
     sync::{
@@ -101,6 +111,11 @@ enum Commands {
         /// Path to binary for symbol resolution in call site analysis
         #[arg(long)]
         binary: Option<PathBuf>,
+
+        /// Base address of the binary in memory (from /proc/pid/maps)
+        /// Use this if automatic detection fails. Example: --base-address 0x56cff0000000
+        #[arg(long, value_parser = parse_hex_address)]
+        base_address: Option<u64>,
     },
 }
 
@@ -146,8 +161,18 @@ fn main() -> anyhow::Result<()> {
             label,
             bucket_ms,
             binary,
+            base_address,
         } => {
-            run_analyze(input, output, mdbx_path, format, label, bucket_ms, binary)?;
+            run_analyze(
+                input,
+                output,
+                mdbx_path,
+                format,
+                label,
+                bucket_ms,
+                binary,
+                base_address,
+            )?;
         }
     }
 
@@ -163,6 +188,7 @@ fn run_analyze(
     label: Option<String>,
     bucket_ms: u64,
     binary: Option<PathBuf>,
+    base_address: Option<u64>,
 ) -> anyhow::Result<()> {
     let file_size = std::fs::metadata(&input)?.len();
     let file_size_gb = file_size as f64 / 1e9;
@@ -174,6 +200,7 @@ fn run_analyze(
     let config = StreamingConfig {
         bucket_ms,
         binary_path: binary,
+        binary_base_address: base_address,
         ..Default::default()
     };
 
