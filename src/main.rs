@@ -5,7 +5,7 @@
 //! 2. `analyze` - Analyzes collected traces and generates visualizations
 
 use clap::{Parser, Subcommand};
-use libbpf_rs::{MapCore, MapFlags, ObjectBuilder, ProgramMut, RingBufferBuilder};
+use libbpf_rs::{MapCore, MapFlags, ObjectBuilder, RingBufferBuilder};
 use std::{
     path::PathBuf,
     sync::{

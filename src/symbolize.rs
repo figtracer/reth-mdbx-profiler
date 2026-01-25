@@ -14,7 +14,8 @@
 //!   reth_trie::walker::TrieWalker::seek
 //!   reth_engine_tree::payload_processor::multiproof::on_prefetch_proof
 
-use blazesym::symbolize::{Process, Source, Symbolizer};
+use blazesym::symbolize::source::{Elf, Process, Source};
+use blazesym::symbolize::{Symbolized, Symbolizer};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -221,7 +222,7 @@ impl SymbolResolver {
 
         // Resolve using blazesym
         let source = if let Some(ref path) = self.binary_path {
-            Source::Elf(blazesym::symbolize::Elf::new(path))
+            Source::Elf(Elf::new(path))
         } else {
             Source::Process(Process::new(pid.into()))
         };
@@ -231,7 +232,7 @@ impl SymbolResolver {
             .symbolize_single(&source, blazesym::symbolize::Input::AbsAddr(address));
 
         let frame = match result {
-            Ok(Some(sym)) => {
+            Ok(Symbolized::Sym(sym)) => {
                 let code_info = sym.code_info.as_ref();
                 ResolvedFrame {
                     address,
