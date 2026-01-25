@@ -874,6 +874,156 @@ body {
     color: #f87171;
 }
 
+/* Call Site Analysis Styles */
+.callsite-details {
+    padding: 16px;
+    background: #0a0a10;
+}
+
+.callsite-details-grid {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    gap: 24px;
+}
+
+.callsite-stats {
+    background: #12121a;
+    border-radius: 8px;
+    padding: 16px;
+}
+
+.callsite-stats-title,
+.callsite-stack-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: #3b82f6;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 12px;
+}
+
+.callsite-stats-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+}
+
+.stat-item {
+    display: flex;
+    flex-direction: column;
+    padding: 8px;
+    background: #0a0a10;
+    border-radius: 4px;
+}
+
+.stat-label {
+    font-size: 10px;
+    color: #71717a;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+
+.stat-value {
+    font-size: 14px;
+    font-weight: 600;
+    color: #e4e4e7;
+    font-variant-numeric: tabular-nums;
+}
+
+.stat-value.stat-major {
+    color: #f87171;
+}
+
+.callsite-stack {
+    background: #12121a;
+    border-radius: 8px;
+    padding: 16px;
+    overflow-x: auto;
+}
+
+.stack-frames {
+    font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.6;
+}
+
+.stack-frame {
+    display: flex;
+    align-items: baseline;
+    padding: 4px 8px;
+    border-radius: 4px;
+    margin-bottom: 2px;
+    transition: background 0.15s;
+}
+
+.stack-frame:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.frame-num {
+    color: #52525b;
+    min-width: 24px;
+    font-size: 10px;
+}
+
+.frame-func {
+    color: #e4e4e7;
+    word-break: break-word;
+}
+
+.frame-file {
+    color: #52525b;
+    font-size: 10px;
+    margin-left: 8px;
+    white-space: nowrap;
+}
+
+/* Color coding for different frame types */
+.stack-frame.frame-reth .frame-func {
+    color: #60a5fa; /* Blue for reth code */
+}
+
+.stack-frame.frame-revm .frame-func {
+    color: #a78bfa; /* Purple for revm code */
+}
+
+.stack-frame.frame-mdbx .frame-func {
+    color: #f472b6; /* Pink for mdbx code */
+}
+
+.stack-frame.frame-runtime .frame-func {
+    color: #71717a; /* Gray for tokio/runtime */
+}
+
+/* Path type badges */
+.badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+
+.badge-critical {
+    background: rgba(248, 113, 113, 0.15);
+    color: #f87171;
+    border: 1px solid rgba(248, 113, 113, 0.3);
+}
+
+.badge-background {
+    background: rgba(52, 211, 153, 0.15);
+    color: #34d399;
+    border: 1px solid rgba(52, 211, 153, 0.3);
+}
+
+.badge-unknown {
+    background: rgba(113, 113, 122, 0.15);
+    color: #a1a1aa;
+    border: 1px solid rgba(113, 113, 122, 0.3);
+}
+
 .io-time {
     color: #60a5fa;
     font-weight: 500;
@@ -3941,6 +4091,84 @@ function initCallSiteAnalysis() {
     });
 }
 
+// Helper to extract a clean function name from a symbol
+function extractFunctionName(symbol) {
+    if (!symbol || symbol.trim() === '') return null;
+    // Skip hex addresses (unresolved frames)
+    if (symbol.match(/^0x[0-9a-f]+$/i)) return null;
+    // Extract just the function name without path/file info
+    // Format is usually: "module::path::function (file:line)" or "module::path::function"
+    let name = symbol.split(' (')[0].trim();
+    // Get the last component for display
+    const parts = name.split('::');
+    if (parts.length > 1) {
+        // Return last 2-3 components for context
+        return parts.slice(-3).join('::');
+    }
+    return name;
+}
+
+// Helper to format a stack frame for display
+function formatStackFrame(frame, index) {
+    if (!frame || frame.trim() === '') {
+        return null; // Skip empty frames
+    }
+    // Skip hex-only frames (unresolved)
+    if (frame.match(/^0x[0-9a-f]+$/i)) {
+        return null;
+    }
+
+    // Parse the frame: "function_name (file_path)"
+    const match = frame.match(/^(.+?)\s*\((.+)\)$/);
+    let funcName, filePath;
+    if (match) {
+        funcName = match[1].trim();
+        filePath = match[2].trim();
+    } else {
+        funcName = frame.trim();
+        filePath = null;
+    }
+
+    // Simplify long paths
+    if (filePath) {
+        // Extract just filename or last path component
+        const pathParts = filePath.split('/');
+        filePath = pathParts.slice(-2).join('/');
+    }
+
+    return { funcName, filePath, full: frame };
+}
+
+// Helper to build a meaningful call chain summary from stack frames
+function buildCallChainSummary(stack) {
+    if (!stack || stack.length === 0) return 'Unknown';
+
+    // Filter to meaningful frames (skip empty, hex, and internal frames)
+    const meaningfulFrames = [];
+    for (const frame of stack) {
+        const parsed = formatStackFrame(frame, 0);
+        if (!parsed) continue;
+
+        // Skip low-level/internal frames
+        const fn = parsed.funcName.toLowerCase();
+        if (fn.includes('__') ||
+            fn.startsWith('core::') ||
+            fn.startsWith('std::') ||
+            fn.startsWith('alloc::') ||
+            fn.includes('drop_in_place') ||
+            fn.includes('poll') ||
+            fn.includes('harness')) {
+            continue;
+        }
+        meaningfulFrames.push(parsed.funcName);
+    }
+
+    if (meaningfulFrames.length === 0) return 'Unknown';
+
+    // Take first few meaningful frames
+    return meaningfulFrames.slice(0, 3).join(' → ');
+}
+
 function renderCallSiteTable(data) {
     const tbody = document.querySelector('#call-site-table tbody');
     tbody.innerHTML = '';
@@ -3970,22 +4198,20 @@ function renderCallSiteTable(data) {
         tr.className = 'table-row';
         tr.dataset.idx = idx;
 
-        // Truncate call path for display
-        const callPathShort = cs.call_path.length > 60
-            ? cs.call_path.substring(0, 57) + '...'
-            : cs.call_path;
+        // Build a meaningful call chain summary
+        const callChain = buildCallChainSummary(cs.sample_stack);
 
-        // Path type badge
-        let pathTypeBadge = '<span style="color:#71717a;">Unknown</span>';
+        // Path type badge with colored background
+        let pathTypeBadge = '<span class="badge badge-unknown">Unknown</span>';
         if (cs.is_critical_path === true) {
-            pathTypeBadge = '<span style="color:#f87171;font-weight:600;">Critical</span>';
+            pathTypeBadge = '<span class="badge badge-critical">Critical</span>';
         } else if (cs.is_critical_path === false) {
-            pathTypeBadge = '<span style="color:#34d399;">Background</span>';
+            pathTypeBadge = '<span class="badge badge-background">Background</span>';
         }
 
         tr.innerHTML = `
             <td><span class="expand-icon">▶</span></td>
-            <td title="${cs.call_path}" style="font-family:monospace;font-size:11px;">${callPathShort}</td>
+            <td title="${cs.call_path}" style="font-family:monospace;font-size:11px;max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${callChain}</td>
             <td>${fmt(cs.count)}</td>
             <td>${fmtLat(cs.avg_latency_us)}</td>
             <td>${fmt(cs.total_faults)}</td>
@@ -3998,32 +4224,56 @@ function renderCallSiteTable(data) {
         detailsTr.className = 'details-row hidden';
         detailsTr.dataset.idx = idx;
 
-        let detailsHtml = '<td colspan="6"><div class="details-content" style="grid-template-columns: 1fr 1fr;">';
+        let detailsHtml = '<td colspan="6"><div class="callsite-details">';
 
-        // Stats
-        detailsHtml += '<div class="details-section"><div class="details-section-title">Statistics</div><div class="details-list">';
-        detailsHtml += `<div class="details-item"><span class="details-item-name">Total Operations</span><span class="details-item-value">${fmt(cs.count)}</span></div>`;
-        detailsHtml += `<div class="details-item"><span class="details-item-name">Total Latency</span><span class="details-item-value">${(cs.total_latency_ns / 1e6).toFixed(1)}ms</span></div>`;
-        detailsHtml += `<div class="details-item"><span class="details-item-name">Avg Latency</span><span class="details-item-value">${fmtLat(cs.avg_latency_us)}</span></div>`;
-        detailsHtml += `<div class="details-item"><span class="details-item-name">Max Latency</span><span class="details-item-value">${fmtLat(cs.max_latency_us)}</span></div>`;
-        detailsHtml += `<div class="details-item"><span class="details-item-name">Total Faults</span><span class="details-item-value">${fmt(cs.total_faults)}</span></div>`;
-        detailsHtml += `<div class="details-item"><span class="details-item-name">Major Faults</span><span class="details-item-value major">${fmt(cs.major_faults)}</span></div>`;
-        detailsHtml += `<div class="details-item"><span class="details-item-name">Avg Faults/Op</span><span class="details-item-value">${cs.avg_faults.toFixed(2)}</span></div>`;
+        // Two-column layout: stats on left, stack on right
+        detailsHtml += '<div class="callsite-details-grid">';
+
+        // Stats column
+        detailsHtml += '<div class="callsite-stats">';
+        detailsHtml += '<div class="callsite-stats-title">Statistics</div>';
+        detailsHtml += '<div class="callsite-stats-grid">';
+        detailsHtml += `<div class="stat-item"><span class="stat-label">Operations</span><span class="stat-value">${fmt(cs.count)}</span></div>`;
+        detailsHtml += `<div class="stat-item"><span class="stat-label">Total Time</span><span class="stat-value">${(cs.total_latency_ns / 1e6).toFixed(1)}ms</span></div>`;
+        detailsHtml += `<div class="stat-item"><span class="stat-label">Avg Latency</span><span class="stat-value">${fmtLat(cs.avg_latency_us)}</span></div>`;
+        detailsHtml += `<div class="stat-item"><span class="stat-label">Max Latency</span><span class="stat-value">${fmtLat(cs.max_latency_us)}</span></div>`;
+        detailsHtml += `<div class="stat-item"><span class="stat-label">Total Faults</span><span class="stat-value">${fmt(cs.total_faults)}</span></div>`;
+        detailsHtml += `<div class="stat-item"><span class="stat-label">Major Faults</span><span class="stat-value stat-major">${fmt(cs.major_faults)}</span></div>`;
+        detailsHtml += `<div class="stat-item"><span class="stat-label">Faults/Op</span><span class="stat-value">${cs.avg_faults.toFixed(2)}</span></div>`;
         detailsHtml += '</div></div>';
 
-        // Sample Stack Trace
-        detailsHtml += '<div class="details-section"><div class="details-section-title">Sample Stack Trace</div><div class="details-list" style="font-family:monospace;font-size:10px;">';
+        // Stack trace column
+        detailsHtml += '<div class="callsite-stack">';
+        detailsHtml += '<div class="callsite-stack-title">Stack Trace</div>';
+        detailsHtml += '<div class="stack-frames">';
+
         if (cs.sample_stack && cs.sample_stack.length > 0) {
-            cs.sample_stack.slice(0, 10).forEach((frame, i) => {
-                const frameShort = frame.length > 50 ? frame.substring(0, 47) + '...' : frame;
-                detailsHtml += `<div class="details-item" style="padding:2px 0;"><span style="color:#52525b;margin-right:8px;">${i}:</span><span title="${frame}">${frameShort}</span></div>`;
-            });
-        } else {
-            detailsHtml += '<div class="details-item"><span style="color:#52525b;">No stack trace available</span></div>';
-        }
-        detailsHtml += '</div></div>';
+            let frameNum = 0;
+            for (let i = 0; i < Math.min(cs.sample_stack.length, 16); i++) {
+                const parsed = formatStackFrame(cs.sample_stack[i], i);
+                if (!parsed) continue; // Skip empty/unresolved frames
 
-        detailsHtml += '</div></td>';
+                const funcClass = parsed.funcName.includes('reth_') ? 'frame-reth' :
+                                  parsed.funcName.includes('revm') ? 'frame-revm' :
+                                  parsed.funcName.includes('tokio') ? 'frame-runtime' :
+                                  parsed.funcName.includes('mdbx') || parsed.funcName.includes('libmdbx') ? 'frame-mdbx' : '';
+
+                detailsHtml += `<div class="stack-frame ${funcClass}">`;
+                detailsHtml += `<span class="frame-num">${frameNum}</span>`;
+                detailsHtml += `<span class="frame-func" title="${parsed.full}">${parsed.funcName}</span>`;
+                if (parsed.filePath) {
+                    detailsHtml += `<span class="frame-file">${parsed.filePath}</span>`;
+                }
+                detailsHtml += '</div>';
+                frameNum++;
+            }
+        } else {
+            detailsHtml += '<div class="stack-frame"><span class="frame-func" style="color:#71717a;">No stack trace available</span></div>';
+        }
+
+        detailsHtml += '</div></div>';
+        detailsHtml += '</div></div></td>';
+
         detailsTr.innerHTML = detailsHtml;
         tbody.appendChild(detailsTr);
 
