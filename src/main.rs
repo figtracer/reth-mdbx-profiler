@@ -97,6 +97,10 @@ enum Commands {
         /// Time bucket size in milliseconds (for pattern analysis)
         #[arg(long, default_value = "100")]
         bucket_ms: u64,
+
+        /// Path to binary for symbol resolution in call site analysis
+        #[arg(long)]
+        binary: Option<PathBuf>,
     },
 }
 
@@ -141,8 +145,9 @@ fn main() -> anyhow::Result<()> {
             format,
             label,
             bucket_ms,
+            binary,
         } => {
-            run_analyze(input, output, mdbx_path, format, label, bucket_ms)?;
+            run_analyze(input, output, mdbx_path, format, label, bucket_ms, binary)?;
         }
     }
 
@@ -157,6 +162,7 @@ fn run_analyze(
     format: String,
     label: Option<String>,
     bucket_ms: u64,
+    binary: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     let file_size = std::fs::metadata(&input)?.len();
     let file_size_gb = file_size as f64 / 1e9;
@@ -167,6 +173,7 @@ fn run_analyze(
 
     let config = StreamingConfig {
         bucket_ms,
+        binary_path: binary,
         ..Default::default()
     };
 

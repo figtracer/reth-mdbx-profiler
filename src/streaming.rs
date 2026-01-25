@@ -5,8 +5,8 @@
 //! Designed to handle traces of any size with bounded memory usage.
 
 use crate::event::{
-    dbi_to_table_name, is_pre_trace_cursor, CursorEvent, CursorLifecycleEvent, CursorOp,
-    MdbxPageType, PageFaultEvent, SlowOpStackEvent, TxnEvent,
+    CursorEvent, CursorLifecycleEvent, CursorOp, MdbxPageType, PageFaultEvent, SlowOpStackEvent,
+    TxnEvent, dbi_to_table_name, is_pre_trace_cursor,
 };
 use crate::viewer::{
     AccessCountBucket, BTreeVisualization, BatchAnalysis, BlockRange, BurstStats,
@@ -48,6 +48,8 @@ pub struct StreamingConfig {
     /// Heatmap grid dimensions
     pub heatmap_time_buckets: u32,
     pub heatmap_offset_buckets: u32,
+    /// Path to binary for symbol resolution in call site analysis
+    pub binary_path: Option<std::path::PathBuf>,
 }
 
 impl Default for StreamingConfig {
@@ -63,6 +65,7 @@ impl Default for StreamingConfig {
             cursor_sample_rate: 1,
             heatmap_time_buckets: 500,
             heatmap_offset_buckets: 200,
+            binary_path: None,
         }
     }
 }
@@ -468,7 +471,7 @@ impl HotKeyTracker {
     fn prune(&mut self) {
         // Keep only top N by slow_count
         let mut entries: Vec<_> = self.keys.drain().collect();
-        entries.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+        entries.sort_by(|a, b| b.1.0.cmp(&a.1.0));
         entries.truncate(self.max_keys);
         self.keys = entries.into_iter().collect();
     }
@@ -3123,11 +3126,96 @@ impl StreamingAggregator {
 
     /// Build call site analysis from slow operation stack traces
     fn build_call_site_analysis(&self) -> CallSiteAnalysis {
+        use crate::symbolize::SymbolResolver;
+
         if self.call_site_stats.is_empty() {
             return CallSiteAnalysis::default();
         }
 
-        // Convert raw stats to CallSiteEntry objects
+        // Create symbol resolver if binary path is provided
+        let mut resolver = self
+            .config
+            .binary_path
+            .as_ref()
+            .map(|path| SymbolResolver::with_binary(path.clone()));
+
+        // Helper to parse hex addresses from strings like "0x56cff0b892e3"
+        fn parse_hex_address(s: &str) -> Option<u64> {
+            let s = s.trim();
+            if s.starts_with("0x") || s.starts_with("0X") {
+                u64::from_str_radix(&s[2..], 16).ok()
+            } else {
+                u64::from_str_radix(s, 16).ok()
+            }
+        }
+
+        // Helper to resolve a stack of hex addresses to symbols
+        fn resolve_stack(
+            resolver: &mut Option<SymbolResolver>,
+            stack: &[String],
+        ) -> (Vec<String>, Option<bool>) {
+            let Some(resolver) = resolver.as_mut() else {
+                return (stack.to_vec(), None);
+            };
+
+            let mut resolved = Vec::with_capacity(stack.len());
+            let mut is_critical: Option<bool> = None;
+
+            // Critical path patterns
+            let critical_patterns = [
+                "on_state_update",
+                "state_root",
+                "execute_block",
+                "apply_state",
+                "commit",
+                "new_payload",
+            ];
+
+            // Background patterns
+            let background_patterns = [
+                "on_prefetch",
+                "prefetch_proof",
+                "background",
+                "spawn",
+                "rayon",
+                "thread_pool",
+            ];
+
+            for addr_str in stack {
+                if let Some(addr) = parse_hex_address(addr_str) {
+                    // Resolve with PID 0 since we're using ELF file directly
+                    let frame = resolver.resolve_address(0, addr);
+                    let symbol_str = frame.format();
+                    resolved.push(symbol_str.clone());
+
+                    // Check for critical/background patterns if not yet determined
+                    if is_critical.is_none() {
+                        if let Some(ref sym) = frame.symbol {
+                            for pattern in &critical_patterns {
+                                if sym.contains(pattern) {
+                                    is_critical = Some(true);
+                                    break;
+                                }
+                            }
+                            if is_critical.is_none() {
+                                for pattern in &background_patterns {
+                                    if sym.contains(pattern) {
+                                        is_critical = Some(false);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    resolved.push(addr_str.clone());
+                }
+            }
+
+            (resolved, is_critical)
+        }
+
+        // Convert raw stats to CallSiteEntry objects with symbol resolution
         let mut entries: Vec<CallSiteEntry> = self
             .call_site_stats
             .iter()
@@ -3140,12 +3228,43 @@ impl StreamingAggregator {
                         max_latency_ns,
                         total_faults,
                         major_faults,
-                        is_critical,
+                        _is_critical, // We'll recalculate this with resolved symbols
                         ref sample_stack,
                     ),
                 )| {
+                    // Resolve sample stack if available
+                    let (resolved_stack, is_critical) = if let Some(stack) = sample_stack {
+                        resolve_stack(&mut resolver, stack)
+                    } else {
+                        (vec![], None)
+                    };
+
+                    // Build resolved call path from the resolved stack
+                    let resolved_call_path = if !resolved_stack.is_empty() && resolver.is_some() {
+                        // Filter out uninteresting frames for the call path
+                        let significant: Vec<_> = resolved_stack
+                            .iter()
+                            .filter(|s| {
+                                !s.starts_with("0x")  // Not unresolved
+                                && !s.starts_with("mdbx_")
+                                && !s.contains("__")
+                                && !s.starts_with("std::")
+                                && !s.starts_with("core::")
+                            })
+                            .take(5)
+                            .cloned()
+                            .collect();
+                        if significant.is_empty() {
+                            call_path.clone()
+                        } else {
+                            significant.join(" <- ")
+                        }
+                    } else {
+                        call_path.clone()
+                    };
+
                     CallSiteEntry {
-                        call_path: call_path.clone(),
+                        call_path: resolved_call_path,
                         count,
                         total_latency_ns,
                         avg_latency_us: if count > 0 {
@@ -3162,7 +3281,11 @@ impl StreamingAggregator {
                             0.0
                         },
                         is_critical_path: is_critical,
-                        sample_stack: sample_stack.clone(),
+                        sample_stack: if resolved_stack.is_empty() {
+                            sample_stack.clone()
+                        } else {
+                            Some(resolved_stack)
+                        },
                     }
                 },
             )
