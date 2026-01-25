@@ -36,7 +36,8 @@
 #define EVENT_SLOW_OP_STACK 14  // Slow operation with stack trace
 
 // Stack trace configuration
-#define MAX_STACK_DEPTH     32  // Maximum stack frames to capture
+#define MAX_STACK_DEPTH     32  // Maximum stack frames to capture in final event
+#define ENTRY_STACK_DEPTH   16  // Stack frames to capture at entry (stored in context)
 #define SLOW_OP_THRESHOLD_NS 1000000  // 1ms threshold for slow operations (configurable via map)
 
 // MDBX cursor operations (from libmdbx mdbx.h MDBX_cursor_op enum)
@@ -215,6 +216,9 @@ struct cursor_context {
     __u32 write_flags;       // Write flags (for put operations)
     __u8  key_data[MAX_KEY_SIZE];  // Key data
     __u64 cursor_ptr;        // Cursor pointer for lifecycle tracking
+    // Stack trace captured at entry for call site attribution
+    __u32 entry_stack_depth; // Number of valid stack frames
+    __u64 entry_stack[ENTRY_STACK_DEPTH];  // User-space instruction pointers captured at entry
 };
 
 // Context for correlating uprobe entry with uretprobe return for cursor put ops
@@ -361,6 +365,9 @@ struct direct_get_context {
     __u32 dbi;               // Database index (passed directly as parameter)
     __u32 key_size;          // Key size
     __u8  key_data[MAX_KEY_SIZE];  // Key data
+    // Stack trace captured at entry for call site attribution
+    __u32 entry_stack_depth; // Number of valid stack frames
+    __u64 entry_stack[ENTRY_STACK_DEPTH];  // User-space instruction pointers captured at entry
 };
 
 // Per-task context for mdbx_get
@@ -540,7 +547,9 @@ static __always_inline __u64 get_slow_op_threshold(void) {
     return SLOW_OP_THRESHOLD_NS;  // Default: 1ms
 }
 
-// Emit a slow operation stack event with user-space stack trace
+// Emit a slow operation stack event with pre-captured user-space stack trace
+// The stack must be captured at function entry (uprobe), not return (uretprobe),
+// because by the time the function returns, the stack has been unwound.
 // Returns 0 on success, -1 on failure
 static __always_inline int emit_slow_op_stack(
     __u64 timestamp_ns,
@@ -552,7 +561,8 @@ static __always_inline int emit_slow_op_stack(
     __u64 latency_ns,
     struct op_fault_stats *stats,
     __u8 *key_prefix,
-    void *ctx)
+    __u64 *entry_stack,      // Stack captured at entry
+    __u32 entry_stack_depth) // Number of valid frames in entry_stack
 {
     struct slow_op_stack_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
     if (!e) {
@@ -597,15 +607,33 @@ static __always_inline int emit_slow_op_stack(
         }
     }
 
-    // Capture user-space stack trace
-    // BPF_F_USER_STACK captures the user-space stack
-    // Returns number of bytes written, or negative error
-    long stack_size = bpf_get_stack(ctx, e->stack, sizeof(e->stack), BPF_F_USER_STACK);
-    if (stack_size > 0) {
-        // Each stack frame is 8 bytes (u64), calculate number of frames
-        e->stack_depth = stack_size / sizeof(__u64);
+    // Copy pre-captured stack trace from entry
+    // The stack was captured at function entry (uprobe) when the call site was still on the stack
+    if (entry_stack && entry_stack_depth > 0) {
+        __u32 depth = entry_stack_depth;
+        if (depth > MAX_STACK_DEPTH) {
+            depth = MAX_STACK_DEPTH;
+        }
+        e->stack_depth = depth;
+        #pragma unroll
+        for (int i = 0; i < ENTRY_STACK_DEPTH; i++) {
+            if (i < depth) {
+                e->stack[i] = entry_stack[i];
+            } else {
+                e->stack[i] = 0;
+            }
+        }
+        // Zero out remaining slots if MAX_STACK_DEPTH > ENTRY_STACK_DEPTH
+        #pragma unroll
+        for (int i = ENTRY_STACK_DEPTH; i < MAX_STACK_DEPTH; i++) {
+            e->stack[i] = 0;
+        }
     } else {
         e->stack_depth = 0;
+        #pragma unroll
+        for (int i = 0; i < MAX_STACK_DEPTH; i++) {
+            e->stack[i] = 0;
+        }
     }
 
     inc_stat(STAT_SLOW_OP_STACKS);
@@ -1073,6 +1101,15 @@ int BPF_UPROBE(trace_cursor_get, void *cursor, struct mdbx_val *key,
         }
     }
 
+    // Capture user-space stack trace at entry for call site attribution
+    // This must be done at entry, not return, because the stack is unwound by return time
+    long stack_size = bpf_get_stack(ctx, cctx.entry_stack, sizeof(cctx.entry_stack), BPF_F_USER_STACK);
+    if (stack_size > 0) {
+        cctx.entry_stack_depth = stack_size / sizeof(__u64);
+    } else {
+        cctx.entry_stack_depth = 0;
+    }
+
     // Save context for uretprobe
     bpf_map_update_elem(&pending_cursors, &pid_tgid, &cctx, BPF_ANY);
 
@@ -1149,7 +1186,8 @@ int BPF_URETPROBE(trace_cursor_get_ret, int ret)
             latency,
             stats,
             key_prefix,
-            ctx  // Pass the BPF context for stack capture
+            cctx->entry_stack,       // Use stack captured at entry
+            cctx->entry_stack_depth  // Number of valid frames
         );
     }
 
@@ -1382,6 +1420,15 @@ int BPF_UPROBE(trace_direct_get, void *txn, __u32 dbi, struct mdbx_val *key, voi
         }
     }
 
+    // Capture user-space stack trace at entry for call site attribution
+    // This must be done at entry, not return, because the stack is unwound by return time
+    long stack_size = bpf_get_stack(ctx, dctx.entry_stack, sizeof(dctx.entry_stack), BPF_F_USER_STACK);
+    if (stack_size > 0) {
+        dctx.entry_stack_depth = stack_size / sizeof(__u64);
+    } else {
+        dctx.entry_stack_depth = 0;
+    }
+
     // Save context for uretprobe
     bpf_map_update_elem(&pending_direct_gets, &pid_tgid, &dctx, BPF_ANY);
 
@@ -1457,7 +1504,8 @@ int BPF_URETPROBE(trace_direct_get_ret, int ret)
             latency,
             stats,
             key_prefix,
-            ctx  // Pass the BPF context for stack capture
+            dctx->entry_stack,       // Use stack captured at entry
+            dctx->entry_stack_depth  // Number of valid frames
         );
     }
 
