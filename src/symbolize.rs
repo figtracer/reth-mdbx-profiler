@@ -346,17 +346,21 @@ impl SymbolResolver {
             return frame.clone();
         }
 
-        // Resolve using blazesym
-        let (source, input) = if let Some(ref path) = self.binary_path {
-            // For ELF files with PIE, convert runtime addresses to file offsets
-            let file_offset = if self.elf_base_vaddr == Some(0) || self.elf_base_vaddr.is_none() {
+        // Calculate file offset first (before borrowing binary_path)
+        let file_offset = if self.binary_path.is_some() {
+            if self.elf_base_vaddr == Some(0) || self.elf_base_vaddr.is_none() {
                 // PIE binary or unknown - convert address
                 self.runtime_addr_to_file_offset(address)
             } else {
                 // Non-PIE binary - address might be usable directly
                 address
-            };
+            }
+        } else {
+            address
+        };
 
+        // Now build source and input
+        let (source, input) = if let Some(ref path) = self.binary_path {
             (
                 Source::Elf(Elf::new(path)),
                 blazesym::symbolize::Input::FileOffset(file_offset),
