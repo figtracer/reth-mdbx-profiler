@@ -49,6 +49,8 @@ pub struct ViewerData {
     pub working_set: WorkingSetAnalysis,
     /// CPU profiling summary
     pub cpu_profile: CpuProfileSummary,
+    /// Call site analysis from slow operation stack traces
+    pub call_site_analysis: CallSiteAnalysis,
 }
 
 // ============================================================================
@@ -804,6 +806,81 @@ pub struct CpuTableEntry {
     pub wall_time_ms: f64,
     pub cpu_time_ms: f64,
     pub cpu_efficiency: f64,
+}
+
+// ============================================================================
+// Call Site Analysis (Stack Traces on Slow Operations)
+// ============================================================================
+
+/// Analysis of call sites causing slow database operations
+/// This data comes from stack traces captured on slow operations (>1ms default)
+#[derive(Debug, Serialize, Default)]
+pub struct CallSiteAnalysis {
+    /// Whether call site data is available
+    pub has_data: bool,
+    /// Total slow operations captured with stack traces
+    pub total_slow_ops: u64,
+    /// Number of unique call sites identified
+    pub unique_call_sites: u64,
+    /// Summary of critical path vs background work
+    pub path_summary: PathSummary,
+    /// Top call sites causing slow operations (sorted by count)
+    pub top_call_sites: Vec<CallSiteEntry>,
+    /// Call sites grouped by whether they're on critical path
+    pub critical_vs_background: CriticalVsBackground,
+}
+
+/// Summary of critical path vs background work distribution
+#[derive(Debug, Serialize, Default)]
+pub struct PathSummary {
+    /// Number of slow ops on critical path (state updates, etc.)
+    pub critical_path_count: u64,
+    /// Total latency on critical path (ns)
+    pub critical_path_latency_ns: u64,
+    /// Number of slow ops on background path (prefetch, etc.)
+    pub background_count: u64,
+    /// Total latency on background path (ns)
+    pub background_latency_ns: u64,
+    /// Number of slow ops with unknown path
+    pub unknown_count: u64,
+    /// Percentage of slow ops on critical path
+    pub critical_path_percentage: f64,
+}
+
+/// Entry for a specific call site
+#[derive(Debug, Serialize, Clone)]
+pub struct CallSiteEntry {
+    /// Call path key (function chain)
+    pub call_path: String,
+    /// Number of slow operations from this call site
+    pub count: u64,
+    /// Total latency (ns)
+    pub total_latency_ns: u64,
+    /// Average latency (us)
+    pub avg_latency_us: f64,
+    /// Maximum latency (us)
+    pub max_latency_us: f64,
+    /// Total faults
+    pub total_faults: u64,
+    /// Major faults
+    pub major_faults: u64,
+    /// Average faults per operation
+    pub avg_faults: f64,
+    /// Whether this is on critical path (None = unknown)
+    pub is_critical_path: Option<bool>,
+    /// Sample stack trace (first occurrence)
+    pub sample_stack: Option<Vec<String>>,
+}
+
+/// Breakdown of critical path vs background operations
+#[derive(Debug, Serialize, Default)]
+pub struct CriticalVsBackground {
+    /// Call sites on critical path
+    pub critical_path: Vec<CallSiteEntry>,
+    /// Call sites doing background work
+    pub background: Vec<CallSiteEntry>,
+    /// Call sites with unknown classification
+    pub unknown: Vec<CallSiteEntry>,
 }
 
 /// Block range information extracted from trace

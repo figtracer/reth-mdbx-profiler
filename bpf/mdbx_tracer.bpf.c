@@ -33,6 +33,11 @@
 #define EVENT_DIRECT_DEL    11
 #define EVENT_CURSOR_OPEN   12
 #define EVENT_CURSOR_CLOSE  13
+#define EVENT_SLOW_OP_STACK 14  // Slow operation with stack trace
+
+// Stack trace configuration
+#define MAX_STACK_DEPTH     32  // Maximum stack frames to capture
+#define SLOW_OP_THRESHOLD_NS 1000000  // 1ms threshold for slow operations (configurable via map)
 
 // MDBX cursor operations (from libmdbx mdbx.h MDBX_cursor_op enum)
 // These are the numeric values for the cursor operations
@@ -163,6 +168,28 @@ struct cursor_lifecycle_event {
     __u32 _pad;              // Padding for alignment
 };
 
+// Slow operation with stack trace event
+// This is emitted for operations that exceed the latency threshold
+// Contains a user-space stack trace for call site attribution
+struct slow_op_stack_event {
+    __u64 timestamp_ns;      // Kernel timestamp
+    __u32 pid;               // Process ID
+    __u32 tid;               // Thread ID
+    __u32 event_type;        // EVENT_SLOW_OP_STACK
+    __u32 op_event_type;     // Original operation type (CURSOR_GET, DIRECT_GET, etc.)
+    __u32 cursor_op;         // Cursor operation (for CURSOR_GET: SET_RANGE, NEXT, etc.)
+    __u32 dbi;               // Database index (table identifier)
+    __u64 latency_ns;        // Operation latency
+    __u32 faults_during_op;  // Total faults during this operation
+    __u32 major_faults;      // Major faults during this operation
+    __u32 branch_faults;     // Branch page faults
+    __u32 leaf_faults;       // Leaf page faults
+    __u32 max_tree_depth;    // Maximum B+ tree depth observed
+    __u32 stack_depth;       // Number of valid stack frames
+    __u64 stack[MAX_STACK_DEPTH];  // User-space instruction pointers
+    __u8  key_prefix[ACTIVE_OP_KEY_PREFIX_SIZE]; // First 16 bytes of key
+};
+
 // Context for correlating kprobe entry with kretprobe return
 struct fault_context {
     __u64 timestamp_ns;      // Entry timestamp for latency calculation
@@ -263,10 +290,22 @@ struct {
     __type(value, __u32);  // target PID (0 = trace all)
 } profiler_config SEC(".maps");
 
+// Slow operation threshold configuration (in nanoseconds)
+// Key 0: slow_op_threshold_ns (default: 1ms = 1,000,000ns)
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} slow_op_config SEC(".maps");
+
+// Statistics for stack trace events
+#define STAT_SLOW_OP_STACKS  18  // Number of slow op stack events emitted
+
 // Statistics counters
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-    __uint(max_entries, 16);
+    __uint(max_entries, 20);  // Increased for slow_op_stacks
     __type(key, __u32);
     __type(value, __u64);
 } stats SEC(".maps");
@@ -489,6 +528,89 @@ static __always_inline void inc_stat(__u32 idx) {
     if (val) {
         __sync_fetch_and_add(val, 1);
     }
+}
+
+// Get slow operation threshold from config map (default: 1ms)
+static __always_inline __u64 get_slow_op_threshold(void) {
+    __u32 key = 0;
+    __u64 *threshold = bpf_map_lookup_elem(&slow_op_config, &key);
+    if (threshold && *threshold > 0) {
+        return *threshold;
+    }
+    return SLOW_OP_THRESHOLD_NS;  // Default: 1ms
+}
+
+// Emit a slow operation stack event with user-space stack trace
+// Returns 0 on success, -1 on failure
+static __always_inline int emit_slow_op_stack(
+    __u64 timestamp_ns,
+    __u32 pid,
+    __u32 tid,
+    __u32 op_event_type,
+    __u32 cursor_op,
+    __u32 dbi,
+    __u64 latency_ns,
+    struct op_fault_stats *stats,
+    __u8 *key_prefix,
+    void *ctx)
+{
+    struct slow_op_stack_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (!e) {
+        inc_stat(STAT_EVENTS_DROPPED);
+        return -1;
+    }
+
+    e->timestamp_ns = timestamp_ns;
+    e->pid = pid;
+    e->tid = tid;
+    e->event_type = EVENT_SLOW_OP_STACK;
+    e->op_event_type = op_event_type;
+    e->cursor_op = cursor_op;
+    e->dbi = dbi;
+    e->latency_ns = latency_ns;
+
+    // Copy fault stats
+    if (stats) {
+        e->faults_during_op = stats->fault_count;
+        e->major_faults = stats->major_fault_count;
+        e->branch_faults = stats->branch_faults;
+        e->leaf_faults = stats->leaf_faults;
+        e->max_tree_depth = stats->max_depth;
+    } else {
+        e->faults_during_op = 0;
+        e->major_faults = 0;
+        e->branch_faults = 0;
+        e->leaf_faults = 0;
+        e->max_tree_depth = 0;
+    }
+
+    // Copy key prefix
+    if (key_prefix) {
+        #pragma unroll
+        for (int i = 0; i < ACTIVE_OP_KEY_PREFIX_SIZE; i++) {
+            e->key_prefix[i] = key_prefix[i];
+        }
+    } else {
+        #pragma unroll
+        for (int i = 0; i < ACTIVE_OP_KEY_PREFIX_SIZE; i++) {
+            e->key_prefix[i] = 0;
+        }
+    }
+
+    // Capture user-space stack trace
+    // BPF_F_USER_STACK captures the user-space stack
+    // Returns number of bytes written, or negative error
+    long stack_size = bpf_get_stack(ctx, e->stack, sizeof(e->stack), BPF_F_USER_STACK);
+    if (stack_size > 0) {
+        // Each stack frame is 8 bytes (u64), calculate number of frames
+        e->stack_depth = stack_size / sizeof(__u64);
+    } else {
+        e->stack_depth = 0;
+    }
+
+    inc_stat(STAT_SLOW_OP_STACKS);
+    bpf_ringbuf_submit(e, 0);
+    return 0;
 }
 
 // Check if we should trace this process
@@ -1005,6 +1127,32 @@ int BPF_URETPROBE(trace_cursor_get_ret, int ret)
     __u64 now = bpf_ktime_get_ns();
     __u64 latency = now - cctx->timestamp_ns;
 
+    // Get fault stats before we might need them for stack event
+    struct op_fault_stats *stats = bpf_map_lookup_elem(&op_fault_stats_map, &pid_tgid);
+
+    // Check if this is a slow operation - if so, emit stack trace event
+    __u64 threshold = get_slow_op_threshold();
+    if (latency >= threshold) {
+        // Build key prefix from key_data
+        __u8 key_prefix[ACTIVE_OP_KEY_PREFIX_SIZE];
+        #pragma unroll
+        for (int i = 0; i < ACTIVE_OP_KEY_PREFIX_SIZE; i++) {
+            key_prefix[i] = cctx->key_data[i];
+        }
+        emit_slow_op_stack(
+            cctx->timestamp_ns,
+            cctx->pid,
+            cctx->tid,
+            EVENT_CURSOR_GET,
+            cctx->cursor_op,
+            cctx->dbi,
+            latency,
+            stats,
+            key_prefix,
+            ctx  // Pass the BPF context for stack capture
+        );
+    }
+
     // Reserve space in ring buffer for cursor event
     struct cursor_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
     if (!e) {
@@ -1034,7 +1182,6 @@ int BPF_URETPROBE(trace_cursor_get_ret, int ret)
     }
 
     // Copy per-operation fault statistics including tree depth
-    struct op_fault_stats *stats = bpf_map_lookup_elem(&op_fault_stats_map, &pid_tgid);
     if (stats) {
         e->faults_during_op = stats->fault_count;
         e->major_faults_during_op = stats->major_fault_count;
@@ -1288,6 +1435,32 @@ int BPF_URETPROBE(trace_direct_get_ret, int ret)
     __u64 now = bpf_ktime_get_ns();
     __u64 latency = now - dctx->timestamp_ns;
 
+    // Get fault stats before we might need them for stack event
+    struct op_fault_stats *stats = bpf_map_lookup_elem(&op_fault_stats_map, &pid_tgid);
+
+    // Check if this is a slow operation - if so, emit stack trace event
+    __u64 threshold = get_slow_op_threshold();
+    if (latency >= threshold) {
+        // Build key prefix from key_data
+        __u8 key_prefix[ACTIVE_OP_KEY_PREFIX_SIZE];
+        #pragma unroll
+        for (int i = 0; i < ACTIVE_OP_KEY_PREFIX_SIZE; i++) {
+            key_prefix[i] = dctx->key_data[i];
+        }
+        emit_slow_op_stack(
+            dctx->timestamp_ns,
+            dctx->pid,
+            dctx->tid,
+            EVENT_DIRECT_GET,
+            0,  // No cursor_op for direct get
+            dctx->dbi,
+            latency,
+            stats,
+            key_prefix,
+            ctx  // Pass the BPF context for stack capture
+        );
+    }
+
     // Reserve space in ring buffer for cursor event (reuse same struct)
     struct cursor_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
     if (!e) {
@@ -1317,7 +1490,6 @@ int BPF_URETPROBE(trace_direct_get_ret, int ret)
     }
 
     // Copy per-operation fault statistics including tree depth
-    struct op_fault_stats *stats = bpf_map_lookup_elem(&op_fault_stats_map, &pid_tgid);
     if (stats) {
         e->faults_during_op = stats->fault_count;
         e->major_faults_during_op = stats->major_fault_count;

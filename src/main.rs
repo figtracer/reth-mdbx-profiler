@@ -18,9 +18,10 @@ use tracing::{debug, info, warn};
 
 mod event;
 mod streaming;
+mod symbolize;
 mod viewer;
 
-use event::{CursorEvent, CursorLifecycleEvent, PageFaultEvent, TxnEvent};
+use event::{CursorEvent, CursorLifecycleEvent, PageFaultEvent, SlowOpStackEvent, TxnEvent};
 use streaming::StreamingConfig;
 
 /// eBPF profiler for MDBX page fault patterns and cursor operations
@@ -829,6 +830,23 @@ fn run_trace(
         if (event_type == 12 || event_type == 13) && data.len() >= CURSOR_LIFECYCLE_EVENT_SIZE {
             let event: CursorLifecycleEvent =
                 unsafe { std::ptr::read_unaligned(data.as_ptr() as *const CursorLifecycleEvent) };
+
+            if let Ok(json) = serde_json::to_string(&event) {
+                use std::io::Write;
+                if let Ok(mut w) = writer_clone.lock() {
+                    let _ = writeln!(w, "{}", json);
+                }
+            }
+            return 0;
+        }
+
+        // Check if this is a slow operation stack event (event_type 14 at offset 16)
+        // 14 = SlowOpStack - contains user-space stack trace for call site attribution
+        // Size: 64 + 256 (stack) + 16 (key_prefix) = 336 bytes
+        const SLOW_OP_STACK_EVENT_SIZE: usize = 336;
+        if event_type == 14 && data.len() >= SLOW_OP_STACK_EVENT_SIZE {
+            let event: SlowOpStackEvent =
+                unsafe { std::ptr::read_unaligned(data.as_ptr() as *const SlowOpStackEvent) };
 
             if let Ok(json) = serde_json::to_string(&event) {
                 use std::io::Write;

@@ -70,6 +70,12 @@ pub const MAX_KEY_SIZE: usize = 64;
 /// Maximum key prefix size for active operation tracking (must match BPF ACTIVE_OP_KEY_PREFIX_SIZE)
 pub const ACTIVE_OP_KEY_PREFIX_SIZE: usize = 16;
 
+/// Maximum stack depth for slow operation traces (must match BPF MAX_STACK_DEPTH)
+pub const MAX_STACK_DEPTH: usize = 32;
+
+/// Default slow operation threshold in nanoseconds (1ms)
+pub const DEFAULT_SLOW_OP_THRESHOLD_NS: u64 = 1_000_000;
+
 /// Sentinel value indicating no active MDBX operation on this thread
 /// (must match BPF NO_ACTIVE_OP_DBI)
 pub const NO_ACTIVE_OP_DBI: u32 = 0xFFFFFFFF;
@@ -143,6 +149,7 @@ pub enum EventType {
     DirectDel = 11,
     CursorOpen = 12,
     CursorClose = 13,
+    SlowOpStack = 14,
 }
 
 /// Write flags for cursor put operations (from libmdbx)
@@ -218,7 +225,11 @@ impl TxnFlags {
     }
 
     pub fn name(&self) -> &'static str {
-        if self.is_read_only() { "RO" } else { "RW" }
+        if self.is_read_only() {
+            "RO"
+        } else {
+            "RW"
+        }
     }
 }
 
@@ -950,6 +961,218 @@ impl CursorLifecycleEvent {
             self.cursor_ptr,
             self.tid
         )
+    }
+}
+
+/// Slow operation with stack trace event from BPF
+///
+/// This struct captures slow database operations along with a user-space stack trace
+/// for call site attribution. This allows distinguishing critical path operations
+/// from background work (e.g., prefetch vs state updates in reth).
+///
+/// Layout on x86_64 Linux (320 bytes total):
+///   - timestamp_ns: offset 0, size 8
+///   - pid: offset 8, size 4
+///   - tid: offset 12, size 4
+///   - event_type: offset 16, size 4
+///   - op_event_type: offset 20, size 4
+///   - cursor_op: offset 24, size 4
+///   - dbi: offset 28, size 4
+///   - latency_ns: offset 32, size 8
+///   - faults_during_op: offset 40, size 4
+///   - major_faults: offset 44, size 4
+///   - branch_faults: offset 48, size 4
+///   - leaf_faults: offset 52, size 4
+///   - max_tree_depth: offset 56, size 4
+///   - stack_depth: offset 60, size 4
+///   - stack: offset 64, size 256 (32 * 8)
+///   - key_prefix: offset 320, size 16
+#[repr(C)]
+#[derive(Debug, Clone)]
+pub struct SlowOpStackEvent {
+    /// Kernel timestamp in nanoseconds
+    pub timestamp_ns: u64,
+    /// Process ID
+    pub pid: u32,
+    /// Thread ID
+    pub tid: u32,
+    /// Event type (EVENT_SLOW_OP_STACK=14)
+    pub event_type: u32,
+    /// Original operation type (CURSOR_GET, DIRECT_GET, etc.)
+    pub op_event_type: u32,
+    /// Cursor operation (for CURSOR_GET: SET_RANGE, NEXT, etc.)
+    pub cursor_op: u32,
+    /// Database index (table identifier)
+    pub dbi: u32,
+    /// Operation latency in nanoseconds
+    pub latency_ns: u64,
+    /// Total faults during this operation
+    pub faults_during_op: u32,
+    /// Major faults during this operation
+    pub major_faults: u32,
+    /// Branch page faults (B+ tree traversal)
+    pub branch_faults: u32,
+    /// Leaf page faults (actual data access)
+    pub leaf_faults: u32,
+    /// Maximum B+ tree depth observed
+    pub max_tree_depth: u32,
+    /// Number of valid stack frames
+    pub stack_depth: u32,
+    /// User-space instruction pointers (need symbol resolution)
+    pub stack: [u64; MAX_STACK_DEPTH],
+    /// First 16 bytes of key for identification
+    pub key_prefix: [u8; ACTIVE_OP_KEY_PREFIX_SIZE],
+}
+
+impl Serialize for SlowOpStackEvent {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("SlowOpStackEvent", 15)?;
+        state.serialize_field("timestamp_ns", &self.timestamp_ns)?;
+        state.serialize_field("pid", &self.pid)?;
+        state.serialize_field("tid", &self.tid)?;
+        state.serialize_field("event_type", &self.event_type)?;
+        state.serialize_field("op_event_type", &self.op_event_type)?;
+        state.serialize_field("cursor_op", &self.cursor_op)?;
+        state.serialize_field("dbi", &self.dbi)?;
+        state.serialize_field("latency_ns", &self.latency_ns)?;
+        state.serialize_field("faults_during_op", &self.faults_during_op)?;
+        state.serialize_field("major_faults", &self.major_faults)?;
+        state.serialize_field("branch_faults", &self.branch_faults)?;
+        state.serialize_field("leaf_faults", &self.leaf_faults)?;
+        state.serialize_field("max_tree_depth", &self.max_tree_depth)?;
+        state.serialize_field("stack_depth", &self.stack_depth)?;
+        // Serialize only valid stack frames as hex addresses
+        let valid_stack: Vec<String> = self.stack[..self.stack_depth as usize]
+            .iter()
+            .map(|addr| format!("0x{:x}", addr))
+            .collect();
+        state.serialize_field("stack", &valid_stack)?;
+        state.serialize_field("key_prefix", &hex::encode(&self.key_prefix))?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for SlowOpStackEvent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Helper {
+            timestamp_ns: u64,
+            pid: u32,
+            tid: u32,
+            event_type: u32,
+            op_event_type: u32,
+            cursor_op: u32,
+            dbi: u32,
+            latency_ns: u64,
+            faults_during_op: u32,
+            major_faults: u32,
+            branch_faults: u32,
+            leaf_faults: u32,
+            max_tree_depth: u32,
+            stack_depth: u32,
+            stack: Vec<String>,
+            key_prefix: String,
+        }
+
+        let helper = Helper::deserialize(deserializer)?;
+
+        let mut stack = [0u64; MAX_STACK_DEPTH];
+        for (i, addr_str) in helper.stack.iter().enumerate() {
+            if i >= MAX_STACK_DEPTH {
+                break;
+            }
+            let addr_str = addr_str.trim_start_matches("0x");
+            if let Ok(addr) = u64::from_str_radix(addr_str, 16) {
+                stack[i] = addr;
+            }
+        }
+
+        let mut key_prefix = [0u8; ACTIVE_OP_KEY_PREFIX_SIZE];
+        if let Ok(bytes) = hex::decode(&helper.key_prefix) {
+            let len = bytes.len().min(ACTIVE_OP_KEY_PREFIX_SIZE);
+            key_prefix[..len].copy_from_slice(&bytes[..len]);
+        }
+
+        Ok(SlowOpStackEvent {
+            timestamp_ns: helper.timestamp_ns,
+            pid: helper.pid,
+            tid: helper.tid,
+            event_type: helper.event_type,
+            op_event_type: helper.op_event_type,
+            cursor_op: helper.cursor_op,
+            dbi: helper.dbi,
+            latency_ns: helper.latency_ns,
+            faults_during_op: helper.faults_during_op,
+            major_faults: helper.major_faults,
+            branch_faults: helper.branch_faults,
+            leaf_faults: helper.leaf_faults,
+            max_tree_depth: helper.max_tree_depth,
+            stack_depth: helper.stack_depth,
+            stack,
+            key_prefix,
+        })
+    }
+}
+
+impl SlowOpStackEvent {
+    /// Get the operation type as an EventType enum
+    pub fn op_event_type(&self) -> Option<EventType> {
+        match self.op_event_type {
+            3 => Some(EventType::CursorGet),
+            4 => Some(EventType::CursorPut),
+            5 => Some(EventType::DirectGet),
+            6 => Some(EventType::CursorDel),
+            10 => Some(EventType::DirectPut),
+            11 => Some(EventType::DirectDel),
+            _ => None,
+        }
+    }
+
+    /// Get the cursor operation as a CursorOp enum (for CursorGet)
+    pub fn cursor_op(&self) -> CursorOp {
+        CursorOp::from_raw(self.cursor_op)
+    }
+
+    /// Get the table name
+    pub fn table_name(&self) -> &'static str {
+        dbi_to_table_name(self.dbi)
+    }
+
+    /// Get latency in microseconds
+    pub fn latency_us(&self) -> f64 {
+        self.latency_ns as f64 / 1000.0
+    }
+
+    /// Get latency in milliseconds
+    pub fn latency_ms(&self) -> f64 {
+        self.latency_ns as f64 / 1_000_000.0
+    }
+
+    /// Get the key prefix as a hex string
+    pub fn key_prefix_hex(&self) -> String {
+        hex::encode(&self.key_prefix)
+    }
+
+    /// Get the valid stack frames (up to stack_depth)
+    pub fn stack_frames(&self) -> &[u64] {
+        &self.stack[..self.stack_depth as usize]
+    }
+
+    /// Returns true if this is a seek operation (likely on critical path)
+    pub fn is_seek(&self) -> bool {
+        if self.op_event_type == 3 {
+            // CursorGet
+            self.cursor_op().is_seek()
+        } else {
+            false
+        }
     }
 }
 

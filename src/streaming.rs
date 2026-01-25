@@ -5,22 +5,23 @@
 //! Designed to handle traces of any size with bounded memory usage.
 
 use crate::event::{
-    CursorEvent, CursorLifecycleEvent, CursorOp, MdbxPageType, PageFaultEvent, TxnEvent,
-    dbi_to_table_name, is_pre_trace_cursor,
+    dbi_to_table_name, is_pre_trace_cursor, CursorEvent, CursorLifecycleEvent, CursorOp,
+    MdbxPageType, PageFaultEvent, SlowOpStackEvent, TxnEvent,
 };
 use crate::viewer::{
     AccessCountBucket, BTreeVisualization, BatchAnalysis, BlockRange, BurstStats,
-    CacheSimulationPoint, CpuProfileSummary, CpuTableEntry, CursorData, CursorLifecycleData,
-    CursorLifecycleTableStats, CursorOpSample, CursorSummary, CursorTableStats,
-    CursorTimelinePoint, DepthBucket, DirectFaultAttribution, FaultsByCursorOp, FaultsByOpType,
-    HeatmapCellAttribution, HeatmapData, HistogramBucket, HotPageAnalysis, OpFaultCount,
-    OperationDepthStats, OperationFaultHistogram, OperationPageTypeBreakdown, OperationStats,
-    PageTypeFaultCount, PageTypeStats, ParetoPoint, PatternAnalysis, RwCommitPoint, SlowKeyStats,
-    SlowOpBreakdown, SlowOpsTableStats, StrideInfo, TableDepthStats, TableDrillDown, TableHotKey,
-    TableTreeStats, TableWorkingSet, ThreadStats, ThreadTableStats, ThreadTimelinePoint,
-    TimeWindowedWSS, TimelinePoint, TraceSummary, TreeDepthEstimate, TreeDepthStats,
-    TreeTraversalViz, TxnConcurrencyStats, TxnData, TxnSummary, TxnThreadStats, TxnTimelineEntry,
-    UnifiedTableStats, ViewerData, WorkingSetAnalysis,
+    CacheSimulationPoint, CallSiteAnalysis, CallSiteEntry, CpuProfileSummary, CpuTableEntry,
+    CriticalVsBackground, CursorData, CursorLifecycleData, CursorLifecycleTableStats,
+    CursorOpSample, CursorSummary, CursorTableStats, CursorTimelinePoint, DepthBucket,
+    DirectFaultAttribution, FaultsByCursorOp, FaultsByOpType, HeatmapCellAttribution, HeatmapData,
+    HistogramBucket, HotPageAnalysis, OpFaultCount, OperationDepthStats, OperationFaultHistogram,
+    OperationPageTypeBreakdown, OperationStats, PageTypeFaultCount, PageTypeStats, ParetoPoint,
+    PathSummary, PatternAnalysis, RwCommitPoint, SlowKeyStats, SlowOpBreakdown, SlowOpsTableStats,
+    StrideInfo, TableDepthStats, TableDrillDown, TableHotKey, TableTreeStats, TableWorkingSet,
+    ThreadStats, ThreadTableStats, ThreadTimelinePoint, TimeWindowedWSS, TimelinePoint,
+    TraceSummary, TreeDepthEstimate, TreeDepthStats, TreeTraversalViz, TxnConcurrencyStats,
+    TxnData, TxnSummary, TxnThreadStats, TxnTimelineEntry, UnifiedTableStats, ViewerData,
+    WorkingSetAnalysis,
 };
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::io::{BufRead, BufReader};
@@ -467,7 +468,7 @@ impl HotKeyTracker {
     fn prune(&mut self) {
         // Keep only top N by slow_count
         let mut entries: Vec<_> = self.keys.drain().collect();
-        entries.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+        entries.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
         entries.truncate(self.max_keys);
         self.keys = entries.into_iter().collect();
     }
@@ -614,6 +615,11 @@ pub struct StreamingAggregator {
     // Parse errors
     parse_errors: u64,
 
+    // Slow operation stack trace tracking
+    slow_op_stack_count: u64,
+    // call_path_key -> (count, total_latency_ns, max_latency_ns, total_faults, major_faults, is_critical, sample_stack)
+    call_site_stats: HashMap<String, (u64, u64, u64, u64, u64, Option<bool>, Option<Vec<String>>)>,
+
     // Working set analysis (memory-efficient using sampling)
     // Sampled page access counts: tracks access counts for a bounded sample of pages
     sampled_page_counts: SampledAccessCounts,
@@ -728,6 +734,9 @@ impl StreamingAggregator {
             heatmap_attribution: HashMap::new(),
             heatmap_initialized: false,
             parse_errors: 0,
+            // Slow op stack tracking
+            slow_op_stack_count: 0,
+            call_site_stats: HashMap::new(),
             // Working set analysis
             sampled_page_counts: SampledAccessCounts::new(50_000), // 50K sampled pages
             table_page_stats: HashMap::new(),
@@ -1360,6 +1369,61 @@ impl StreamingAggregator {
         }
     }
 
+    /// Process a slow operation stack event
+    pub fn process_slow_op_stack_event(&mut self, event: &SlowOpStackEvent) {
+        let ts = event.timestamp_ns;
+        if self.first_timestamp.is_none() {
+            self.first_timestamp = Some(ts);
+        }
+        self.last_timestamp = ts;
+        self.total_events += 1;
+        self.slow_op_stack_count += 1;
+
+        // Build call path key from stack frames
+        // For now, we use the raw addresses since we don't have symbol resolution in streaming
+        // Symbol resolution happens in the viewer or as a post-processing step
+        let call_path_key = if event.stack_depth > 0 {
+            // Use first few non-zero addresses as the key
+            let key_addrs: Vec<String> = event.stack[..event.stack_depth as usize]
+                .iter()
+                .take(5)
+                .map(|addr| format!("0x{:x}", addr))
+                .collect();
+            key_addrs.join(" <- ")
+        } else {
+            "unknown".to_string()
+        };
+
+        // Update call site statistics
+        let entry = self
+            .call_site_stats
+            .entry(call_path_key.clone())
+            .or_insert((
+                0,    // count
+                0,    // total_latency_ns
+                0,    // max_latency_ns
+                0,    // total_faults
+                0,    // major_faults
+                None, // is_critical (unknown until symbols are resolved)
+                None, // sample_stack
+            ));
+
+        entry.0 += 1;
+        entry.1 += event.latency_ns;
+        entry.2 = entry.2.max(event.latency_ns);
+        entry.3 += event.faults_during_op as u64;
+        entry.4 += event.major_faults as u64;
+
+        // Store first sample stack for this call site
+        if entry.6.is_none() && event.stack_depth > 0 {
+            let sample: Vec<String> = event.stack[..event.stack_depth as usize]
+                .iter()
+                .map(|addr| format!("0x{:x}", addr))
+                .collect();
+            entry.6 = Some(sample);
+        }
+    }
+
     /// Update heatmap with current stats (call after all events processed)
     fn finalize_heatmap(&mut self) {
         if self.page_fault_count == 0 || self.max_offset == 0 {
@@ -1586,6 +1650,9 @@ impl StreamingAggregator {
         // Build cursor lifecycle data
         let cursor_lifecycle = self.build_cursor_lifecycle_data();
 
+        // Build call site analysis from slow op stack traces
+        let call_site_analysis = self.build_call_site_analysis();
+
         ViewerData {
             summary,
             timeline,
@@ -1605,6 +1672,7 @@ impl StreamingAggregator {
             btree_viz,
             working_set,
             cpu_profile,
+            call_site_analysis,
         }
     }
 
@@ -3053,6 +3121,130 @@ impl StreamingAggregator {
         self.parse_errors += 1;
     }
 
+    /// Build call site analysis from slow operation stack traces
+    fn build_call_site_analysis(&self) -> CallSiteAnalysis {
+        if self.call_site_stats.is_empty() {
+            return CallSiteAnalysis::default();
+        }
+
+        // Convert raw stats to CallSiteEntry objects
+        let mut entries: Vec<CallSiteEntry> = self
+            .call_site_stats
+            .iter()
+            .map(
+                |(
+                    call_path,
+                    &(
+                        count,
+                        total_latency_ns,
+                        max_latency_ns,
+                        total_faults,
+                        major_faults,
+                        is_critical,
+                        ref sample_stack,
+                    ),
+                )| {
+                    CallSiteEntry {
+                        call_path: call_path.clone(),
+                        count,
+                        total_latency_ns,
+                        avg_latency_us: if count > 0 {
+                            total_latency_ns as f64 / count as f64 / 1000.0
+                        } else {
+                            0.0
+                        },
+                        max_latency_us: max_latency_ns as f64 / 1000.0,
+                        total_faults,
+                        major_faults,
+                        avg_faults: if count > 0 {
+                            total_faults as f64 / count as f64
+                        } else {
+                            0.0
+                        },
+                        is_critical_path: is_critical,
+                        sample_stack: sample_stack.clone(),
+                    }
+                },
+            )
+            .collect();
+
+        // Sort by count descending
+        entries.sort_by(|a, b| b.count.cmp(&a.count));
+
+        // Calculate path summary
+        let mut critical_path_count = 0u64;
+        let mut critical_path_latency_ns = 0u64;
+        let mut background_count = 0u64;
+        let mut background_latency_ns = 0u64;
+        let mut unknown_count = 0u64;
+
+        for entry in &entries {
+            match entry.is_critical_path {
+                Some(true) => {
+                    critical_path_count += entry.count;
+                    critical_path_latency_ns += entry.total_latency_ns;
+                }
+                Some(false) => {
+                    background_count += entry.count;
+                    background_latency_ns += entry.total_latency_ns;
+                }
+                None => {
+                    unknown_count += entry.count;
+                }
+            }
+        }
+
+        let total_slow_ops = self.slow_op_stack_count;
+        let critical_path_percentage = if total_slow_ops > 0 {
+            critical_path_count as f64 / total_slow_ops as f64 * 100.0
+        } else {
+            0.0
+        };
+
+        let path_summary = PathSummary {
+            critical_path_count,
+            critical_path_latency_ns,
+            background_count,
+            background_latency_ns,
+            unknown_count,
+            critical_path_percentage,
+        };
+
+        // Split entries by critical path status
+        let mut critical_path_entries = Vec::new();
+        let mut background_entries = Vec::new();
+        let mut unknown_entries = Vec::new();
+
+        for entry in entries.iter().cloned() {
+            match entry.is_critical_path {
+                Some(true) => critical_path_entries.push(entry),
+                Some(false) => background_entries.push(entry),
+                None => unknown_entries.push(entry),
+            }
+        }
+
+        // Limit entries to top 50 each
+        critical_path_entries.truncate(50);
+        background_entries.truncate(50);
+        unknown_entries.truncate(50);
+
+        // Top call sites overall (limit to 100)
+        let top_call_sites: Vec<_> = entries.into_iter().take(100).collect();
+
+        CallSiteAnalysis {
+            has_data: true,
+            total_slow_ops,
+            unique_call_sites: self.call_site_stats.len() as u64,
+            path_summary,
+            top_call_sites,
+            critical_vs_background: CriticalVsBackground {
+                critical_path: critical_path_entries,
+                background: background_entries,
+                unknown: unknown_entries,
+            },
+        }
+    }
+
     /// Build CPU profile summary from table stats
     fn build_cpu_profile(&self) -> CpuProfileSummary {
         // Aggregate CPU time data across all tables
@@ -3320,6 +3512,14 @@ pub fn process_trace_streaming<R: std::io::Read>(
         if let Ok(event) = serde_json::from_str::<CursorLifecycleEvent>(&line) {
             if event.event_type == 12 || event.event_type == 13 {
                 aggregator.process_cursor_lifecycle_event(&event);
+                continue;
+            }
+        }
+
+        // Try to parse as slow op stack event
+        if let Ok(event) = serde_json::from_str::<SlowOpStackEvent>(&line) {
+            if event.event_type == 14 {
+                aggregator.process_slow_op_stack_event(&event);
                 continue;
             }
         }

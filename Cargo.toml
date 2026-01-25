@@ -35,6 +35,9 @@ humansize = "2"
 hex = "0.4"
 fastrand = "2"
 
+# Symbol resolution for stack traces
+blazesym = "0.2"
+
 [build-dependencies]
 libbpf-cargo = "0.24"
 
