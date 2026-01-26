@@ -2972,10 +2972,10 @@ document.getElementById('export-compact-btn').addEventListener('click', () => {
     const r1 = (n) => n != null ? Math.round(n * 10) / 10 : null;
     const r0 = (n) => n != null ? Math.round(n) : null;
 
-    // Helper: compact operation breakdown (top 3 only, minimal fields)
+    // Helper: compact operation breakdown (top 5, with more fields)
     const compactOps = (ops) => {
         if (!ops || !ops.length) return [];
-        return ops.slice(0, 3).map(o => ({
+        return ops.slice(0, 5).map(o => ({
             op: o.operation,
             faults: o.faults,
             major: o.major_faults,
@@ -2983,14 +2983,26 @@ document.getElementById('export-compact-btn').addEventListener('click', () => {
         }));
     };
 
-    // Helper: compact slow keys (top 5, truncated)
+    // Helper: compact slow keys (top 8, truncated)
     const compactKeys = (keys) => {
         if (!keys || !keys.length) return [];
-        return keys.slice(0, 5).map(k => ({
-            key: k.key_hex?.substring(0, 24) || k.key_prefix?.substring(0, 24) || '?',
+        return keys.slice(0, 8).map(k => ({
+            key: k.key_hex?.substring(0, 32) || k.key_prefix?.substring(0, 32) || '?',
             slow: k.slow_count || k.slow_access_count,
             avg_ms: r2((k.avg_latency_us || 0) / 1000)
         }));
+    };
+
+    // Helper: get tree traversal data for a table
+    const getTreeData = (tableName) => {
+        const tt = DATA.tree_traversal?.tables?.find(t => t.name === tableName);
+        if (!tt) return null;
+        return {
+            branch: tt.branch_faults,
+            leaf: tt.leaf_faults,
+            overflow: tt.overflow_faults,
+            bl_ratio: r2(tt.branch_leaf_ratio)
+        };
     };
 
     const compact = {
@@ -3023,6 +3035,7 @@ document.getElementById('export-compact-btn').addEventListener('click', () => {
                 name: t.name,
                 faults: t.faults,
                 fault_pct: r1(t.fault_percentage),
+                major_faults: t.major_faults,
                 major_pct: t.faults > 0 ? r1(t.major_faults / t.faults * 100) : 0,
                 // Working set for this table
                 unique_pages: t.details?.unique_pages || null,
@@ -3032,7 +3045,11 @@ document.getElementById('export-compact-btn').addEventListener('click', () => {
                 // I/O time
                 io_time_secs: r2((t.time_lost_ms || 0) / 1000),
                 cpu_pct: r1((t.cpu_efficiency || 0) * 100),
+                is_io_bound: t.is_io_bound || false,
             };
+            // Add B+tree traversal data if available
+            const tree = getTreeData(t.name);
+            if (tree) entry.tree = tree;
             // Add slow keys if present
             const keys = compactKeys(t.details?.hot_keys);
             if (keys.length > 0) entry.slow_keys = keys;
@@ -3129,6 +3146,69 @@ document.getElementById('export-compact-btn').addEventListener('click', () => {
                 faults: o.total_faults,
                 major: o.major_faults,
                 pct: r1(o.percentage)
+            }))
+        } : null,
+
+        // === CALL SITES / CALL PATHS (I/O attribution by code path) ===
+        call_sites: DATA.call_site_analysis?.has_data ? {
+            total_slow_ops: DATA.call_site_analysis.total_slow_ops,
+            path_summary: {
+                critical: DATA.call_site_analysis.path_summary.critical_path_count,
+                background: DATA.call_site_analysis.path_summary.background_count,
+                unknown: DATA.call_site_analysis.path_summary.unknown_count
+            },
+            // Subsystems (caller modules) with their call sites and stack traces
+            subsystems: (DATA.call_site_analysis.subsystems || []).slice(0, 15).map(ss => ({
+                name: ss.name,
+                slow_ops: ss.slow_ops,
+                pct: r1(ss.percentage),
+                major_pct: r1(ss.major_fault_pct),
+                avg_latency_ms: r2(ss.avg_latency_us / 1000),
+                // Top call sites with stack traces (the actual call paths)
+                call_sites: (ss.sample_call_sites || []).slice(0, 5).map(cs => ({
+                    path: cs.call_path,
+                    count: cs.count,
+                    avg_ms: r2(cs.avg_latency_us / 1000),
+                    // Include condensed stack trace (top 10 meaningful frames)
+                    stack: (cs.sample_stack || [])
+                        .filter(f => f && !f.match(/^0x[0-9a-f]+$/i))
+                        .slice(0, 10)
+                        .map(f => {
+                            // Extract just the function name for compactness
+                            const match = f.match(/^(.+?)\s*\(/);
+                            return match ? match[1].trim() : f.trim();
+                        })
+                }))
+            }))
+        } : null,
+
+        // === CURSOR LIFECYCLE (cursor open/close patterns) ===
+        cursor_lifecycle: DATA.cursor_lifecycle?.has_data ? {
+            total_opens: DATA.cursor_lifecycle.total_opens,
+            avg_lifetime_us: r0(DATA.cursor_lifecycle.avg_lifetime_us),
+            p50_lifetime_us: r0(DATA.cursor_lifecycle.p50_lifetime_us),
+            p95_lifetime_us: r0(DATA.cursor_lifecycle.p95_lifetime_us),
+            p99_lifetime_us: r0(DATA.cursor_lifecycle.p99_lifetime_us),
+            avg_ops_per_cursor: r1(DATA.cursor_lifecycle.avg_ops_per_cursor),
+            by_table: (DATA.cursor_lifecycle.by_table || []).slice(0, 15).map(t => ({
+                table: t.table,
+                opens: t.opens,
+                avg_ops: r1(t.avg_ops),
+                avg_lifetime_us: r0(t.avg_lifetime_us)
+            }))
+        } : null,
+
+        // === TREE TRAVERSAL SUMMARY (B+ tree page type breakdown) ===
+        tree_traversal: DATA.tree_traversal?.has_data ? {
+            total_branch: DATA.tree_traversal.total_branch_faults,
+            total_leaf: DATA.tree_traversal.total_leaf_faults,
+            total_overflow: DATA.tree_traversal.total_overflow_faults,
+            avg_depth: r1(DATA.tree_traversal.avg_depth),
+            by_operation: (DATA.tree_traversal.by_operation || []).slice(0, 8).map(o => ({
+                op: o.operation,
+                branch: o.branch_faults,
+                leaf: o.leaf_faults,
+                overflow: o.overflow_faults
             }))
         } : null
     };
