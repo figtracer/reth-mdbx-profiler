@@ -235,12 +235,12 @@ pub fn generate_html(data: &ViewerData) -> String {
                             <table class="compact-table expandable-table sortable-table" id="subsystem-table">
                                 <thead>
                                     <tr>
-                                        <th style="width:30px;"></th>
                                         <th data-sort="name">Caller Module</th>
                                         <th data-sort="slow_ops" class="sortable sorted-desc">Slow Ops <span class="sort-icon">▼</span></th>
                                         <th data-sort="percentage" class="sortable">% Total</th>
                                         <th data-sort="major_fault_pct" class="sortable">Major %</th>
                                         <th data-sort="avg_latency" class="sortable">Avg Latency</th>
+                                        <th style="width:80px;"></th>
                                     </tr>
                                 </thead>
                                 <tbody></tbody>
@@ -4610,14 +4610,14 @@ function renderSubsystemTable(subsystems) {
         const hasStacks = ss.sample_call_sites && ss.sample_call_sites.length > 0;
 
         tr.innerHTML =
-            '<td style="width:80px;">' +
-                (hasStacks ? '<button class="view-stacks-btn" data-idx="' + idx + '">Stacks</button>' : '<span style="color:#52525b;font-size:11px;">-</span>') +
-            '</td>' +
             '<td style="font-weight:500;">' + ss.name + '</td>' +
             '<td>' + fmt(ss.slow_ops) + '</td>' +
             '<td>' + ss.percentage.toFixed(1) + '%</td>' +
             '<td class="' + majorPctClass + '">' + ss.major_fault_pct.toFixed(1) + '%</td>' +
-            '<td>' + fmtLat(ss.avg_latency_us) + '</td>';
+            '<td>' + fmtLat(ss.avg_latency_us) + '</td>' +
+            '<td style="width:80px;text-align:right;">' +
+                (hasStacks ? '<button class="view-stacks-btn" data-idx="' + idx + '">Stacks</button>' : '') +
+            '</td>';
 
         tbody.appendChild(tr);
 
