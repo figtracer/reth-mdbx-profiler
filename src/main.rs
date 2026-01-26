@@ -331,7 +331,8 @@ fn print_summary(data: &viewer::ViewerData) {
     }
 }
 
-/// Generate compact export format (same as browser export button)
+/// Generate compact export format with comprehensive data for analysis
+/// Target: ~200-300KB of structured data from 40GB traces
 fn generate_compact_export(data: &viewer::ViewerData, label: Option<&str>) -> serde_json::Value {
     let mut compact = serde_json::json!({
         "label": label.unwrap_or("trace"),
@@ -349,20 +350,69 @@ fn generate_compact_export(data: &viewer::ViewerData, label: Option<&str>) -> se
             "rate_per_sec": data.summary.fault_rate_per_sec,
             "unique_pages": data.summary.unique_pages,
             "sequential_ratio": data.patterns.sequential_ratio,
-            "random_ratio": data.patterns.random_ratio
+            "random_ratio": data.patterns.random_ratio,
+            "top_strides": data.patterns.top_strides.iter().take(5).map(|s| {
+                serde_json::json!({
+                    "stride": s.stride_pages,
+                    "count": s.count,
+                    "pct": s.percentage,
+                    "pattern": s.pattern_type
+                })
+            }).collect::<Vec<_>>()
         },
-        "tables": data.unified_tables.iter().take(20).map(|t| {
+        // Expanded table stats with drill-down data
+        "tables": data.unified_tables.iter().take(30).map(|t| {
             serde_json::json!({
                 "name": t.name,
+                "dbi": t.dbi,
                 "faults": t.faults,
                 "major_faults": t.major_faults,
                 "fault_pct": t.fault_percentage,
+                "branch_faults": t.branch_faults,
+                "leaf_faults": t.leaf_faults,
+                "overflow_faults": t.overflow_faults,
+                "total_ops": t.total_ops,
                 "slow_ops": t.slow_ops,
+                "slow_ops_pct": t.slow_ops_percentage,
                 "time_lost_ms": t.time_lost_ms,
-                "top_op": t.top_operation
+                "avg_latency_us": t.avg_latency_us,
+                "max_latency_us": t.max_latency_us,
+                "wall_time_ms": t.total_wall_time_ms,
+                "cpu_time_ms": t.total_cpu_time_ms,
+                "cpu_efficiency": t.cpu_efficiency,
+                "is_io_bound": t.is_io_bound,
+                "top_op": t.top_operation,
+                "severity": t.severity,
+                "faults_by_op": t.details.faults_by_op.iter().take(5).map(|o| {
+                    serde_json::json!({"op": o.operation, "faults": o.faults, "major": o.major_faults})
+                }).collect::<Vec<_>>(),
+                "faults_by_cursor_op": t.details.faults_by_cursor_op.iter().take(5).map(|o| {
+                    serde_json::json!({"op": o.operation, "faults": o.faults, "major": o.major_faults})
+                }).collect::<Vec<_>>(),
+                "slow_breakdown": t.details.slow_ops_breakdown.iter().take(5).map(|s| {
+                    serde_json::json!({"op": s.operation, "count": s.count, "avg_us": s.avg_latency_us, "max_us": s.max_latency_us})
+                }).collect::<Vec<_>>(),
+                "hot_keys": t.details.hot_keys.iter().take(5).map(|k| {
+                    serde_json::json!({"key": k.key_hex, "slow": k.slow_count, "total": k.total_count, "avg_us": k.avg_latency_us})
+                }).collect::<Vec<_>>()
             })
         }).collect::<Vec<_>>(),
-        "threads": data.threads.iter().take(10).collect::<Vec<_>>()
+        // Per-thread stats with timeline samples
+        "threads": data.threads.iter().take(15).map(|t| {
+            serde_json::json!({
+                "tid": t.tid,
+                "faults": t.faults,
+                "major_faults": t.major_faults,
+                "pct": t.percentage,
+                "top_tables": t.top_tables.iter().take(3).map(|tt| {
+                    serde_json::json!({"table": tt.table_name, "faults": tt.faults, "major_pct": tt.major_pct})
+                }).collect::<Vec<_>>(),
+                // Sample timeline (every 10th point to reduce size)
+                "timeline_sample": t.timeline.iter().step_by(10).take(50).map(|p| {
+                    serde_json::json!({"t": p.time_ms, "f": p.faults, "m": p.major_faults})
+                }).collect::<Vec<_>>()
+            })
+        }).collect::<Vec<_>>()
     });
 
     // Add cursor data if available
@@ -370,20 +420,108 @@ fn generate_compact_export(data: &viewer::ViewerData, label: Option<&str>) -> se
         compact["cursor_ops"] = serde_json::json!({
             "total": data.cursor_data.summary.total_ops,
             "rate_per_sec": data.cursor_data.summary.op_rate_per_sec,
+            "seek_count": data.cursor_data.summary.seek_count,
             "seek_ratio": data.cursor_data.summary.seek_ratio,
-            "latency_avg_us": data.cursor_data.summary.avg_latency_us,
-            "latency_p95_us": data.cursor_data.summary.p95_latency_us,
-            "latency_p99_us": data.cursor_data.summary.p99_latency_us,
-            "by_table": data.cursor_data.table_stats.iter().take(15).map(|t| {
+            "nav_count": data.cursor_data.summary.nav_count,
+            "error_count": data.cursor_data.summary.error_count,
+            "direct_get_count": data.cursor_data.summary.direct_get_count,
+            "direct_get_ratio": data.cursor_data.summary.direct_get_ratio,
+            "latency": {
+                "avg_us": data.cursor_data.summary.avg_latency_us,
+                "p50_us": data.cursor_data.summary.p50_latency_us,
+                "p95_us": data.cursor_data.summary.p95_latency_us,
+                "p99_us": data.cursor_data.summary.p99_latency_us
+            },
+            "by_table": data.cursor_data.table_stats.iter().take(20).map(|t| {
                 serde_json::json!({
                     "name": t.name,
+                    "dbi": t.dbi,
                     "ops": t.ops,
                     "pct": t.percentage,
-                    "avg_latency_us": t.avg_latency_us,
-                    "p95_latency_us": t.p95_latency_us
+                    "seeks": t.seeks,
+                    "navs": t.navs,
+                    "avg_us": t.avg_latency_us,
+                    "p95_us": t.p95_latency_us,
+                    "p99_us": t.p99_latency_us
                 })
+            }).collect::<Vec<_>>(),
+            "operations": data.cursor_data.operations.iter().take(15).map(|o| {
+                serde_json::json!({
+                    "name": o.name,
+                    "count": o.count,
+                    "pct": o.percentage,
+                    "is_seek": o.is_seek
+                })
+            }).collect::<Vec<_>>(),
+            // Slow operations by table
+            "slow_by_table": data.cursor_data.slow_ops_by_table.iter().take(15).map(|s| {
+                serde_json::json!({
+                    "table": s.table,
+                    "slow_count": s.slow_op_count,
+                    "slow_pct": s.slow_op_percentage,
+                    "total_slow_ms": s.total_slow_time_ms,
+                    "avg_slow_us": s.avg_slow_latency_us,
+                    "max_us": s.max_latency_us,
+                    "by_op": s.by_operation.iter().take(3).map(|o| {
+                        serde_json::json!({"op": o.operation, "count": o.count, "avg_us": o.avg_latency_us})
+                    }).collect::<Vec<_>>()
+                })
+            }).collect::<Vec<_>>(),
+            // Slow keys
+            "slow_keys": data.cursor_data.slow_keys.iter().take(20).map(|k| {
+                serde_json::json!({
+                    "table": k.table,
+                    "key": k.key_prefix,
+                    "slow_count": k.slow_access_count,
+                    "total_count": k.total_access_count,
+                    "avg_us": k.avg_latency_us,
+                    "max_us": k.max_latency_us
+                })
+            }).collect::<Vec<_>>(),
+            // Timeline sample
+            "timeline_sample": data.cursor_data.timeline.iter().step_by(5).take(100).map(|p| {
+                serde_json::json!({"t": p.time_ms, "ops": p.ops, "seeks": p.seeks, "avg_us": p.avg_latency_us})
             }).collect::<Vec<_>>()
         });
+
+        // Tree depth stats (crucial for understanding B+ tree traversal)
+        let depth = &data.cursor_data.summary.tree_depth_stats;
+        if depth.ops_with_depth_data > 0 {
+            compact["tree_depth"] = serde_json::json!({
+                "ops_with_data": depth.ops_with_depth_data,
+                "max_observed": depth.max_depth_observed,
+                "avg_depth": depth.avg_depth,
+                "histogram": depth.depth_histogram.iter().map(|b| {
+                    serde_json::json!({
+                        "depth": b.depth,
+                        "count": b.count,
+                        "pct": b.percentage,
+                        "avg_faults": b.avg_faults,
+                        "avg_us": b.avg_latency_us
+                    })
+                }).collect::<Vec<_>>(),
+                "by_table": depth.by_table.iter().take(15).map(|t| {
+                    serde_json::json!({
+                        "table": t.table_name,
+                        "ops": t.ops_count,
+                        "max_depth": t.max_depth,
+                        "avg_depth": t.avg_depth,
+                        "avg_faults": t.avg_faults,
+                        "avg_us": t.avg_latency_us
+                    })
+                }).collect::<Vec<_>>(),
+                "by_operation": depth.by_operation.iter().take(10).map(|o| {
+                    serde_json::json!({
+                        "op": o.operation,
+                        "ops": o.ops_count,
+                        "max_depth": o.max_depth,
+                        "avg_depth": o.avg_depth,
+                        "avg_faults": o.avg_faults,
+                        "is_seek": o.is_seek
+                    })
+                }).collect::<Vec<_>>()
+            });
+        }
     }
 
     // Add transaction data if available
@@ -395,21 +533,318 @@ fn generate_compact_export(data: &viewer::ViewerData, label: Option<&str>) -> se
             "rw_count": data.txn_data.summary.rw_count,
             "commits": data.txn_data.summary.commit_count,
             "aborts": data.txn_data.summary.abort_count,
-            "commit_latency_avg_us": data.txn_data.summary.avg_commit_latency_us,
-            "commit_latency_p99_us": data.txn_data.summary.p99_commit_latency_us,
-            "max_concurrent_ro": data.txn_data.concurrency.max_concurrent_ro,
-            "max_concurrent_rw": data.txn_data.concurrency.max_concurrent_rw
+            "latency": {
+                "avg_us": data.txn_data.summary.avg_commit_latency_us,
+                "p50_us": data.txn_data.summary.p50_commit_latency_us,
+                "p95_us": data.txn_data.summary.p95_commit_latency_us,
+                "p99_us": data.txn_data.summary.p99_commit_latency_us,
+                "max_us": data.txn_data.summary.max_commit_latency_us
+            },
+            "concurrency": {
+                "max_ro": data.txn_data.concurrency.max_concurrent_ro,
+                "max_rw": data.txn_data.concurrency.max_concurrent_rw,
+                "max_total": data.txn_data.concurrency.max_concurrent_total
+            },
+            "by_thread": data.txn_data.thread_stats.iter().take(10).map(|t| {
+                serde_json::json!({
+                    "tid": t.tid,
+                    "total": t.total_txns,
+                    "ro": t.ro_txns,
+                    "rw": t.rw_txns,
+                    "commits": t.commits,
+                    "aborts": t.aborts,
+                    "avg_commit_us": t.avg_commit_latency_us
+                })
+            }).collect::<Vec<_>>(),
+            // RW commit timeline sample
+            "rw_commits_sample": data.txn_data.rw_commit_timeline.iter().step_by(5).take(100).map(|p| {
+                serde_json::json!({"t": p.time_secs, "lat_ms": p.latency_ms})
+            }).collect::<Vec<_>>()
         });
     }
 
-    // Add direct attribution stats if available
+    // Add direct attribution stats
     if data.direct_fault_attribution.has_data {
         compact["attribution"] = serde_json::json!({
             "directly_attributed": data.direct_fault_attribution.directly_attributed_count,
             "timestamp_fallback": data.direct_fault_attribution.timestamp_fallback_count,
-            "uncorrelated": data.direct_fault_attribution.uncorrelated_count
+            "uncorrelated": data.direct_fault_attribution.uncorrelated_count,
+            "by_op_type": data.direct_fault_attribution.faults_by_op_type.iter().map(|o| {
+                serde_json::json!({"op": o.op_type, "faults": o.total_faults, "major": o.major_faults, "pct": o.percentage})
+            }).collect::<Vec<_>>(),
+            "by_cursor_op": data.direct_fault_attribution.faults_by_cursor_op.iter().map(|o| {
+                serde_json::json!({"op": o.cursor_op, "faults": o.total_faults, "major": o.major_faults, "pct": o.percentage})
+            }).collect::<Vec<_>>()
         });
     }
+
+    // Add page type stats
+    if data.page_type_stats.has_data {
+        compact["page_types"] = serde_json::json!({
+            "total_faults": data.page_type_stats.total_faults,
+            "traversal_to_data_ratio": data.page_type_stats.traversal_to_data_ratio,
+            "by_type": data.page_type_stats.by_type.iter().map(|p| {
+                serde_json::json!({
+                    "type": p.page_type,
+                    "faults": p.total_faults,
+                    "major": p.major_faults,
+                    "pct": p.percentage
+                })
+            }).collect::<Vec<_>>()
+        });
+    }
+
+    // Add B-tree visualization data (batch analysis, tree depth estimates)
+    if data.btree_viz.has_data {
+        compact["btree"] = serde_json::json!({
+            "traversal_efficiency": data.btree_viz.traversal_efficiency_score,
+            "attribution": {
+                "total_faults": data.btree_viz.attribution_stats.total_faults,
+                "batch_attributed": data.btree_viz.attribution_stats.batch_attributed_faults,
+                "batch_pct": data.btree_viz.attribution_stats.batch_attribution_pct,
+                "rw_commits": data.btree_viz.attribution_stats.rw_commits_detected
+            },
+            "tree_depth_estimates": data.btree_viz.tree_depth_estimates.iter().take(15).map(|e| {
+                serde_json::json!({
+                    "table": e.table_name,
+                    "depth": e.estimated_depth,
+                    "branch_leaf_ratio": e.branch_leaf_ratio,
+                    "confidence": e.confidence,
+                    "sample_size": e.sample_size
+                })
+            }).collect::<Vec<_>>(),
+            "operation_page_types": data.btree_viz.operation_page_types.iter().take(10).map(|o| {
+                serde_json::json!({
+                    "op": o.cursor_op,
+                    "branch": o.branch_faults,
+                    "leaf": o.leaf_faults,
+                    "overflow": o.overflow_faults,
+                    "major": o.major_faults,
+                    "fault_pct": o.fault_percentage
+                })
+            }).collect::<Vec<_>>(),
+            // Per-batch analysis (RW transaction batches)
+            "batches": data.btree_viz.batch_analysis.iter().take(50).map(|b| {
+                serde_json::json!({
+                    "idx": b.batch_index,
+                    "blocks": format!("{}-{}", b.first_block, b.last_block),
+                    "block_count": b.block_count,
+                    "faults": b.total_faults,
+                    "branch": b.branch_faults,
+                    "leaf": b.leaf_faults,
+                    "major": b.major_faults,
+                    "io_us": b.io_time_us,
+                    "commit_us": b.commit_latency_us,
+                    "tables": b.tables_touched.iter().take(5).collect::<Vec<_>>()
+                })
+            }).collect::<Vec<_>>()
+        });
+    }
+
+    // Add working set analysis
+    if data.working_set.has_data {
+        compact["working_set"] = serde_json::json!({
+            "unique_pages": data.working_set.total_unique_pages,
+            "total_accesses": data.working_set.total_accesses,
+            "reuse_ratio": data.working_set.reuse_ratio,
+            "avg_accesses_per_page": data.working_set.avg_accesses_per_page,
+            "hot_pages": {
+                "for_50pct": data.working_set.hot_page_analysis.pages_for_50pct,
+                "for_80pct": data.working_set.hot_page_analysis.pages_for_80pct,
+                "for_90pct": data.working_set.hot_page_analysis.pages_for_90pct,
+                "pareto_ratio": data.working_set.hot_page_analysis.pareto_ratio,
+                "curve": data.working_set.hot_page_analysis.distribution_curve.iter().step_by(5).take(20).map(|p| {
+                    serde_json::json!({"pages_pct": p.pages_pct, "accesses_pct": p.accesses_pct})
+                }).collect::<Vec<_>>()
+            },
+            "cache_simulation": data.working_set.cache_simulation.iter().map(|c| {
+                serde_json::json!({
+                    "size_gb": c.cache_size_gb,
+                    "hit_rate": c.hit_rate,
+                    "faults_avoided_per_sec": c.faults_avoided_per_sec
+                })
+            }).collect::<Vec<_>>(),
+            "access_distribution": data.working_set.access_count_distribution.iter().map(|a| {
+                serde_json::json!({"label": a.label, "pages": a.page_count, "pct": a.percentage})
+            }).collect::<Vec<_>>(),
+            "per_table": data.working_set.per_table.iter().take(15).map(|t| {
+                serde_json::json!({
+                    "name": t.name,
+                    "unique_pages": t.unique_pages,
+                    "accesses": t.total_accesses,
+                    "reuse_ratio": t.reuse_ratio,
+                    "hot_pages": t.hot_pages,
+                    "hot_set_mb": t.hot_set_mb,
+                    "working_set_mb": t.working_set_mb
+                })
+            }).collect::<Vec<_>>(),
+            "time_windowed": data.working_set.time_windowed.iter().map(|w| {
+                serde_json::json!({
+                    "window_secs": w.window_secs,
+                    "avg_pages": w.avg_wss_pages,
+                    "max_pages": w.max_wss_pages,
+                    "avg_mb": w.avg_wss_mb
+                })
+            }).collect::<Vec<_>>()
+        });
+    }
+
+    // Add CPU profile summary
+    if data.cpu_profile.has_data {
+        compact["cpu_profile"] = serde_json::json!({
+            "wall_time_ms": data.cpu_profile.total_wall_time_ms,
+            "cpu_time_ms": data.cpu_profile.total_cpu_time_ms,
+            "io_wait_ms": data.cpu_profile.total_io_wait_ms,
+            "cpu_efficiency": data.cpu_profile.cpu_efficiency,
+            "bottleneck": data.cpu_profile.bottleneck,
+            "io_bound_tables": data.cpu_profile.top_io_bound_tables.iter().take(10).map(|t| {
+                serde_json::json!({"table": t.name, "wall_ms": t.wall_time_ms, "cpu_ms": t.cpu_time_ms, "efficiency": t.cpu_efficiency})
+            }).collect::<Vec<_>>(),
+            "cpu_bound_tables": data.cpu_profile.top_cpu_bound_tables.iter().take(10).map(|t| {
+                serde_json::json!({"table": t.name, "wall_ms": t.wall_time_ms, "cpu_ms": t.cpu_time_ms, "efficiency": t.cpu_efficiency})
+            }).collect::<Vec<_>>()
+        });
+    }
+
+    // Add call site analysis (call paths for slow operations)
+    if data.call_site_analysis.has_data {
+        compact["call_sites"] = serde_json::json!({
+            "total_slow_ops": data.call_site_analysis.total_slow_ops,
+            "unique_sites": data.call_site_analysis.unique_call_sites,
+            "path_summary": {
+                "critical_path_count": data.call_site_analysis.path_summary.critical_path_count,
+                "critical_path_latency_ns": data.call_site_analysis.path_summary.critical_path_latency_ns,
+                "background_count": data.call_site_analysis.path_summary.background_count,
+                "background_latency_ns": data.call_site_analysis.path_summary.background_latency_ns,
+                "unknown_count": data.call_site_analysis.path_summary.unknown_count,
+                "critical_pct": data.call_site_analysis.path_summary.critical_path_percentage
+            },
+            // Subsystem breakdown (grouped by caller module)
+            "subsystems": data.call_site_analysis.subsystems.iter().take(15).map(|s| {
+                serde_json::json!({
+                    "module": s.caller_module,
+                    "name": s.name,
+                    "slow_ops": s.slow_ops,
+                    "total_faults": s.total_faults,
+                    "major_faults": s.major_faults,
+                    "major_pct": s.major_fault_pct,
+                    "total_latency_ns": s.total_latency_ns,
+                    "avg_us": s.avg_latency_us,
+                    "pct": s.percentage,
+                    "patterns": s.top_patterns.iter().take(5).map(|p| {
+                        serde_json::json!({
+                            "pattern": p.pattern,
+                            "count": p.count,
+                            "avg_us": p.avg_latency_us,
+                            "faults": p.faults,
+                            "major": p.major_faults
+                        })
+                    }).collect::<Vec<_>>()
+                })
+            }).collect::<Vec<_>>(),
+            // Top call sites with full call paths
+            "top_sites": data.call_site_analysis.top_call_sites.iter().take(30).map(|c| {
+                serde_json::json!({
+                    "path": c.call_path,
+                    "module": c.caller_module,
+                    "count": c.count,
+                    "total_ns": c.total_latency_ns,
+                    "avg_us": c.avg_latency_us,
+                    "max_us": c.max_latency_us,
+                    "faults": c.total_faults,
+                    "major": c.major_faults,
+                    "avg_faults": c.avg_faults,
+                    "stack": c.sample_stack.as_ref().map(|s| s.iter().take(10).collect::<Vec<_>>())
+                })
+            }).collect::<Vec<_>>(),
+            // Detected issues
+            "issues": data.call_site_analysis.detected_issues.iter().take(10).map(|i| {
+                serde_json::json!({
+                    "severity": i.severity,
+                    "subsystem": i.subsystem_name,
+                    "pattern": i.pattern,
+                    "description": i.description,
+                    "evidence": {
+                        "ops": i.evidence.affected_ops,
+                        "major_rate": i.evidence.major_fault_rate,
+                        "avg_us": i.evidence.avg_latency_us,
+                        "table": i.evidence.table,
+                        "context": i.evidence.context
+                    }
+                })
+            }).collect::<Vec<_>>()
+        });
+    }
+
+    // Add cursor lifecycle data
+    if data.cursor_lifecycle.has_data {
+        compact["cursor_lifecycle"] = serde_json::json!({
+            "opens": data.cursor_lifecycle.total_opens,
+            "closes": data.cursor_lifecycle.total_closes,
+            "still_open": data.cursor_lifecycle.still_open,
+            "lifetime": {
+                "avg_us": data.cursor_lifecycle.avg_lifetime_us,
+                "p50_us": data.cursor_lifecycle.p50_lifetime_us,
+                "p95_us": data.cursor_lifecycle.p95_lifetime_us,
+                "p99_us": data.cursor_lifecycle.p99_lifetime_us
+            },
+            "ops_per_cursor": data.cursor_lifecycle.avg_ops_per_cursor,
+            "by_table": data.cursor_lifecycle.by_table.iter().take(15).map(|t| {
+                serde_json::json!({
+                    "table": t.table,
+                    "opens": t.opens,
+                    "closes": t.closes,
+                    "avg_lifetime_us": t.avg_lifetime_us,
+                    "ops": t.total_ops,
+                    "ops_per_cursor": t.avg_ops_per_cursor
+                })
+            }).collect::<Vec<_>>()
+        });
+    }
+
+    // Add operation fault histogram
+    if data.operation_histogram.has_data {
+        compact["fault_histogram"] = serde_json::json!({
+            "avg_per_op": data.operation_histogram.avg_faults_per_op,
+            "max_per_op": data.operation_histogram.max_faults_per_op,
+            "distribution": data.operation_histogram.distribution.iter().map(|b| {
+                serde_json::json!({"label": b.label, "count": b.count, "pct": b.percentage})
+            }).collect::<Vec<_>>()
+        });
+    }
+
+    // Add tree traversal data
+    if data.tree_traversal.has_data {
+        compact["tree_traversal"] = serde_json::json!({
+            "tables": data.tree_traversal.tables.iter().take(15).map(|t| {
+                serde_json::json!({
+                    "name": t.name,
+                    "faults": t.total_faults,
+                    "branch": t.branch_faults,
+                    "leaf": t.leaf_faults,
+                    "overflow": t.overflow_faults,
+                    "branch_leaf_ratio": t.branch_leaf_ratio
+                })
+            }).collect::<Vec<_>>()
+        });
+    }
+
+    // Add sampled timeline for fault patterns
+    compact["timeline_sample"] = serde_json::json!(
+        data.timeline
+            .iter()
+            .step_by(10)
+            .take(200)
+            .map(|p| {
+                serde_json::json!({
+                    "t": p.time_ms,
+                    "f": p.faults,
+                    "m": p.major_faults,
+                    "u": p.unique_pages
+                })
+            })
+            .collect::<Vec<_>>()
+    );
 
     compact
 }
