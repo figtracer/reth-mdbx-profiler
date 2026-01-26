@@ -872,114 +872,97 @@ impl Subsystem {
         )
     }
 
-    /// Classify a stack trace into a subsystem
-    /// Checks frames from bottom (caller) to top (callee) for better accuracy
-    pub fn classify_stack(frames: &[String]) -> Self {
-        // Check frames in reverse order (from caller to callee)
-        // Earlier matches (higher in stack) take precedence
-        for frame in frames.iter().rev() {
-            let frame_lower = frame.to_lowercase();
+    /// Classify a stack trace into a subsystem - not currently used,
+    /// we now extract the caller module directly instead
+    pub fn classify_stack(_frames: &[String]) -> Self {
+        Subsystem::Unknown
+    }
+}
 
-            // Prewarm (check first - most specific, background work)
-            if frame_lower.contains("prewarmcontext")
-                || frame_lower.contains("prewarmcachetask")
-                || frame_lower.contains("prewarm::")
-                || frame_lower.contains("payload_processor::prewarm")
-            {
-                return Subsystem::Prewarm;
-            }
+/// Extract the caller module from a stack trace.
+/// Returns the first reth_* crate that isn't a DB layer (reth_db, reth_db_api, reth_storage_api).
+/// This gives us the actual code making the DB call.
+pub fn extract_caller_module(frames: &[String]) -> String {
+    // DB layer modules to skip - we want to find who's CALLING these
+    let db_layer = [
+        "reth_db_api::",
+        "reth_db::",
+        "reth_storage_api::",
+        "mdbx::",
+        "libmdbx",
+        "node_move",
+        "cursor_ops",
+    ];
 
-            // Proof generation (background multiproof work)
-            if frame_lower.contains("storageproofworker")
-                || frame_lower.contains("accountproofworker")
-                || frame_lower.contains("proofworkerpool")
-                || frame_lower.contains("build_account_multiproof")
-                || frame_lower.contains("multiprooftask")
-                || frame_lower.contains("multiproofmanager")
-                || frame_lower.contains("proofsequencer")
-                || frame_lower.contains("parallelproof")
-            {
-                return Subsystem::ProofGeneration;
-            }
+    // Look through frames to find the first meaningful caller
+    for frame in frames {
+        // Skip empty or unresolved frames
+        if frame.is_empty() || frame.starts_with("0x") {
+            continue;
+        }
 
-            // Engine API (consensus critical path)
-            if frame_lower.contains("engineapitreehandler")
-                || frame_lower.contains("on_new_payload")
-                || frame_lower.contains("on_forkchoice")
-                || frame_lower.contains("basicenginevalidator")
-                || frame_lower.contains("payloadvalidator")
-            {
-                return Subsystem::Engine;
-            }
+        // Skip DB layer frames
+        let is_db_layer = db_layer.iter().any(|prefix| frame.contains(prefix));
+        if is_db_layer {
+            continue;
+        }
 
-            // Block execution (EVM)
-            if frame_lower.contains("basicblockexecutor")
-                || frame_lower.contains("execute_transaction")
-                || frame_lower.contains("execute_one")
-                || frame_lower.contains("evm::transact")
-                || frame_lower.contains("alloy_evm::evm")
-                || frame_lower.contains("revm_handler")
-                || frame_lower.contains("revm_interpreter")
-            {
-                return Subsystem::BlockExecution;
-            }
+        // Skip standard library and runtime frames
+        let frame_lower = frame.to_lowercase();
+        if frame_lower.contains("core::")
+            || frame_lower.contains("std::")
+            || frame_lower.contains("alloc::")
+            || frame_lower.contains("tokio::")
+            || frame_lower.contains("futures::")
+            || frame_lower.contains("__rust_")
+            || frame_lower.contains("poll")
+        {
+            continue;
+        }
 
-            // State root calculation
-            if frame_lower.contains("stateroot")
-                || frame_lower.contains("storageroot")
-                || frame_lower.contains("triewalker")
-                || frame_lower.contains("trienodeiter")
-                || frame_lower.contains("parallelstateroot")
-                || frame_lower.contains("sparsetrietask")
-                || frame_lower.contains("compute_trie")
-                || frame_lower.contains("trie_cursor")
-                || frame_lower.contains("hashedcursor")
-            {
-                return Subsystem::StateRoot;
-            }
+        // Extract the crate name from patterns like "reth_trie::walker::TrieWalker"
+        // or "<reth_provider::providers::..." or "as reth_provider::traits::..."
+        let clean_frame = frame
+            .trim_start_matches('<')
+            .trim_start_matches("as ")
+            .trim_start_matches('<');
 
-            // Persistence
-            if frame_lower.contains("persistenceservice")
-                || frame_lower.contains("on_save_blocks")
-                || frame_lower.contains("on_remove_blocks")
-                || frame_lower.contains("blockexecutionwriter")
-            {
-                return Subsystem::Persistence;
-            }
-
-            // RPC
-            if frame_lower.contains("ethapi")
-                || frame_lower.contains("debugapi")
-                || frame_lower.contains("traceapi")
-                || frame_lower.contains("txpoolapi")
-                || frame_lower.contains("reth_rpc::")
-            {
-                return Subsystem::Rpc;
-            }
-
-            // Sync pipeline
-            if frame_lower.contains("executionstage")
-                || frame_lower.contains("headersstage")
-                || frame_lower.contains("bodiesstage")
-                || frame_lower.contains("merklestage")
-                || frame_lower.contains("pipeline::")
-                || frame_lower.contains("reth_stages::")
-            {
-                return Subsystem::Sync;
-            }
-
-            // Transaction pool
-            if frame_lower.contains("ethtransactionvalidator")
-                || frame_lower.contains("validate_one")
-                || frame_lower.contains("transaction_pool::")
-                || frame_lower.contains("validpooltransaction")
-            {
-                return Subsystem::TxPool;
+        // Find reth_* crate
+        if let Some(start) = clean_frame.find("reth_") {
+            let rest = &clean_frame[start..];
+            // Extract up to the first :: or space
+            let end = rest
+                .find("::")
+                .or_else(|| rest.find(' '))
+                .unwrap_or(rest.len());
+            let crate_name = &rest[..end];
+            // Clean up any trailing characters
+            let crate_name =
+                crate_name.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_');
+            if !crate_name.is_empty() {
+                return crate_name.to_string();
             }
         }
 
-        Subsystem::Unknown
+        // Also check for revm/alloy crates
+        for prefix in ["revm", "alloy_"] {
+            if let Some(start) = clean_frame.find(prefix) {
+                let rest = &clean_frame[start..];
+                let end = rest
+                    .find("::")
+                    .or_else(|| rest.find(' '))
+                    .unwrap_or(rest.len());
+                let crate_name = &rest[..end];
+                let crate_name =
+                    crate_name.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                if !crate_name.is_empty() {
+                    return crate_name.to_string();
+                }
+            }
+        }
     }
+
+    "unknown".to_string()
 }
 
 /// Analysis of call sites causing slow database operations
@@ -1004,15 +987,13 @@ pub struct CallSiteAnalysis {
     pub critical_vs_background: CriticalVsBackground,
 }
 
-/// Statistics for a single subsystem
+/// Statistics for a caller module (extracted from stack traces)
 #[derive(Debug, Serialize, Clone)]
 pub struct SubsystemStats {
-    /// Subsystem identifier
-    pub subsystem: Subsystem,
-    /// Human-readable name
+    /// Caller module name (e.g., "reth_trie", "reth_stages", "reth_engine")
+    pub caller_module: String,
+    /// Human-readable name (same as caller_module for display)
     pub name: String,
-    /// Whether this subsystem is on the critical path
-    pub is_critical: bool,
     /// Number of slow operations
     pub slow_ops: u64,
     /// Total faults caused
@@ -1027,9 +1008,7 @@ pub struct SubsystemStats {
     pub avg_latency_us: f64,
     /// Percentage of total slow ops
     pub percentage: f64,
-    /// Number of detected issues for this subsystem
-    pub issue_count: u32,
-    /// Top call patterns within this subsystem
+    /// Top call patterns within this caller module
     pub top_patterns: Vec<SubsystemPattern>,
     /// Sample call sites (for drill-down with raw stacks)
     pub sample_call_sites: Vec<CallSiteEntry>,
@@ -1118,10 +1097,8 @@ pub struct CallSiteEntry {
     pub major_faults: u64,
     /// Average faults per operation
     pub avg_faults: f64,
-    /// Whether this is on critical path (None = unknown)
-    pub is_critical_path: Option<bool>,
-    /// Classified subsystem
-    pub subsystem: Subsystem,
+    /// Caller module extracted from stack (e.g., "reth_trie", "reth_stages")
+    pub caller_module: String,
     /// Sample stack trace (first occurrence)
     pub sample_stack: Option<Vec<String>>,
 }

@@ -225,33 +225,22 @@ pub fn generate_html(data: &ViewerData) -> String {
                         </div>
                     </div>
 
-                    <!-- Detected Issues -->
-                    <div id="detected-issues-card" class="card full-width" style="margin-bottom: 16px; display:none;">
-                        <div class="card-header">
-                            Detected Issues
-                            <span class="card-hint">Observations from I/O patterns</span>
-                        </div>
-                        <div class="card-body" id="detected-issues-body" style="padding: 12px;">
-                        </div>
-                    </div>
-
                     <!-- Subsystem Breakdown -->
                     <div class="card full-width">
                         <div class="card-header">
-                            Subsystem Breakdown
-                            <span class="card-hint">I/O grouped by reth component</span>
+                            Caller Module Breakdown
+                            <span class="card-hint">I/O grouped by calling crate</span>
                         </div>
                         <div class="card-body compact-table-container" style="padding: 0;">
                             <table class="compact-table expandable-table sortable-table" id="subsystem-table">
                                 <thead>
                                     <tr>
                                         <th style="width:30px;"></th>
-                                        <th data-sort="name">Subsystem</th>
+                                        <th data-sort="name">Caller Module</th>
                                         <th data-sort="slow_ops" class="sortable sorted-desc">Slow Ops <span class="sort-icon">▼</span></th>
                                         <th data-sort="percentage" class="sortable">% Total</th>
                                         <th data-sort="major_fault_pct" class="sortable">Major %</th>
                                         <th data-sort="avg_latency" class="sortable">Avg Latency</th>
-                                        <th data-sort="is_critical" class="sortable">Path</th>
                                     </tr>
                                 </thead>
                                 <tbody></tbody>
@@ -394,6 +383,18 @@ pub fn generate_html(data: &ViewerData) -> String {
                 </div>
             </section>
         </main>
+    </div>
+
+    <!-- Stack Trace Modal -->
+    <div id="stack-modal" class="modal-overlay">
+        <div class="modal-content">
+            <div class="modal-header">
+                <span class="modal-title" id="modal-title">Stack Traces</span>
+                <button class="modal-close" id="modal-close">&times;</button>
+            </div>
+            <div class="modal-body" id="modal-body">
+            </div>
+        </div>
     </div>
 
     <script>
@@ -2078,11 +2079,224 @@ body {
     color: #e4e4e7;
     font-weight: 600;
 }
+
+/* Modal styles */
+.modal-overlay {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.8);
+    z-index: 1000;
+    justify-content: center;
+    align-items: center;
+}
+
+.modal-overlay.visible {
+    display: flex;
+}
+
+.modal-content {
+    background: #18181b;
+    border: 1px solid #27272a;
+    border-radius: 8px;
+    max-width: 900px;
+    width: 90%;
+    max-height: 80vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 20px;
+    border-bottom: 1px solid #27272a;
+    background: #09090b;
+}
+
+.modal-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: #e4e4e7;
+}
+
+.modal-close {
+    background: none;
+    border: none;
+    color: #71717a;
+    font-size: 24px;
+    cursor: pointer;
+    padding: 4px 8px;
+    line-height: 1;
+    border-radius: 4px;
+}
+
+.modal-close:hover {
+    background: #27272a;
+    color: #e4e4e7;
+}
+
+.modal-body {
+    padding: 20px;
+    overflow-y: auto;
+    flex: 1;
+}
+
+.modal-call-site {
+    margin-bottom: 20px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid #27272a;
+}
+
+.modal-call-site:last-child {
+    margin-bottom: 0;
+    padding-bottom: 0;
+    border-bottom: none;
+}
+
+.modal-call-site-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 12px;
+}
+
+.modal-call-site-path {
+    font-size: 13px;
+    color: #a1a1aa;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    word-break: break-all;
+}
+
+.modal-call-site-stats {
+    font-size: 12px;
+    color: #71717a;
+    white-space: nowrap;
+    margin-left: 12px;
+}
+
+.modal-stack-frames {
+    background: #09090b;
+    border-radius: 6px;
+    padding: 12px;
+}
+
+.modal-stack-frame {
+    display: flex;
+    align-items: baseline;
+    padding: 4px 0;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 12px;
+}
+
+.modal-frame-num {
+    color: #52525b;
+    min-width: 28px;
+    font-size: 10px;
+}
+
+.modal-frame-func {
+    color: #e4e4e7;
+    word-break: break-word;
+}
+
+.modal-frame-func.frame-reth { color: #22d3ee; }
+.modal-frame-func.frame-revm { color: #a78bfa; }
+.modal-frame-func.frame-mdbx { color: #fbbf24; }
+.modal-frame-func.frame-runtime { color: #71717a; }
+
+.view-stacks-btn {
+    background: #27272a;
+    border: 1px solid #3f3f46;
+    color: #a1a1aa;
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.view-stacks-btn:hover {
+    background: #3f3f46;
+    color: #e4e4e7;
+}
 "##;
 
 const JAVASCRIPT: &str = r##"
 // Track all uPlot instances for resize handling
 const uplotInstances = [];
+
+// Modal management
+function showStackModal(title, callSites) {
+    const modal = document.getElementById('stack-modal');
+    const modalTitle = document.getElementById('modal-title');
+    const modalBody = document.getElementById('modal-body');
+
+    modalTitle.textContent = title + ' - Stack Traces';
+
+    let html = '';
+    if (callSites && callSites.length > 0) {
+        callSites.forEach((cs, idx) => {
+            html += '<div class="modal-call-site">';
+            html += '<div class="modal-call-site-header">';
+            html += '<span class="modal-call-site-path">' + cs.call_path + '</span>';
+            html += '<span class="modal-call-site-stats">' + fmt(cs.count) + ' ops, ' + fmtLat(cs.avg_latency_us) + ' avg</span>';
+            html += '</div>';
+
+            if (cs.sample_stack && cs.sample_stack.length > 0) {
+                html += '<div class="modal-stack-frames">';
+                let frameNum = 0;
+                cs.sample_stack.forEach((frame, i) => {
+                    const parsed = formatStackFrame(frame);
+                    if (!parsed) return;
+
+                    const funcClass = parsed.funcName.includes('reth_') ? 'frame-reth' :
+                                      parsed.funcName.includes('revm') ? 'frame-revm' :
+                                      parsed.funcName.includes('tokio') ? 'frame-runtime' :
+                                      parsed.funcName.includes('mdbx') || parsed.funcName.includes('libmdbx') ? 'frame-mdbx' : '';
+
+                    html += '<div class="modal-stack-frame">';
+                    html += '<span class="modal-frame-num">#' + frameNum + '</span>';
+                    html += '<span class="modal-frame-func ' + funcClass + '" title="' + parsed.full + '">' + parsed.funcName + '</span>';
+                    html += '</div>';
+                    frameNum++;
+                });
+                html += '</div>';
+            } else {
+                html += '<div style="color:#71717a;font-size:12px;">No stack trace available</div>';
+            }
+            html += '</div>';
+        });
+    } else {
+        html = '<div style="color:#71717a;">No stack traces available for this module.</div>';
+    }
+
+    modalBody.innerHTML = html;
+    modal.classList.add('visible');
+}
+
+function closeStackModal() {
+    document.getElementById('stack-modal').classList.remove('visible');
+}
+
+// Setup modal event handlers
+document.addEventListener('DOMContentLoaded', () => {
+    const modal = document.getElementById('stack-modal');
+    const closeBtn = document.getElementById('modal-close');
+
+    closeBtn.addEventListener('click', closeStackModal);
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) closeStackModal();
+    });
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') closeStackModal();
+    });
+});
 
 // uPlot interactive chart helper
 function createUPlotChart(container, data, opts = {}) {
@@ -4295,10 +4509,7 @@ function initCallSiteAnalysis() {
     document.getElementById('callsite-critical-pct').textContent = criticalPct + '%';
     document.getElementById('callsite-background-pct').textContent = backgroundPct + '%';
 
-    // Render detected issues
-    renderDetectedIssues(cs.detected_issues);
-
-    // Render subsystem table
+    // Render caller module table
     renderSubsystemTable(cs.subsystems);
 
     // Setup sortable column headers for subsystem table
@@ -4326,45 +4537,6 @@ function initCallSiteAnalysis() {
 
             renderSubsystemTable(cs.subsystems);
         });
-    });
-}
-
-function renderDetectedIssues(issues) {
-    const card = document.getElementById('detected-issues-card');
-    const body = document.getElementById('detected-issues-body');
-
-    if (!issues || issues.length === 0) {
-        card.style.display = 'none';
-        return;
-    }
-
-    card.style.display = 'block';
-    body.innerHTML = '';
-
-    issues.forEach(issue => {
-        const severityClass = issue.severity === 'warning' ? 'issue-warning' : 'issue-info';
-        const icon = issue.severity === 'warning' ? '⚠' : 'ℹ';
-
-        let html = '<div class="detected-issue ' + severityClass + '">';
-        html += '<div class="issue-icon">' + icon + '</div>';
-        html += '<div class="issue-content">';
-        html += '<div class="issue-header">';
-        html += '<span class="issue-pattern">' + issue.pattern + '</span>';
-        html += '<span class="issue-subsystem">' + issue.subsystem_name + '</span>';
-        html += '</div>';
-        html += '<div class="issue-description">' + issue.description + '</div>';
-        html += '<div class="issue-evidence">';
-        html += '<div class="evidence-item"><span class="evidence-label">Ops:</span><span class="evidence-value">' + fmt(issue.evidence.affected_ops) + '</span></div>';
-        if (issue.evidence.major_fault_rate > 0) {
-            html += '<div class="evidence-item"><span class="evidence-label">Major:</span><span class="evidence-value">' + (issue.evidence.major_fault_rate * 100).toFixed(1) + '%</span></div>';
-        }
-        html += '<div class="evidence-item"><span class="evidence-label">Avg:</span><span class="evidence-value">' + fmtLat(issue.evidence.avg_latency_us) + '</span></div>';
-        if (issue.evidence.context) {
-            html += '<div class="evidence-item"><span class="evidence-value" style="color:#71717a;">' + issue.evidence.context + '</span></div>';
-        }
-        html += '</div></div></div>';
-
-        body.innerHTML += html;
     });
 }
 
@@ -4405,148 +4577,38 @@ function renderSubsystemTable(subsystems) {
             case 'percentage': aVal = a.percentage; bVal = b.percentage; break;
             case 'major_fault_pct': aVal = a.major_fault_pct; bVal = b.major_fault_pct; break;
             case 'avg_latency': aVal = a.avg_latency_us; bVal = b.avg_latency_us; break;
-            case 'is_critical': aVal = a.is_critical ? 1 : 0; bVal = b.is_critical ? 1 : 0; break;
             default: aVal = a.slow_ops; bVal = b.slow_ops;
         }
         return subsystemSortDesc ? bVal - aVal : aVal - bVal;
     });
 
     sorted.forEach((ss, idx) => {
-        // Main row
         const tr = document.createElement('tr');
         tr.className = 'table-row';
-        tr.dataset.idx = idx;
-
-        const pathBadge = ss.is_critical
-            ? '<span class="badge badge-critical">Critical</span>'
-            : '<span class="badge badge-background">Background</span>';
 
         const majorPctClass = ss.major_fault_pct > 50 ? 'major' : '';
+        const hasStacks = ss.sample_call_sites && ss.sample_call_sites.length > 0;
 
         tr.innerHTML =
-            '<td><span class="expand-icon">▶</span></td>' +
+            '<td style="width:80px;">' +
+                (hasStacks ? '<button class="view-stacks-btn" data-idx="' + idx + '">Stacks</button>' : '<span style="color:#52525b;font-size:11px;">-</span>') +
+            '</td>' +
             '<td style="font-weight:500;">' + ss.name + '</td>' +
             '<td>' + fmt(ss.slow_ops) + '</td>' +
             '<td>' + ss.percentage.toFixed(1) + '%</td>' +
             '<td class="' + majorPctClass + '">' + ss.major_fault_pct.toFixed(1) + '%</td>' +
-            '<td>' + fmtLat(ss.avg_latency_us) + '</td>' +
-            '<td>' + pathBadge + '</td>';
+            '<td>' + fmtLat(ss.avg_latency_us) + '</td>';
 
         tbody.appendChild(tr);
 
-        // Details row (hidden by default)
-        const detailsTr = document.createElement('tr');
-        detailsTr.className = 'details-row hidden';
-        detailsTr.dataset.idx = idx;
-
-        let detailsHtml = '<td colspan="7"><div class="subsystem-details">';
-        detailsHtml += '<div class="subsystem-details-grid">';
-
-        // Left column: Top Patterns
-        detailsHtml += '<div class="subsystem-patterns">';
-        detailsHtml += '<div class="subsystem-patterns-title">Top Patterns</div>';
-
-        if (ss.top_patterns && ss.top_patterns.length > 0) {
-            ss.top_patterns.forEach(p => {
-                detailsHtml += '<div class="pattern-item">';
-                detailsHtml += '<span class="pattern-name" title="' + p.pattern + '">' + p.pattern + '</span>';
-                detailsHtml += '<span class="pattern-stats">';
-                detailsHtml += '<span>' + fmt(p.count) + ' ops</span>';
-                detailsHtml += '<span>' + fmtLat(p.avg_latency_us) + '</span>';
-                detailsHtml += '</span></div>';
+        // Add click handler for the stacks button
+        const stackBtn = tr.querySelector('.view-stacks-btn');
+        if (stackBtn) {
+            stackBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                showStackModal(ss.name, ss.sample_call_sites);
             });
-        } else {
-            detailsHtml += '<div style="color:#71717a;font-size:12px;">No patterns available</div>';
         }
-        detailsHtml += '</div>';
-
-        // Right column: Stack Traces (with toggle)
-        const stackToggleId = 'stack-toggle-' + idx;
-        const stackListId = 'stack-list-' + idx;
-
-        detailsHtml += '<div class="subsystem-stacks">';
-        detailsHtml += '<div class="subsystem-stacks-header">';
-        detailsHtml += '<div class="subsystem-stacks-title">Sample Stack Traces</div>';
-        detailsHtml += '<button class="stack-toggle-btn" id="' + stackToggleId + '">Show Stacks</button>';
-        detailsHtml += '</div>';
-
-        detailsHtml += '<div class="subsystem-stack-list" id="' + stackListId + '">';
-
-        if (ss.sample_call_sites && ss.sample_call_sites.length > 0) {
-            ss.sample_call_sites.slice(0, 5).forEach((cs, csIdx) => {
-                detailsHtml += '<div class="subsystem-call-site">';
-                detailsHtml += '<div class="call-site-header">';
-                detailsHtml += '<span class="call-site-path" title="' + cs.call_path + '">' + cs.call_path + '</span>';
-                detailsHtml += '<span class="call-site-count">' + fmt(cs.count) + ' ops</span>';
-                detailsHtml += '</div>';
-
-                if (cs.sample_stack && cs.sample_stack.length > 0) {
-                    detailsHtml += '<div class="stack-frames" style="margin-top:6px;">';
-                    let frameNum = 0;
-                    for (let i = 0; i < Math.min(cs.sample_stack.length, 8); i++) {
-                        const parsed = formatStackFrame(cs.sample_stack[i]);
-                        if (!parsed) continue;
-
-                        const funcClass = parsed.funcName.includes('reth_') ? 'frame-reth' :
-                                          parsed.funcName.includes('revm') ? 'frame-revm' :
-                                          parsed.funcName.includes('tokio') ? 'frame-runtime' :
-                                          parsed.funcName.includes('mdbx') || parsed.funcName.includes('libmdbx') ? 'frame-mdbx' : '';
-
-                        detailsHtml += '<div class="stack-frame ' + funcClass + '">';
-                        detailsHtml += '<span class="frame-num">' + frameNum + '</span>';
-                        detailsHtml += '<span class="frame-func" title="' + parsed.full + '">' + parsed.funcName + '</span>';
-                        if (parsed.filePath) {
-                            detailsHtml += '<span class="frame-file">' + parsed.filePath + '</span>';
-                        }
-                        detailsHtml += '</div>';
-                        frameNum++;
-                    }
-                    detailsHtml += '</div>';
-                }
-                detailsHtml += '</div>';
-            });
-        } else {
-            detailsHtml += '<div style="color:#71717a;font-size:12px;">No sample stacks available</div>';
-        }
-
-        detailsHtml += '</div></div>';
-        detailsHtml += '</div></div></td>';
-
-        detailsTr.innerHTML = detailsHtml;
-        tbody.appendChild(detailsTr);
-
-        // Click handler to expand/collapse row
-        tr.addEventListener('click', () => {
-            const isExpanded = tr.classList.contains('expanded');
-            if (isExpanded) {
-                tr.classList.remove('expanded');
-                detailsTr.classList.add('hidden');
-            } else {
-                tr.classList.add('expanded');
-                detailsTr.classList.remove('hidden');
-            }
-        });
-
-        // Stack toggle button handler (use event delegation after DOM is ready)
-        setTimeout(() => {
-            const toggleBtn = document.getElementById(stackToggleId);
-            const stackList = document.getElementById(stackListId);
-            if (toggleBtn && stackList) {
-                toggleBtn.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    const isVisible = stackList.classList.contains('visible');
-                    if (isVisible) {
-                        stackList.classList.remove('visible');
-                        toggleBtn.textContent = 'Show Stacks';
-                        toggleBtn.classList.remove('active');
-                    } else {
-                        stackList.classList.add('visible');
-                        toggleBtn.textContent = 'Hide Stacks';
-                        toggleBtn.classList.add('active');
-                    }
-                });
-            }
-        }, 0);
     });
 }
 
