@@ -1099,8 +1099,11 @@ pub struct CallSiteEntry {
     pub avg_faults: f64,
     /// Caller module extracted from stack (e.g., "reth_trie", "reth_stages")
     pub caller_module: String,
-    /// Sample stack trace (first occurrence)
+    /// Sample stack trace (resolved symbols, first occurrence)
     pub sample_stack: Option<Vec<String>>,
+    /// Raw addresses (hex) corresponding to sample_stack for debugging symbol resolution
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_addresses: Option<Vec<String>>,
 }
 
 /// Breakdown of critical path vs background operations

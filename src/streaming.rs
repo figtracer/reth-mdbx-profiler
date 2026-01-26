@@ -3254,6 +3254,8 @@ impl StreamingAggregator {
                         } else {
                             Some(resolved_stack)
                         },
+                        // Preserve raw addresses for debugging symbol resolution
+                        raw_addresses: sample_stack.clone(),
                     }
                 },
             )

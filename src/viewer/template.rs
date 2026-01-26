@@ -2210,6 +2210,20 @@ body {
 .modal-frame-func.frame-mdbx { color: #fbbf24; }
 .modal-frame-func.frame-runtime { color: #71717a; }
 
+.modal-frame-addr {
+    color: #52525b;
+    font-size: 10px;
+    margin-left: auto;
+    padding-left: 12px;
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    cursor: pointer;
+    user-select: all;
+}
+
+.modal-frame-addr:hover {
+    color: #a1a1aa;
+}
+
 .view-stacks-btn {
     background: #27272a;
     border: 1px solid #3f3f46;
@@ -2260,9 +2274,15 @@ function showStackModal(title, callSites) {
                                       parsed.funcName.includes('tokio') ? 'frame-runtime' :
                                       parsed.funcName.includes('mdbx') || parsed.funcName.includes('libmdbx') ? 'frame-mdbx' : '';
 
+                    // Get raw address if available
+                    const rawAddr = (cs.raw_addresses && cs.raw_addresses[i]) ? cs.raw_addresses[i] : '';
+
                     html += '<div class="modal-stack-frame">';
                     html += '<span class="modal-frame-num">#' + frameNum + '</span>';
                     html += '<span class="modal-frame-func ' + funcClass + '" title="' + parsed.full + '">' + parsed.funcName + '</span>';
+                    if (rawAddr) {
+                        html += '<span class="modal-frame-addr" title="Raw address for addr2line verification">' + rawAddr + '</span>';
+                    }
                     html += '</div>';
                     frameNum++;
                 });
