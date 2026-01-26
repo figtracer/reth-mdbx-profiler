@@ -70,7 +70,7 @@ enum Commands {
         duration: Option<humantime::Duration>,
 
         /// Print live statistics every N seconds
-        #[arg(long, default_value = "5")]
+        #[arg(long, default_value = "2")]
         stats_interval: u64,
 
         /// Also trace cursor operations (requires path to reth binary)
@@ -806,6 +806,11 @@ fn run_trace(
     let mut last_process_check = Instant::now();
     let process_check_interval = Duration::from_secs(1);
 
+    // Track previous counts for instantaneous rate calculation
+    let mut prev_pf_count: u64 = 0;
+    let mut prev_cur_count: u64 = 0;
+    let mut prev_txn_count: u64 = 0;
+
     info!("Tracing started. Press Ctrl+C to stop.");
 
     while running.load(Ordering::SeqCst) {
@@ -856,15 +861,22 @@ fn run_trace(
             let pf_count = event_count.load(Ordering::Relaxed);
             let cur_count = cursor_count.load(Ordering::Relaxed);
             let txn_cnt = txn_count.load(Ordering::Relaxed);
+            let interval_secs = last_stats.elapsed().as_secs_f64();
             let elapsed = start.elapsed().as_secs_f64();
+
+            // Calculate instantaneous rates
+            let pf_rate = (pf_count - prev_pf_count) as f64 / interval_secs;
+            let cur_rate = (cur_count - prev_cur_count) as f64 / interval_secs;
+            let txn_rate = (txn_cnt - prev_txn_count) as f64 / interval_secs;
+
             info!(
                 "Page faults: {} ({:.1}/s), Cursor ops: {} ({:.1}/s), Txns: {} ({:.1}/s), Elapsed: {:.1}s{}",
                 pf_count,
-                pf_count as f64 / elapsed,
+                pf_rate,
                 cur_count,
-                cur_count as f64 / elapsed,
+                cur_rate,
                 txn_cnt,
-                txn_cnt as f64 / elapsed,
+                txn_rate,
                 elapsed,
                 if current_pid == 0 {
                     " [waiting for process]"
@@ -872,6 +884,12 @@ fn run_trace(
                     ""
                 }
             );
+
+            // Update previous counts
+            prev_pf_count = pf_count;
+            prev_cur_count = cur_count;
+            prev_txn_count = txn_cnt;
+
             last_stats = Instant::now();
         }
     }
