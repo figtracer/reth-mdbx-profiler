@@ -371,7 +371,7 @@ impl SymbolResolver {
         let (source, input) = if let Some(ref path) = self.binary_path {
             (
                 Source::Elf(Elf::new(path)),
-                blazesym::symbolize::Input::FileOffset(file_offset),
+                blazesym::symbolize::Input::VirtOffset(file_offset),
             )
         } else {
             (
