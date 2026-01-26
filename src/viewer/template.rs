@@ -203,20 +203,16 @@ pub fn generate_html(data: &ViewerData) -> String {
                     </div>
                 </div>
 
-                <!-- Call Site Analysis Section (Stack Traces on Slow Operations) -->
+                <!-- I/O Attribution by Subsystem -->
                 <div id="call-site-section" style="display:none;">
                     <div class="section-separator">
-                        <span class="separator-label">Call Site Analysis</span>
+                        <span class="separator-label">I/O Attribution by Subsystem</span>
                     </div>
                     <div class="metrics-row" style="margin-bottom: 16px;">
                         <div class="metrics-group">
                             <div class="metric">
                                 <span class="metric-label">Slow Ops</span>
                                 <span class="metric-value" id="callsite-total-slow">-</span>
-                            </div>
-                            <div class="metric">
-                                <span class="metric-label">Unique Sites</span>
-                                <span class="metric-value" id="callsite-unique">-</span>
                             </div>
                             <div class="metric">
                                 <span class="metric-label">Critical Path</span>
@@ -228,21 +224,34 @@ pub fn generate_html(data: &ViewerData) -> String {
                             </div>
                         </div>
                     </div>
+
+                    <!-- Detected Issues -->
+                    <div id="detected-issues-card" class="card full-width" style="margin-bottom: 16px; display:none;">
+                        <div class="card-header">
+                            Detected Issues
+                            <span class="card-hint">Observations from I/O patterns</span>
+                        </div>
+                        <div class="card-body" id="detected-issues-body" style="padding: 12px;">
+                        </div>
+                    </div>
+
+                    <!-- Subsystem Breakdown -->
                     <div class="card full-width">
                         <div class="card-header">
-                            Top Call Sites
-                            <span class="card-hint">Stack traces from slow DB operations (>1ms)</span>
+                            Subsystem Breakdown
+                            <span class="card-hint">I/O grouped by reth component</span>
                         </div>
                         <div class="card-body compact-table-container" style="padding: 0;">
-                            <table class="compact-table sortable-table" id="call-site-table">
+                            <table class="compact-table expandable-table sortable-table" id="subsystem-table">
                                 <thead>
                                     <tr>
                                         <th style="width:30px;"></th>
-                                        <th data-sort="call_path">Call Path</th>
-                                        <th data-sort="count" class="sortable sorted-desc">Count <span class="sort-icon">▼</span></th>
+                                        <th data-sort="name">Subsystem</th>
+                                        <th data-sort="slow_ops" class="sortable sorted-desc">Slow Ops <span class="sort-icon">▼</span></th>
+                                        <th data-sort="percentage" class="sortable">% Total</th>
+                                        <th data-sort="major_fault_pct" class="sortable">Major %</th>
                                         <th data-sort="avg_latency" class="sortable">Avg Latency</th>
-                                        <th data-sort="total_faults" class="sortable">Faults</th>
-                                        <th data-sort="path_type" class="sortable">Path Type</th>
+                                        <th data-sort="is_critical" class="sortable">Path</th>
                                     </tr>
                                 </thead>
                                 <tbody></tbody>
@@ -1022,6 +1031,238 @@ body {
     background: rgba(113, 113, 122, 0.15);
     color: #a1a1aa;
     border: 1px solid rgba(113, 113, 122, 0.3);
+}
+
+/* Detected Issues styles */
+.detected-issue {
+    display: flex;
+    gap: 12px;
+    padding: 10px 14px;
+    margin-bottom: 8px;
+    border-radius: 6px;
+    background: #1a1a24;
+    border-left: 3px solid #52525b;
+}
+
+.detected-issue:last-child {
+    margin-bottom: 0;
+}
+
+.detected-issue.issue-warning {
+    border-left-color: #f59e0b;
+    background: rgba(245, 158, 11, 0.05);
+}
+
+.detected-issue.issue-info {
+    border-left-color: #3b82f6;
+    background: rgba(59, 130, 246, 0.05);
+}
+
+.issue-icon {
+    font-size: 16px;
+    flex-shrink: 0;
+}
+
+.issue-content {
+    flex: 1;
+    min-width: 0;
+}
+
+.issue-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+
+.issue-pattern {
+    font-size: 13px;
+    font-weight: 600;
+    color: #e4e4e7;
+}
+
+.issue-subsystem {
+    font-size: 10px;
+    padding: 2px 6px;
+    background: rgba(59, 130, 246, 0.15);
+    color: #60a5fa;
+    border-radius: 3px;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+}
+
+.issue-description {
+    font-size: 12px;
+    color: #a1a1aa;
+    line-height: 1.5;
+}
+
+.issue-evidence {
+    display: flex;
+    gap: 16px;
+    margin-top: 8px;
+    font-size: 11px;
+}
+
+.evidence-item {
+    display: flex;
+    gap: 4px;
+}
+
+.evidence-label {
+    color: #52525b;
+}
+
+.evidence-value {
+    color: #d4d4d8;
+    font-weight: 500;
+}
+
+/* Subsystem table specific styles */
+.subsystem-details {
+    padding: 16px;
+    background: #0a0a10;
+}
+
+.subsystem-details-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+}
+
+.subsystem-patterns {
+    background: #12121a;
+    border-radius: 8px;
+    padding: 12px;
+}
+
+.subsystem-patterns-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: #3b82f6;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 10px;
+}
+
+.pattern-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 0;
+    border-bottom: 1px solid #1e1e2a;
+    font-size: 12px;
+}
+
+.pattern-item:last-child {
+    border-bottom: none;
+}
+
+.pattern-name {
+    color: #d4d4d8;
+    font-family: monospace;
+    font-size: 11px;
+    max-width: 60%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pattern-stats {
+    display: flex;
+    gap: 12px;
+    color: #71717a;
+    font-size: 11px;
+}
+
+.pattern-stats span {
+    font-variant-numeric: tabular-nums;
+}
+
+.subsystem-stacks {
+    background: #12121a;
+    border-radius: 8px;
+    padding: 12px;
+}
+
+.subsystem-stacks-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+}
+
+.subsystem-stacks-title {
+    font-size: 11px;
+    font-weight: 600;
+    color: #3b82f6;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.stack-toggle-btn {
+    padding: 4px 10px;
+    font-size: 10px;
+    font-weight: 500;
+    color: #a1a1aa;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.stack-toggle-btn:hover {
+    color: #e4e4e7;
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.stack-toggle-btn.active {
+    color: #60a5fa;
+    background: rgba(59, 130, 246, 0.15);
+    border-color: rgba(59, 130, 246, 0.3);
+}
+
+.subsystem-stack-list {
+    display: none;
+}
+
+.subsystem-stack-list.visible {
+    display: block;
+}
+
+.subsystem-call-site {
+    margin-bottom: 12px;
+    padding: 10px;
+    background: #0a0a10;
+    border-radius: 4px;
+    border-left: 2px solid #3b82f6;
+}
+
+.subsystem-call-site:last-child {
+    margin-bottom: 0;
+}
+
+.call-site-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+}
+
+.call-site-path {
+    font-family: monospace;
+    font-size: 11px;
+    color: #d4d4d8;
+    max-width: 70%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.call-site-count {
+    font-size: 11px;
+    color: #71717a;
 }
 
 .io-time {
@@ -4030,25 +4271,22 @@ function renderCursorLifecycleTable(data) {
     });
 }
 
-// Global state for call site sorting
-let callSiteSortColumn = 'count';
-let callSiteSortDesc = true;
+// Global state for subsystem sorting
+let subsystemSortColumn = 'slow_ops';
+let subsystemSortDesc = true;
 
 function initCallSiteAnalysis() {
     const cs = DATA.call_site_analysis;
 
     if (!cs || !cs.has_data) {
-        // Hide the section if no data
         document.getElementById('call-site-section').style.display = 'none';
         return;
     }
 
-    // Show the section
     document.getElementById('call-site-section').style.display = 'block';
 
     // Populate metrics
     document.getElementById('callsite-total-slow').textContent = fmt(cs.total_slow_ops);
-    document.getElementById('callsite-unique').textContent = fmt(cs.unique_call_sites);
 
     const totalOps = cs.path_summary.critical_path_count + cs.path_summary.background_count + cs.path_summary.unknown_count;
     const criticalPct = totalOps > 0 ? (cs.path_summary.critical_path_count / totalOps * 100).toFixed(1) : '0';
@@ -4057,68 +4295,84 @@ function initCallSiteAnalysis() {
     document.getElementById('callsite-critical-pct').textContent = criticalPct + '%';
     document.getElementById('callsite-background-pct').textContent = backgroundPct + '%';
 
-    // Initial table render
-    renderCallSiteTable(cs.top_call_sites);
+    // Render detected issues
+    renderDetectedIssues(cs.detected_issues);
 
-    // Setup sortable column headers
-    document.querySelectorAll('#call-site-table th[data-sort]').forEach(th => {
+    // Render subsystem table
+    renderSubsystemTable(cs.subsystems);
+
+    // Setup sortable column headers for subsystem table
+    document.querySelectorAll('#subsystem-table th[data-sort]').forEach(th => {
         th.style.cursor = 'pointer';
         th.addEventListener('click', () => {
             const sortKey = th.dataset.sort;
-            if (!sortKey || sortKey === 'call_path') return;
+            if (!sortKey || sortKey === 'name') return;
 
-            // Toggle direction if same column, else default to desc
-            if (callSiteSortColumn === sortKey) {
-                callSiteSortDesc = !callSiteSortDesc;
+            if (subsystemSortColumn === sortKey) {
+                subsystemSortDesc = !subsystemSortDesc;
             } else {
-                callSiteSortColumn = sortKey;
-                callSiteSortDesc = true;
+                subsystemSortColumn = sortKey;
+                subsystemSortDesc = true;
             }
 
-            // Update header styles
-            document.querySelectorAll('#call-site-table th').forEach(h => {
+            document.querySelectorAll('#subsystem-table th').forEach(h => {
                 h.classList.remove('sorted-asc', 'sorted-desc');
                 const icon = h.querySelector('.sort-icon');
                 if (icon) icon.remove();
             });
-            th.classList.add(callSiteSortDesc ? 'sorted-desc' : 'sorted-asc');
+            th.classList.add(subsystemSortDesc ? 'sorted-desc' : 'sorted-asc');
             const label = th.textContent.trim();
-            th.innerHTML = label + ` <span class="sort-icon">${callSiteSortDesc ? '▼' : '▲'}</span>`;
+            th.innerHTML = label + ' <span class="sort-icon">' + (subsystemSortDesc ? '▼' : '▲') + '</span>';
 
-            // Re-render table
-            renderCallSiteTable(cs.top_call_sites);
+            renderSubsystemTable(cs.subsystems);
         });
     });
 }
 
-// Helper to extract a clean function name from a symbol
-function extractFunctionName(symbol) {
-    if (!symbol || symbol.trim() === '') return null;
-    // Skip hex addresses (unresolved frames)
-    if (symbol.match(/^0x[0-9a-f]+$/i)) return null;
-    // Extract just the function name without path/file info
-    // Format is usually: "module::path::function (file:line)" or "module::path::function"
-    let name = symbol.split(' (')[0].trim();
-    // Get the last component for display
-    const parts = name.split('::');
-    if (parts.length > 1) {
-        // Return last 2-3 components for context
-        return parts.slice(-3).join('::');
+function renderDetectedIssues(issues) {
+    const card = document.getElementById('detected-issues-card');
+    const body = document.getElementById('detected-issues-body');
+
+    if (!issues || issues.length === 0) {
+        card.style.display = 'none';
+        return;
     }
-    return name;
+
+    card.style.display = 'block';
+    body.innerHTML = '';
+
+    issues.forEach(issue => {
+        const severityClass = issue.severity === 'warning' ? 'issue-warning' : 'issue-info';
+        const icon = issue.severity === 'warning' ? '⚠' : 'ℹ';
+
+        let html = '<div class="detected-issue ' + severityClass + '">';
+        html += '<div class="issue-icon">' + icon + '</div>';
+        html += '<div class="issue-content">';
+        html += '<div class="issue-header">';
+        html += '<span class="issue-pattern">' + issue.pattern + '</span>';
+        html += '<span class="issue-subsystem">' + issue.subsystem_name + '</span>';
+        html += '</div>';
+        html += '<div class="issue-description">' + issue.description + '</div>';
+        html += '<div class="issue-evidence">';
+        html += '<div class="evidence-item"><span class="evidence-label">Ops:</span><span class="evidence-value">' + fmt(issue.evidence.affected_ops) + '</span></div>';
+        if (issue.evidence.major_fault_rate > 0) {
+            html += '<div class="evidence-item"><span class="evidence-label">Major:</span><span class="evidence-value">' + (issue.evidence.major_fault_rate * 100).toFixed(1) + '%</span></div>';
+        }
+        html += '<div class="evidence-item"><span class="evidence-label">Avg:</span><span class="evidence-value">' + fmtLat(issue.evidence.avg_latency_us) + '</span></div>';
+        if (issue.evidence.context) {
+            html += '<div class="evidence-item"><span class="evidence-value" style="color:#71717a;">' + issue.evidence.context + '</span></div>';
+        }
+        html += '</div></div></div>';
+
+        body.innerHTML += html;
+    });
 }
 
 // Helper to format a stack frame for display
-function formatStackFrame(frame, index) {
-    if (!frame || frame.trim() === '') {
-        return null; // Skip empty frames
-    }
-    // Skip hex-only frames (unresolved)
-    if (frame.match(/^0x[0-9a-f]+$/i)) {
-        return null;
-    }
+function formatStackFrame(frame) {
+    if (!frame || frame.trim() === '') return null;
+    if (frame.match(/^0x[0-9a-f]+$/i)) return null;
 
-    // Parse the frame: "function_name (file_path)"
     const match = frame.match(/^(.+?)\s*\((.+)\)$/);
     let funcName, filePath;
     if (match) {
@@ -4129,9 +4383,7 @@ function formatStackFrame(frame, index) {
         filePath = null;
     }
 
-    // Simplify long paths
     if (filePath) {
-        // Extract just filename or last path component
         const pathParts = filePath.split('/');
         filePath = pathParts.slice(-2).join('/');
     }
@@ -4139,84 +4391,47 @@ function formatStackFrame(frame, index) {
     return { funcName, filePath, full: frame };
 }
 
-// Helper to build a meaningful call chain summary from stack frames
-function buildCallChainSummary(stack) {
-    if (!stack || stack.length === 0) return 'Unknown';
-
-    // Filter to meaningful frames (skip empty, hex, and internal frames)
-    const meaningfulFrames = [];
-    for (const frame of stack) {
-        const parsed = formatStackFrame(frame, 0);
-        if (!parsed) continue;
-
-        // Skip low-level/internal frames
-        const fn = parsed.funcName.toLowerCase();
-        if (fn.includes('__') ||
-            fn.startsWith('core::') ||
-            fn.startsWith('std::') ||
-            fn.startsWith('alloc::') ||
-            fn.includes('drop_in_place') ||
-            fn.includes('poll') ||
-            fn.includes('harness')) {
-            continue;
-        }
-        meaningfulFrames.push(parsed.funcName);
-    }
-
-    if (meaningfulFrames.length === 0) return 'Unknown';
-
-    // Take first few meaningful frames
-    return meaningfulFrames.slice(0, 3).join(' → ');
-}
-
-function renderCallSiteTable(data) {
-    const tbody = document.querySelector('#call-site-table tbody');
+function renderSubsystemTable(subsystems) {
+    const tbody = document.querySelector('#subsystem-table tbody');
     tbody.innerHTML = '';
 
-    if (!data || data.length === 0) return;
+    if (!subsystems || subsystems.length === 0) return;
 
-    // Sort data
-    const sorted = [...data].sort((a, b) => {
+    // Sort subsystems
+    const sorted = [...subsystems].sort((a, b) => {
         let aVal, bVal;
-        switch (callSiteSortColumn) {
-            case 'count': aVal = a.count; bVal = b.count; break;
+        switch (subsystemSortColumn) {
+            case 'slow_ops': aVal = a.slow_ops; bVal = b.slow_ops; break;
+            case 'percentage': aVal = a.percentage; bVal = b.percentage; break;
+            case 'major_fault_pct': aVal = a.major_fault_pct; bVal = b.major_fault_pct; break;
             case 'avg_latency': aVal = a.avg_latency_us; bVal = b.avg_latency_us; break;
-            case 'total_faults': aVal = a.total_faults; bVal = b.total_faults; break;
-            case 'path_type':
-                aVal = a.is_critical_path === true ? 2 : (a.is_critical_path === false ? 1 : 0);
-                bVal = b.is_critical_path === true ? 2 : (b.is_critical_path === false ? 1 : 0);
-                break;
-            default: aVal = a.count; bVal = b.count;
+            case 'is_critical': aVal = a.is_critical ? 1 : 0; bVal = b.is_critical ? 1 : 0; break;
+            default: aVal = a.slow_ops; bVal = b.slow_ops;
         }
-        return callSiteSortDesc ? bVal - aVal : aVal - bVal;
+        return subsystemSortDesc ? bVal - aVal : aVal - bVal;
     });
 
-    // Render rows (limit to top 50)
-    sorted.slice(0, 50).forEach((cs, idx) => {
+    sorted.forEach((ss, idx) => {
         // Main row
         const tr = document.createElement('tr');
         tr.className = 'table-row';
         tr.dataset.idx = idx;
 
-        // Build a meaningful call chain summary
-        const callChain = buildCallChainSummary(cs.sample_stack);
+        const pathBadge = ss.is_critical
+            ? '<span class="badge badge-critical">Critical</span>'
+            : '<span class="badge badge-background">Background</span>';
 
-        // Path type badge with colored background
-        let pathTypeBadge = '<span class="badge badge-unknown">Unknown</span>';
-        if (cs.is_critical_path === true) {
-            pathTypeBadge = '<span class="badge badge-critical">Critical</span>';
-        } else if (cs.is_critical_path === false) {
-            pathTypeBadge = '<span class="badge badge-background">Background</span>';
-        }
+        const majorPctClass = ss.major_fault_pct > 50 ? 'major' : '';
 
-        tr.innerHTML = `
-            <td><span class="expand-icon">▶</span></td>
-            <td title="${cs.call_path}" style="font-family:monospace;font-size:11px;max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${callChain}</td>
-            <td>${fmt(cs.count)}</td>
-            <td>${fmtLat(cs.avg_latency_us)}</td>
-            <td>${fmt(cs.total_faults)}</td>
-            <td>${pathTypeBadge}</td>
-        `;
+        tr.innerHTML =
+            '<td><span class="expand-icon">▶</span></td>' +
+            '<td style="font-weight:500;">' + ss.name + '</td>' +
+            '<td>' + fmt(ss.slow_ops) + '</td>' +
+            '<td>' + ss.percentage.toFixed(1) + '%</td>' +
+            '<td class="' + majorPctClass + '">' + ss.major_fault_pct.toFixed(1) + '%</td>' +
+            '<td>' + fmtLat(ss.avg_latency_us) + '</td>' +
+            '<td>' + pathBadge + '</td>';
+
         tbody.appendChild(tr);
 
         // Details row (hidden by default)
@@ -4224,51 +4439,74 @@ function renderCallSiteTable(data) {
         detailsTr.className = 'details-row hidden';
         detailsTr.dataset.idx = idx;
 
-        let detailsHtml = '<td colspan="6"><div class="callsite-details">';
+        let detailsHtml = '<td colspan="7"><div class="subsystem-details">';
+        detailsHtml += '<div class="subsystem-details-grid">';
 
-        // Two-column layout: stats on left, stack on right
-        detailsHtml += '<div class="callsite-details-grid">';
+        // Left column: Top Patterns
+        detailsHtml += '<div class="subsystem-patterns">';
+        detailsHtml += '<div class="subsystem-patterns-title">Top Patterns</div>';
 
-        // Stats column
-        detailsHtml += '<div class="callsite-stats">';
-        detailsHtml += '<div class="callsite-stats-title">Statistics</div>';
-        detailsHtml += '<div class="callsite-stats-grid">';
-        detailsHtml += `<div class="stat-item"><span class="stat-label">Operations</span><span class="stat-value">${fmt(cs.count)}</span></div>`;
-        detailsHtml += `<div class="stat-item"><span class="stat-label">Total Time</span><span class="stat-value">${(cs.total_latency_ns / 1e6).toFixed(1)}ms</span></div>`;
-        detailsHtml += `<div class="stat-item"><span class="stat-label">Avg Latency</span><span class="stat-value">${fmtLat(cs.avg_latency_us)}</span></div>`;
-        detailsHtml += `<div class="stat-item"><span class="stat-label">Max Latency</span><span class="stat-value">${fmtLat(cs.max_latency_us)}</span></div>`;
-        detailsHtml += `<div class="stat-item"><span class="stat-label">Total Faults</span><span class="stat-value">${fmt(cs.total_faults)}</span></div>`;
-        detailsHtml += `<div class="stat-item"><span class="stat-label">Major Faults</span><span class="stat-value stat-major">${fmt(cs.major_faults)}</span></div>`;
-        detailsHtml += `<div class="stat-item"><span class="stat-label">Faults/Op</span><span class="stat-value">${cs.avg_faults.toFixed(2)}</span></div>`;
-        detailsHtml += '</div></div>';
+        if (ss.top_patterns && ss.top_patterns.length > 0) {
+            ss.top_patterns.forEach(p => {
+                detailsHtml += '<div class="pattern-item">';
+                detailsHtml += '<span class="pattern-name" title="' + p.pattern + '">' + p.pattern + '</span>';
+                detailsHtml += '<span class="pattern-stats">';
+                detailsHtml += '<span>' + fmt(p.count) + ' ops</span>';
+                detailsHtml += '<span>' + fmtLat(p.avg_latency_us) + '</span>';
+                detailsHtml += '</span></div>';
+            });
+        } else {
+            detailsHtml += '<div style="color:#71717a;font-size:12px;">No patterns available</div>';
+        }
+        detailsHtml += '</div>';
 
-        // Stack trace column
-        detailsHtml += '<div class="callsite-stack">';
-        detailsHtml += '<div class="callsite-stack-title">Stack Trace</div>';
-        detailsHtml += '<div class="stack-frames">';
+        // Right column: Stack Traces (with toggle)
+        const stackToggleId = 'stack-toggle-' + idx;
+        const stackListId = 'stack-list-' + idx;
 
-        if (cs.sample_stack && cs.sample_stack.length > 0) {
-            let frameNum = 0;
-            for (let i = 0; i < Math.min(cs.sample_stack.length, 16); i++) {
-                const parsed = formatStackFrame(cs.sample_stack[i], i);
-                if (!parsed) continue; // Skip empty/unresolved frames
+        detailsHtml += '<div class="subsystem-stacks">';
+        detailsHtml += '<div class="subsystem-stacks-header">';
+        detailsHtml += '<div class="subsystem-stacks-title">Sample Stack Traces</div>';
+        detailsHtml += '<button class="stack-toggle-btn" id="' + stackToggleId + '">Show Stacks</button>';
+        detailsHtml += '</div>';
 
-                const funcClass = parsed.funcName.includes('reth_') ? 'frame-reth' :
-                                  parsed.funcName.includes('revm') ? 'frame-revm' :
-                                  parsed.funcName.includes('tokio') ? 'frame-runtime' :
-                                  parsed.funcName.includes('mdbx') || parsed.funcName.includes('libmdbx') ? 'frame-mdbx' : '';
+        detailsHtml += '<div class="subsystem-stack-list" id="' + stackListId + '">';
 
-                detailsHtml += `<div class="stack-frame ${funcClass}">`;
-                detailsHtml += `<span class="frame-num">${frameNum}</span>`;
-                detailsHtml += `<span class="frame-func" title="${parsed.full}">${parsed.funcName}</span>`;
-                if (parsed.filePath) {
-                    detailsHtml += `<span class="frame-file">${parsed.filePath}</span>`;
+        if (ss.sample_call_sites && ss.sample_call_sites.length > 0) {
+            ss.sample_call_sites.slice(0, 5).forEach((cs, csIdx) => {
+                detailsHtml += '<div class="subsystem-call-site">';
+                detailsHtml += '<div class="call-site-header">';
+                detailsHtml += '<span class="call-site-path" title="' + cs.call_path + '">' + cs.call_path + '</span>';
+                detailsHtml += '<span class="call-site-count">' + fmt(cs.count) + ' ops</span>';
+                detailsHtml += '</div>';
+
+                if (cs.sample_stack && cs.sample_stack.length > 0) {
+                    detailsHtml += '<div class="stack-frames" style="margin-top:6px;">';
+                    let frameNum = 0;
+                    for (let i = 0; i < Math.min(cs.sample_stack.length, 8); i++) {
+                        const parsed = formatStackFrame(cs.sample_stack[i]);
+                        if (!parsed) continue;
+
+                        const funcClass = parsed.funcName.includes('reth_') ? 'frame-reth' :
+                                          parsed.funcName.includes('revm') ? 'frame-revm' :
+                                          parsed.funcName.includes('tokio') ? 'frame-runtime' :
+                                          parsed.funcName.includes('mdbx') || parsed.funcName.includes('libmdbx') ? 'frame-mdbx' : '';
+
+                        detailsHtml += '<div class="stack-frame ' + funcClass + '">';
+                        detailsHtml += '<span class="frame-num">' + frameNum + '</span>';
+                        detailsHtml += '<span class="frame-func" title="' + parsed.full + '">' + parsed.funcName + '</span>';
+                        if (parsed.filePath) {
+                            detailsHtml += '<span class="frame-file">' + parsed.filePath + '</span>';
+                        }
+                        detailsHtml += '</div>';
+                        frameNum++;
+                    }
+                    detailsHtml += '</div>';
                 }
                 detailsHtml += '</div>';
-                frameNum++;
-            }
+            });
         } else {
-            detailsHtml += '<div class="stack-frame"><span class="frame-func" style="color:#71717a;">No stack trace available</span></div>';
+            detailsHtml += '<div style="color:#71717a;font-size:12px;">No sample stacks available</div>';
         }
 
         detailsHtml += '</div></div>';
@@ -4277,7 +4515,7 @@ function renderCallSiteTable(data) {
         detailsTr.innerHTML = detailsHtml;
         tbody.appendChild(detailsTr);
 
-        // Click handler to expand/collapse
+        // Click handler to expand/collapse row
         tr.addEventListener('click', () => {
             const isExpanded = tr.classList.contains('expanded');
             if (isExpanded) {
@@ -4288,6 +4526,27 @@ function renderCallSiteTable(data) {
                 detailsTr.classList.remove('hidden');
             }
         });
+
+        // Stack toggle button handler (use event delegation after DOM is ready)
+        setTimeout(() => {
+            const toggleBtn = document.getElementById(stackToggleId);
+            const stackList = document.getElementById(stackListId);
+            if (toggleBtn && stackList) {
+                toggleBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    const isVisible = stackList.classList.contains('visible');
+                    if (isVisible) {
+                        stackList.classList.remove('visible');
+                        toggleBtn.textContent = 'Show Stacks';
+                        toggleBtn.classList.remove('active');
+                    } else {
+                        stackList.classList.add('visible');
+                        toggleBtn.textContent = 'Hide Stacks';
+                        toggleBtn.classList.add('active');
+                    }
+                });
+            }
+        }, 0);
     });
 }
 

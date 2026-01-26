@@ -812,6 +812,176 @@ pub struct CpuTableEntry {
 // Call Site Analysis (Stack Traces on Slow Operations)
 // ============================================================================
 
+/// Reth subsystem classification for I/O attribution
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Subsystem {
+    /// State root calculation (TrieWalker, TrieNodeIter, StateRoot, StorageRoot)
+    StateRoot,
+    /// Proof generation (StorageProofWorker, AccountProofWorker, multiproof)
+    ProofGeneration,
+    /// Block execution via EVM (BasicBlockExecutor, execute_transaction)
+    BlockExecution,
+    /// Prewarm/prefetch (PrewarmContext, PrewarmCacheTask)
+    Prewarm,
+    /// Persistence service (PersistenceService, on_save_blocks)
+    Persistence,
+    /// RPC handlers (EthApi, DebugApi, TraceApi)
+    Rpc,
+    /// Sync pipeline stages (ExecutionStage, headers, bodies)
+    Sync,
+    /// Transaction pool validation (EthTransactionValidator)
+    TxPool,
+    /// Engine API / consensus (EngineApiTreeHandler, on_new_payload)
+    Engine,
+    /// Unknown subsystem
+    Unknown,
+}
+
+impl Default for Subsystem {
+    fn default() -> Self {
+        Subsystem::Unknown
+    }
+}
+
+impl Subsystem {
+    /// Get human-readable display name
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Subsystem::StateRoot => "State Root",
+            Subsystem::ProofGeneration => "Proof Generation",
+            Subsystem::BlockExecution => "Block Execution",
+            Subsystem::Prewarm => "Prewarm/Prefetch",
+            Subsystem::Persistence => "Persistence",
+            Subsystem::Rpc => "RPC",
+            Subsystem::Sync => "Sync Pipeline",
+            Subsystem::TxPool => "Transaction Pool",
+            Subsystem::Engine => "Engine API",
+            Subsystem::Unknown => "Unknown",
+        }
+    }
+
+    /// Whether this subsystem is on the critical path (affects block times)
+    pub fn is_critical_path(&self) -> bool {
+        matches!(
+            self,
+            Subsystem::StateRoot
+                | Subsystem::BlockExecution
+                | Subsystem::Engine
+                | Subsystem::Persistence
+        )
+    }
+
+    /// Classify a stack trace into a subsystem
+    /// Checks frames from bottom (caller) to top (callee) for better accuracy
+    pub fn classify_stack(frames: &[String]) -> Self {
+        // Check frames in reverse order (from caller to callee)
+        // Earlier matches (higher in stack) take precedence
+        for frame in frames.iter().rev() {
+            let frame_lower = frame.to_lowercase();
+
+            // Prewarm (check first - most specific, background work)
+            if frame_lower.contains("prewarmcontext")
+                || frame_lower.contains("prewarmcachetask")
+                || frame_lower.contains("prewarm::")
+                || frame_lower.contains("payload_processor::prewarm")
+            {
+                return Subsystem::Prewarm;
+            }
+
+            // Proof generation (background multiproof work)
+            if frame_lower.contains("storageproofworker")
+                || frame_lower.contains("accountproofworker")
+                || frame_lower.contains("proofworkerpool")
+                || frame_lower.contains("build_account_multiproof")
+                || frame_lower.contains("multiprooftask")
+                || frame_lower.contains("multiproofmanager")
+                || frame_lower.contains("proofsequencer")
+                || frame_lower.contains("parallelproof")
+            {
+                return Subsystem::ProofGeneration;
+            }
+
+            // Engine API (consensus critical path)
+            if frame_lower.contains("engineapitreehandler")
+                || frame_lower.contains("on_new_payload")
+                || frame_lower.contains("on_forkchoice")
+                || frame_lower.contains("basicenginevalidator")
+                || frame_lower.contains("payloadvalidator")
+            {
+                return Subsystem::Engine;
+            }
+
+            // Block execution (EVM)
+            if frame_lower.contains("basicblockexecutor")
+                || frame_lower.contains("execute_transaction")
+                || frame_lower.contains("execute_one")
+                || frame_lower.contains("evm::transact")
+                || frame_lower.contains("alloy_evm::evm")
+                || frame_lower.contains("revm_handler")
+                || frame_lower.contains("revm_interpreter")
+            {
+                return Subsystem::BlockExecution;
+            }
+
+            // State root calculation
+            if frame_lower.contains("stateroot")
+                || frame_lower.contains("storageroot")
+                || frame_lower.contains("triewalker")
+                || frame_lower.contains("trienodeiter")
+                || frame_lower.contains("parallelstateroot")
+                || frame_lower.contains("sparsetrietask")
+                || frame_lower.contains("compute_trie")
+                || frame_lower.contains("trie_cursor")
+                || frame_lower.contains("hashedcursor")
+            {
+                return Subsystem::StateRoot;
+            }
+
+            // Persistence
+            if frame_lower.contains("persistenceservice")
+                || frame_lower.contains("on_save_blocks")
+                || frame_lower.contains("on_remove_blocks")
+                || frame_lower.contains("blockexecutionwriter")
+            {
+                return Subsystem::Persistence;
+            }
+
+            // RPC
+            if frame_lower.contains("ethapi")
+                || frame_lower.contains("debugapi")
+                || frame_lower.contains("traceapi")
+                || frame_lower.contains("txpoolapi")
+                || frame_lower.contains("reth_rpc::")
+            {
+                return Subsystem::Rpc;
+            }
+
+            // Sync pipeline
+            if frame_lower.contains("executionstage")
+                || frame_lower.contains("headersstage")
+                || frame_lower.contains("bodiesstage")
+                || frame_lower.contains("merklestage")
+                || frame_lower.contains("pipeline::")
+                || frame_lower.contains("reth_stages::")
+            {
+                return Subsystem::Sync;
+            }
+
+            // Transaction pool
+            if frame_lower.contains("ethtransactionvalidator")
+                || frame_lower.contains("validate_one")
+                || frame_lower.contains("transaction_pool::")
+                || frame_lower.contains("validpooltransaction")
+            {
+                return Subsystem::TxPool;
+            }
+        }
+
+        Subsystem::Unknown
+    }
+}
+
 /// Analysis of call sites causing slow database operations
 /// This data comes from stack traces captured on slow operations (>1ms default)
 #[derive(Debug, Serialize, Default)]
@@ -824,10 +994,92 @@ pub struct CallSiteAnalysis {
     pub unique_call_sites: u64,
     /// Summary of critical path vs background work
     pub path_summary: PathSummary,
-    /// Top call sites causing slow operations (sorted by count)
+    /// I/O attribution grouped by subsystem
+    pub subsystems: Vec<SubsystemStats>,
+    /// Detected issues/optimization opportunities
+    pub detected_issues: Vec<DetectedIssue>,
+    /// Top call sites causing slow operations (sorted by count) - for raw stack access
     pub top_call_sites: Vec<CallSiteEntry>,
-    /// Call sites grouped by whether they're on critical path
+    /// Call sites grouped by whether they're on critical path (legacy, kept for compatibility)
     pub critical_vs_background: CriticalVsBackground,
+}
+
+/// Statistics for a single subsystem
+#[derive(Debug, Serialize, Clone)]
+pub struct SubsystemStats {
+    /// Subsystem identifier
+    pub subsystem: Subsystem,
+    /// Human-readable name
+    pub name: String,
+    /// Whether this subsystem is on the critical path
+    pub is_critical: bool,
+    /// Number of slow operations
+    pub slow_ops: u64,
+    /// Total faults caused
+    pub total_faults: u64,
+    /// Major faults (disk I/O)
+    pub major_faults: u64,
+    /// Major fault percentage
+    pub major_fault_pct: f64,
+    /// Total latency (ns)
+    pub total_latency_ns: u64,
+    /// Average latency (us)
+    pub avg_latency_us: f64,
+    /// Percentage of total slow ops
+    pub percentage: f64,
+    /// Number of detected issues for this subsystem
+    pub issue_count: u32,
+    /// Top call patterns within this subsystem
+    pub top_patterns: Vec<SubsystemPattern>,
+    /// Sample call sites (for drill-down with raw stacks)
+    pub sample_call_sites: Vec<CallSiteEntry>,
+}
+
+/// A call pattern within a subsystem (aggregated by function, not full stack)
+#[derive(Debug, Serialize, Clone)]
+pub struct SubsystemPattern {
+    /// Short description of the pattern (e.g., "TrieNodeIter::try_next → seek")
+    pub pattern: String,
+    /// Number of occurrences
+    pub count: u64,
+    /// Average latency (us)
+    pub avg_latency_us: f64,
+    /// Total faults
+    pub faults: u64,
+    /// Major faults
+    pub major_faults: u64,
+}
+
+/// A detected issue - describes observed behavior without suggestions
+#[derive(Debug, Serialize, Clone)]
+pub struct DetectedIssue {
+    /// Severity: "warning", "info"
+    pub severity: String,
+    /// Which subsystem this affects
+    pub subsystem: Subsystem,
+    /// Subsystem display name
+    pub subsystem_name: String,
+    /// Short pattern name (e.g., "High cache miss rate")
+    pub pattern: String,
+    /// Human-readable description of what's happening
+    pub description: String,
+    /// Evidence/stats backing this up
+    pub evidence: IssueEvidence,
+}
+
+/// Evidence supporting a detected issue
+#[derive(Debug, Serialize, Clone, Default)]
+pub struct IssueEvidence {
+    /// Affected operation count
+    pub affected_ops: u64,
+    /// Major fault rate (0.0-1.0)
+    pub major_fault_rate: f64,
+    /// Average latency (us)
+    pub avg_latency_us: f64,
+    /// Affected table (if applicable)
+    pub table: Option<String>,
+    /// Additional context
+    pub context: Option<String>,
 }
 
 /// Summary of critical path vs background work distribution
@@ -868,6 +1120,8 @@ pub struct CallSiteEntry {
     pub avg_faults: f64,
     /// Whether this is on critical path (None = unknown)
     pub is_critical_path: Option<bool>,
+    /// Classified subsystem
+    pub subsystem: Subsystem,
     /// Sample stack trace (first occurrence)
     pub sample_stack: Option<Vec<String>>,
 }

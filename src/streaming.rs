@@ -13,15 +13,16 @@ use crate::viewer::{
     CacheSimulationPoint, CallSiteAnalysis, CallSiteEntry, CpuProfileSummary, CpuTableEntry,
     CriticalVsBackground, CursorData, CursorLifecycleData, CursorLifecycleTableStats,
     CursorOpSample, CursorSummary, CursorTableStats, CursorTimelinePoint, DepthBucket,
-    DirectFaultAttribution, FaultsByCursorOp, FaultsByOpType, HeatmapCellAttribution, HeatmapData,
-    HistogramBucket, HotPageAnalysis, OpFaultCount, OperationDepthStats, OperationFaultHistogram,
-    OperationPageTypeBreakdown, OperationStats, PageTypeFaultCount, PageTypeStats, ParetoPoint,
-    PathSummary, PatternAnalysis, RwCommitPoint, SlowKeyStats, SlowOpBreakdown, SlowOpsTableStats,
-    StrideInfo, TableDepthStats, TableDrillDown, TableHotKey, TableTreeStats, TableWorkingSet,
-    ThreadStats, ThreadTableStats, ThreadTimelinePoint, TimeWindowedWSS, TimelinePoint,
-    TraceSummary, TreeDepthEstimate, TreeDepthStats, TreeTraversalViz, TxnConcurrencyStats,
-    TxnData, TxnSummary, TxnThreadStats, TxnTimelineEntry, UnifiedTableStats, ViewerData,
-    WorkingSetAnalysis,
+    DetectedIssue, DirectFaultAttribution, FaultsByCursorOp, FaultsByOpType,
+    HeatmapCellAttribution, HeatmapData, HistogramBucket, HotPageAnalysis, IssueEvidence,
+    OpFaultCount, OperationDepthStats, OperationFaultHistogram, OperationPageTypeBreakdown,
+    OperationStats, PageTypeFaultCount, PageTypeStats, ParetoPoint, PathSummary, PatternAnalysis,
+    RwCommitPoint, SlowKeyStats, SlowOpBreakdown, SlowOpsTableStats, StrideInfo, Subsystem,
+    SubsystemPattern, SubsystemStats, TableDepthStats, TableDrillDown, TableHotKey, TableTreeStats,
+    TableWorkingSet, ThreadStats, ThreadTableStats, ThreadTimelinePoint, TimeWindowedWSS,
+    TimelinePoint, TraceSummary, TreeDepthEstimate, TreeDepthStats, TreeTraversalViz,
+    TxnConcurrencyStats, TxnData, TxnSummary, TxnThreadStats, TxnTimelineEntry, UnifiedTableStats,
+    ViewerData, WorkingSetAnalysis,
 };
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::io::{BufRead, BufReader};
@@ -3155,69 +3156,25 @@ impl StreamingAggregator {
         }
 
         // Helper to resolve a stack of hex addresses to symbols
-        fn resolve_stack(
-            resolver: &mut Option<SymbolResolver>,
-            stack: &[String],
-        ) -> (Vec<String>, Option<bool>) {
+        fn resolve_stack(resolver: &mut Option<SymbolResolver>, stack: &[String]) -> Vec<String> {
             let Some(resolver) = resolver.as_mut() else {
-                return (stack.to_vec(), None);
+                return stack.to_vec();
             };
 
             let mut resolved = Vec::with_capacity(stack.len());
-            let mut is_critical: Option<bool> = None;
-
-            // Critical path patterns
-            let critical_patterns = [
-                "on_state_update",
-                "state_root",
-                "execute_block",
-                "apply_state",
-                "commit",
-                "new_payload",
-            ];
-
-            // Background patterns
-            let background_patterns = [
-                "on_prefetch",
-                "prefetch_proof",
-                "background",
-                "spawn",
-                "rayon",
-                "thread_pool",
-            ];
 
             for addr_str in stack {
                 if let Some(addr) = parse_hex_address(addr_str) {
                     // Resolve with PID 0 since we're using ELF file directly
                     let frame = resolver.resolve_address(0, addr);
                     let symbol_str = frame.format();
-                    resolved.push(symbol_str.clone());
-
-                    // Check for critical/background patterns if not yet determined
-                    if is_critical.is_none() {
-                        if let Some(ref sym) = frame.symbol {
-                            for pattern in &critical_patterns {
-                                if sym.contains(pattern) {
-                                    is_critical = Some(true);
-                                    break;
-                                }
-                            }
-                            if is_critical.is_none() {
-                                for pattern in &background_patterns {
-                                    if sym.contains(pattern) {
-                                        is_critical = Some(false);
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    resolved.push(symbol_str);
                 } else {
                     resolved.push(addr_str.clone());
                 }
             }
 
-            (resolved, is_critical)
+            resolved
         }
 
         // Convert raw stats to CallSiteEntry objects with symbol resolution
@@ -3238,10 +3195,24 @@ impl StreamingAggregator {
                     ),
                 )| {
                     // Resolve sample stack if available
-                    let (resolved_stack, is_critical) = if let Some(stack) = sample_stack {
+                    let resolved_stack = if let Some(stack) = sample_stack {
                         resolve_stack(&mut resolver, stack)
                     } else {
-                        (vec![], None)
+                        vec![]
+                    };
+
+                    // Classify subsystem from resolved stack
+                    let subsystem = if !resolved_stack.is_empty() {
+                        Subsystem::classify_stack(&resolved_stack)
+                    } else {
+                        Subsystem::Unknown
+                    };
+
+                    // Determine critical path from subsystem
+                    let is_critical = if subsystem == Subsystem::Unknown {
+                        None
+                    } else {
+                        Some(subsystem.is_critical_path())
                     };
 
                     // Build resolved call path from the resolved stack
@@ -3250,11 +3221,11 @@ impl StreamingAggregator {
                         let significant: Vec<_> = resolved_stack
                             .iter()
                             .filter(|s| {
-                                !s.starts_with("0x")  // Not unresolved
-                                && !s.starts_with("mdbx_")
-                                && !s.contains("__")
-                                && !s.starts_with("std::")
-                                && !s.starts_with("core::")
+                                !s.starts_with("0x") // Not unresolved
+                                    && !s.starts_with("mdbx_")
+                                    && !s.contains("__")
+                                    && !s.starts_with("std::")
+                                    && !s.starts_with("core::")
                             })
                             .take(5)
                             .cloned()
@@ -3286,6 +3257,7 @@ impl StreamingAggregator {
                             0.0
                         },
                         is_critical_path: is_critical,
+                        subsystem,
                         sample_stack: if resolved_stack.is_empty() {
                             sample_stack.clone()
                         } else {
@@ -3298,6 +3270,122 @@ impl StreamingAggregator {
 
         // Sort by count descending
         entries.sort_by(|a, b| b.count.cmp(&a.count));
+
+        // Build subsystem statistics
+        let mut subsystem_stats: HashMap<Subsystem, (u64, u64, u64, u64, u64, Vec<CallSiteEntry>)> =
+            HashMap::new();
+
+        for entry in &entries {
+            let stats =
+                subsystem_stats
+                    .entry(entry.subsystem)
+                    .or_insert((0, 0, 0, 0, 0, Vec::new()));
+            stats.0 += entry.count; // slow_ops
+            stats.1 += entry.total_faults; // total_faults
+            stats.2 += entry.major_faults; // major_faults
+            stats.3 += entry.total_latency_ns; // total_latency_ns
+            stats.4 += 1; // unique call sites count
+
+            // Keep top 10 call sites per subsystem for drill-down
+            if stats.5.len() < 10 {
+                stats.5.push(entry.clone());
+            }
+        }
+
+        let total_slow_ops = self.slow_op_stack_count;
+
+        // Convert to SubsystemStats vector
+        let mut subsystems: Vec<SubsystemStats> = subsystem_stats
+            .into_iter()
+            .map(
+                |(
+                    subsystem,
+                    (slow_ops, total_faults, major_faults, total_latency_ns, _, samples),
+                )| {
+                    let major_fault_pct = if total_faults > 0 {
+                        major_faults as f64 / total_faults as f64 * 100.0
+                    } else {
+                        0.0
+                    };
+
+                    let avg_latency_us = if slow_ops > 0 {
+                        total_latency_ns as f64 / slow_ops as f64 / 1000.0
+                    } else {
+                        0.0
+                    };
+
+                    let percentage = if total_slow_ops > 0 {
+                        slow_ops as f64 / total_slow_ops as f64 * 100.0
+                    } else {
+                        0.0
+                    };
+
+                    // Build top patterns from sample call sites
+                    let top_patterns: Vec<SubsystemPattern> = samples
+                        .iter()
+                        .take(5)
+                        .map(|cs| {
+                            // Extract a short pattern from the call path
+                            let pattern = cs
+                                .call_path
+                                .split(" <- ")
+                                .take(2)
+                                .collect::<Vec<_>>()
+                                .join(" → ");
+                            SubsystemPattern {
+                                pattern,
+                                count: cs.count,
+                                avg_latency_us: cs.avg_latency_us,
+                                faults: cs.total_faults,
+                                major_faults: cs.major_faults,
+                            }
+                        })
+                        .collect();
+
+                    SubsystemStats {
+                        subsystem,
+                        name: subsystem.display_name().to_string(),
+                        is_critical: subsystem.is_critical_path(),
+                        slow_ops,
+                        total_faults,
+                        major_faults,
+                        major_fault_pct,
+                        total_latency_ns,
+                        avg_latency_us,
+                        percentage,
+                        issue_count: 0, // Will be updated after issue detection
+                        top_patterns,
+                        sample_call_sites: samples,
+                    }
+                },
+            )
+            .collect();
+
+        // Sort subsystems by slow_ops descending
+        subsystems.sort_by(|a, b| b.slow_ops.cmp(&a.slow_ops));
+
+        // Detect issues
+        let mut detected_issues = self.detect_call_site_issues(&entries, &subsystems);
+
+        // Update issue counts per subsystem
+        for issue in &detected_issues {
+            if let Some(ss) = subsystems
+                .iter_mut()
+                .find(|s| s.subsystem == issue.subsystem)
+            {
+                ss.issue_count += 1;
+            }
+        }
+
+        // Sort issues by severity (warnings first) then by affected ops
+        detected_issues.sort_by(|a, b| {
+            let severity_ord = match (a.severity.as_str(), b.severity.as_str()) {
+                ("warning", "info") => std::cmp::Ordering::Less,
+                ("info", "warning") => std::cmp::Ordering::Greater,
+                _ => std::cmp::Ordering::Equal,
+            };
+            severity_ord.then_with(|| b.evidence.affected_ops.cmp(&a.evidence.affected_ops))
+        });
 
         // Calculate path summary
         let mut critical_path_count = 0u64;
@@ -3322,7 +3410,6 @@ impl StreamingAggregator {
             }
         }
 
-        let total_slow_ops = self.slow_op_stack_count;
         let critical_path_percentage = if total_slow_ops > 0 {
             critical_path_count as f64 / total_slow_ops as f64 * 100.0
         } else {
@@ -3338,7 +3425,7 @@ impl StreamingAggregator {
             critical_path_percentage,
         };
 
-        // Split entries by critical path status
+        // Split entries by critical path status (legacy compatibility)
         let mut critical_path_entries = Vec::new();
         let mut background_entries = Vec::new();
         let mut unknown_entries = Vec::new();
@@ -3364,6 +3451,8 @@ impl StreamingAggregator {
             total_slow_ops,
             unique_call_sites: self.call_site_stats.len() as u64,
             path_summary,
+            subsystems,
+            detected_issues,
             top_call_sites,
             critical_vs_background: CriticalVsBackground {
                 critical_path: critical_path_entries,
@@ -3371,6 +3460,212 @@ impl StreamingAggregator {
                 unknown: unknown_entries,
             },
         }
+    }
+
+    /// Detect issues from call site data - describes observed behavior
+    fn detect_call_site_issues(
+        &self,
+        entries: &[CallSiteEntry],
+        subsystems: &[SubsystemStats],
+    ) -> Vec<DetectedIssue> {
+        let mut issues = Vec::new();
+
+        let total_slow_ops: u64 = subsystems.iter().map(|s| s.slow_ops).sum();
+
+        // Issue 1: High major fault rate on critical path
+        for ss in subsystems {
+            if ss.is_critical && ss.slow_ops > 100 && ss.major_fault_pct > 40.0 {
+                issues.push(DetectedIssue {
+                    severity: "warning".to_string(),
+                    subsystem: ss.subsystem,
+                    subsystem_name: ss.name.clone(),
+                    pattern: "High cache miss rate on critical path".to_string(),
+                    description: format!(
+                        "{} is hitting disk on {:.1}% of {} slow operations. This is on the critical path and affects block processing time.",
+                        ss.name, ss.major_fault_pct, ss.slow_ops
+                    ),
+                    evidence: IssueEvidence {
+                        affected_ops: ss.slow_ops,
+                        major_fault_rate: ss.major_fault_pct / 100.0,
+                        avg_latency_us: ss.avg_latency_us,
+                        table: None,
+                        context: Some(format!("{} total faults, {:.1}ms total latency", ss.total_faults, ss.total_latency_ns as f64 / 1_000_000.0)),
+                    },
+                });
+            }
+        }
+
+        // Issue 2: Proof generation dominating I/O (background work causing most faults)
+        let proof_gen = subsystems
+            .iter()
+            .find(|s| s.subsystem == Subsystem::ProofGeneration);
+
+        if let Some(pg) = proof_gen {
+            if total_slow_ops > 1000 && pg.percentage > 50.0 {
+                issues.push(DetectedIssue {
+                    severity: "info".to_string(),
+                    subsystem: Subsystem::ProofGeneration,
+                    subsystem_name: "Proof Generation".to_string(),
+                    pattern: "Proof generation dominates I/O".to_string(),
+                    description: format!(
+                        "Proof generation accounts for {:.1}% of slow operations ({} ops). This is background work that does not block consensus.",
+                        pg.percentage, pg.slow_ops
+                    ),
+                    evidence: IssueEvidence {
+                        affected_ops: pg.slow_ops,
+                        major_fault_rate: pg.major_fault_pct / 100.0,
+                        avg_latency_us: pg.avg_latency_us,
+                        table: None,
+                        context: Some(format!("{:.1}% of total slow ops", pg.percentage)),
+                    },
+                });
+            }
+        }
+
+        // Issue 3: State root calculation with high fault rate
+        let state_root = subsystems
+            .iter()
+            .find(|s| s.subsystem == Subsystem::StateRoot);
+
+        if let Some(sr) = state_root {
+            if sr.slow_ops > 100 && sr.major_fault_pct > 30.0 {
+                issues.push(DetectedIssue {
+                    severity: "warning".to_string(),
+                    subsystem: Subsystem::StateRoot,
+                    subsystem_name: "State Root".to_string(),
+                    pattern: "State root calculation I/O bound".to_string(),
+                    description: format!(
+                        "State root computation has {:.1}% major fault rate across {} slow ops. Trie traversal is hitting disk frequently.",
+                        sr.major_fault_pct, sr.slow_ops
+                    ),
+                    evidence: IssueEvidence {
+                        affected_ops: sr.slow_ops,
+                        major_fault_rate: sr.major_fault_pct / 100.0,
+                        avg_latency_us: sr.avg_latency_us,
+                        table: None,
+                        context: Some(format!("Critical path - {:.1}ms total latency", sr.total_latency_ns as f64 / 1_000_000.0)),
+                    },
+                });
+            }
+        }
+
+        // Issue 4: Prewarm activity
+        let prewarm = subsystems
+            .iter()
+            .find(|s| s.subsystem == Subsystem::Prewarm);
+
+        if let Some(pw) = prewarm {
+            if pw.slow_ops > 100 {
+                issues.push(DetectedIssue {
+                    severity: "info".to_string(),
+                    subsystem: Subsystem::Prewarm,
+                    subsystem_name: "Prewarm/Prefetch".to_string(),
+                    pattern: "Prewarm activity detected".to_string(),
+                    description: format!(
+                        "Prewarm subsystem caused {} slow operations ({:.1}% of total). Major fault rate: {:.1}%.",
+                        pw.slow_ops, pw.percentage, pw.major_fault_pct
+                    ),
+                    evidence: IssueEvidence {
+                        affected_ops: pw.slow_ops,
+                        major_fault_rate: pw.major_fault_pct / 100.0,
+                        avg_latency_us: pw.avg_latency_us,
+                        table: None,
+                        context: Some("Background prefetch work".to_string()),
+                    },
+                });
+            }
+        }
+
+        // Issue 5: High unknown classification rate
+        let unknown = subsystems
+            .iter()
+            .find(|s| s.subsystem == Subsystem::Unknown);
+
+        if let Some(unk) = unknown {
+            if total_slow_ops > 100 && unk.percentage > 30.0 {
+                issues.push(DetectedIssue {
+                    severity: "info".to_string(),
+                    subsystem: Subsystem::Unknown,
+                    subsystem_name: "Unknown".to_string(),
+                    pattern: "Many unclassified operations".to_string(),
+                    description: format!(
+                        "{:.1}% of slow ops ({} ops) could not be classified to a known subsystem. Stack traces may be incomplete or from code paths not yet categorized.",
+                        unk.percentage, unk.slow_ops
+                    ),
+                    evidence: IssueEvidence {
+                        affected_ops: unk.slow_ops,
+                        major_fault_rate: unk.major_fault_pct / 100.0,
+                        avg_latency_us: unk.avg_latency_us,
+                        table: None,
+                        context: None,
+                    },
+                });
+            }
+        }
+
+        // Issue 6: Specific call site with extremely high fault count
+        for entry in entries.iter().take(10) {
+            if entry.count > 10000 && entry.avg_faults > 3.0 {
+                issues.push(DetectedIssue {
+                    severity: "warning".to_string(),
+                    subsystem: entry.subsystem,
+                    subsystem_name: entry.subsystem.display_name().to_string(),
+                    pattern: "Hot call site with high fault rate".to_string(),
+                    description: format!(
+                        "Call site '{}' triggered {} slow ops with {:.1} faults/op average. Total latency: {:.1}ms.",
+                        entry
+                            .call_path
+                            .chars()
+                            .take(60)
+                            .collect::<String>()
+                            .replace('\n', " "),
+                        entry.count,
+                        entry.avg_faults,
+                        entry.total_latency_ns as f64 / 1_000_000.0
+                    ),
+                    evidence: IssueEvidence {
+                        affected_ops: entry.count,
+                        major_fault_rate: if entry.total_faults > 0 {
+                            entry.major_faults as f64 / entry.total_faults as f64
+                        } else {
+                            0.0
+                        },
+                        avg_latency_us: entry.avg_latency_us,
+                        table: None,
+                        context: Some(format!("{} total faults ({} major)", entry.total_faults, entry.major_faults)),
+                    },
+                });
+            }
+        }
+
+        // Issue 7: Block execution high fault rate
+        let block_exec = subsystems
+            .iter()
+            .find(|s| s.subsystem == Subsystem::BlockExecution);
+
+        if let Some(be) = block_exec {
+            if be.slow_ops > 100 && be.major_fault_pct > 25.0 {
+                issues.push(DetectedIssue {
+                    severity: "warning".to_string(),
+                    subsystem: Subsystem::BlockExecution,
+                    subsystem_name: "Block Execution".to_string(),
+                    pattern: "Block execution hitting disk".to_string(),
+                    description: format!(
+                        "EVM execution caused {} slow operations with {:.1}% major fault rate. State reads during execution are not cached.",
+                        be.slow_ops, be.major_fault_pct
+                    ),
+                    evidence: IssueEvidence {
+                        affected_ops: be.slow_ops,
+                        major_fault_rate: be.major_fault_pct / 100.0,
+                        avg_latency_us: be.avg_latency_us,
+                        table: None,
+                        context: Some(format!("Critical path - {:.1}ms total latency", be.total_latency_ns as f64 / 1_000_000.0)),
+                    },
+                });
+            }
+        }
+
+        issues
     }
 
     /// Build CPU profile summary from table stats
