@@ -70,8 +70,6 @@ pub struct WorkingSetAnalysis {
     pub reuse_ratio: f64,
     /// Average accesses per unique page
     pub avg_accesses_per_page: f64,
-    /// Cache hit rate simulation at various cache sizes
-    pub cache_simulation: Vec<CacheSimulationPoint>,
     /// Access count distribution (how many pages have 1x, 2x, 3-5x, etc. accesses)
     pub access_count_distribution: Vec<AccessCountBucket>,
     /// Per-table working set statistics
@@ -82,19 +80,6 @@ pub struct WorkingSetAnalysis {
     pub hot_page_analysis: HotPageAnalysis,
     /// Summary text for quick understanding
     pub summary_text: String,
-}
-
-/// Cache simulation result at a specific cache size
-#[derive(Debug, Serialize, Clone)]
-pub struct CacheSimulationPoint {
-    /// Cache size in GB
-    pub cache_size_gb: f64,
-    /// Cache size in pages
-    pub cache_size_pages: u64,
-    /// Estimated hit rate (0.0-1.0)
-    pub hit_rate: f64,
-    /// Estimated major faults avoided per second
-    pub faults_avoided_per_sec: f64,
 }
 
 /// Access count distribution bucket (how many pages have N accesses)

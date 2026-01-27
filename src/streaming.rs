@@ -5,23 +5,23 @@
 //! Designed to handle traces of any size with bounded memory usage.
 
 use crate::event::{
-    dbi_to_table_name, is_pre_trace_cursor, CursorEvent, CursorLifecycleEvent, CursorOp,
-    MdbxPageType, PageFaultEvent, SlowOpStackEvent, TxnEvent,
+    CursorEvent, CursorLifecycleEvent, CursorOp, MdbxPageType, PageFaultEvent, SlowOpStackEvent,
+    TxnEvent, dbi_to_table_name, is_pre_trace_cursor,
 };
 use crate::viewer::{
-    extract_caller_module, AccessCountBucket, BTreeVisualization, BatchAnalysis, BlockRange,
-    BurstStats, CacheSimulationPoint, CallSiteAnalysis, CallSiteEntry, CpuProfileSummary,
-    CpuTableEntry, CursorData, CursorLifecycleData, CursorLifecycleTableStats, CursorOpSample,
-    CursorSummary, CursorTableStats, CursorTimelinePoint, DepthBucket, DirectFaultAttribution,
-    FaultsByCursorOp, FaultsByOpType, HeatmapCellAttribution, HeatmapData, HistogramBucket,
-    HotPageAnalysis, OpFaultCount, OperationDepthStats, OperationFaultHistogram,
-    OperationPageTypeBreakdown, OperationStats, PageTypeFaultCount, PageTypeStats, ParetoPoint,
-    PatternAnalysis, RwCommitPoint, SlowKeyStats, SlowOpBreakdown, SlowOpsTableStats, StrideInfo,
-    SubsystemPattern, SubsystemStats, TableDepthStats, TableDrillDown, TableHotKey, TableTreeStats,
-    TableWorkingSet, ThreadStats, ThreadTableStats, ThreadTimelinePoint, TimeWindowedWSS,
-    TimelinePoint, TraceSummary, TreeDepthEstimate, TreeDepthStats, TreeTraversalViz,
-    TxnConcurrencyStats, TxnData, TxnSummary, TxnThreadStats, TxnTimelineEntry, UnifiedTableStats,
-    ViewerData, WorkingSetAnalysis,
+    AccessCountBucket, BTreeVisualization, BatchAnalysis, BlockRange, BurstStats, CallSiteAnalysis,
+    CallSiteEntry, CpuProfileSummary, CpuTableEntry, CursorData, CursorLifecycleData,
+    CursorLifecycleTableStats, CursorOpSample, CursorSummary, CursorTableStats,
+    CursorTimelinePoint, DepthBucket, DirectFaultAttribution, FaultsByCursorOp, FaultsByOpType,
+    HeatmapCellAttribution, HeatmapData, HistogramBucket, HotPageAnalysis, OpFaultCount,
+    OperationDepthStats, OperationFaultHistogram, OperationPageTypeBreakdown, OperationStats,
+    PageTypeFaultCount, PageTypeStats, ParetoPoint, PatternAnalysis, RwCommitPoint, SlowKeyStats,
+    SlowOpBreakdown, SlowOpsTableStats, StrideInfo, SubsystemPattern, SubsystemStats,
+    TableDepthStats, TableDrillDown, TableHotKey, TableTreeStats, TableWorkingSet, ThreadStats,
+    ThreadTableStats, ThreadTimelinePoint, TimeWindowedWSS, TimelinePoint, TraceSummary,
+    TreeDepthEstimate, TreeDepthStats, TreeTraversalViz, TxnConcurrencyStats, TxnData, TxnSummary,
+    TxnThreadStats, TxnTimelineEntry, UnifiedTableStats, ViewerData, WorkingSetAnalysis,
+    extract_caller_module,
 };
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::io::{BufRead, BufReader};
@@ -474,7 +474,7 @@ impl HotKeyTracker {
     fn prune(&mut self) {
         // Keep only top N by slow_count
         let mut entries: Vec<_> = self.keys.drain().collect();
-        entries.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+        entries.sort_by(|a, b| b.1.0.cmp(&a.1.0));
         entries.truncate(self.max_keys);
         self.keys = entries.into_iter().collect();
     }
@@ -2684,9 +2684,6 @@ impl StreamingAggregator {
         // Build access count distribution
         let access_count_distribution = self.build_access_count_distribution();
 
-        // Build cache simulation
-        let cache_simulation = self.build_cache_simulation(duration_secs);
-
         // Build per-table working set
         let per_table = self.build_per_table_working_set();
 
@@ -2712,7 +2709,6 @@ impl StreamingAggregator {
             total_accesses,
             reuse_ratio,
             avg_accesses_per_page,
-            cache_simulation,
             access_count_distribution,
             per_table,
             time_windowed,
@@ -2755,90 +2751,6 @@ impl StreamingAggregator {
         }
 
         buckets
-    }
-
-    fn build_cache_simulation(&self, duration_secs: f64) -> Vec<CacheSimulationPoint> {
-        // Get sorted access counts from sampled data (descending - most accessed first)
-        let sorted_counts = self.sampled_page_counts.get_sorted_counts();
-
-        let total_accesses = self.page_fault_count;
-        let total_unique = self.unique_pages.len() as u64;
-        let sampled_unique = sorted_counts.len() as u64;
-        let major_fault_rate = if duration_secs > 0.0 {
-            self.major_fault_count as f64 / duration_secs
-        } else {
-            0.0
-        };
-
-        // Calculate maximum possible hit rate (the reuse ratio)
-        // Even with infinite cache, first access to each page is always a miss
-        let max_hit_rate = if total_accesses > 0 {
-            1.0 - (total_unique as f64 / total_accesses as f64)
-        } else {
-            0.0
-        };
-
-        // Simulate cache sizes: 1GB, 2GB, 4GB, 8GB, 16GB, 32GB, 64GB, 128GB, 256GB
-        let cache_sizes_gb = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0];
-        let page_size = 4096u64;
-
-        let mut results = Vec::new();
-
-        for cache_gb in cache_sizes_gb {
-            let cache_pages = (cache_gb * 1e9 / page_size as f64) as u64;
-
-            // If cache can hold all pages, hit rate is the max (reuse ratio)
-            if cache_pages >= total_unique {
-                results.push(CacheSimulationPoint {
-                    cache_size_gb: cache_gb,
-                    cache_size_pages: cache_pages,
-                    hit_rate: max_hit_rate,
-                    faults_avoided_per_sec: max_hit_rate * major_fault_rate,
-                });
-                continue;
-            }
-
-            // Calculate hit rate from sampled data using LRU simulation
-            // Assumes optimal caching keeps the hottest pages in cache
-            let cache_coverage = cache_pages as f64 / total_unique as f64;
-
-            // How many of our sampled pages would be in cache (proportionally)
-            let sampled_cache_pages =
-                (cache_coverage * sampled_unique as f64).min(sampled_unique as f64) as usize;
-
-            // Sum accesses for top N sampled pages that fit in cache
-            // sorted_counts is sorted descending (hottest pages first)
-            let mut cached_accesses = 0u64;
-            for (i, &count) in sorted_counts.iter().enumerate() {
-                if i >= sampled_cache_pages {
-                    break;
-                }
-                // For pages in cache, subsequent accesses are hits (count - 1)
-                cached_accesses += count.saturating_sub(1) as u64;
-            }
-
-            // Calculate hit rate from sampled data
-            let total_sampled_accesses: u64 = sorted_counts.iter().map(|&c| c as u64).sum();
-            let mut hit_rate = if total_sampled_accesses > 0 {
-                cached_accesses as f64 / total_sampled_accesses as f64
-            } else {
-                0.0
-            };
-
-            // Cap at max achievable hit rate (can't exceed reuse ratio)
-            hit_rate = hit_rate.min(max_hit_rate);
-
-            let faults_avoided = hit_rate * major_fault_rate;
-
-            results.push(CacheSimulationPoint {
-                cache_size_gb: cache_gb,
-                cache_size_pages: cache_pages,
-                hit_rate,
-                faults_avoided_per_sec: faults_avoided,
-            });
-        }
-
-        results
     }
 
     fn build_per_table_working_set(&self) -> Vec<TableWorkingSet> {
