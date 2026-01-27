@@ -71,7 +71,10 @@ pub fn generate_html(data: &ViewerData) -> String {
 
                 <!-- Access Heatmap (full width, larger) -->
                 <div class="card" style="margin-bottom: 16px;">
-                    <div class="card-header">Access Heatmap <span class="axis-hint">(drag to zoom, dbl-click to reset)</span></div>
+                    <div class="card-header">
+                        Access Heatmap <span class="axis-hint">(drag to zoom, dbl-click to reset)</span>
+                        <button id="toggle-fault-overlay" class="toggle-btn active" title="Toggle fault rate overlay">Fault Overlay</button>
+                    </div>
                     <div class="card-body heatmap-container" style="position: relative;">
                         <div id="heatmap-plotly" style="width: 100%; height: 100%;"></div>
                     </div>
@@ -1311,6 +1314,31 @@ body {
     color: #52525b;
     font-weight: 400;
     text-transform: none;
+}
+
+.toggle-btn {
+    font-size: 10px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    border: 1px solid #3f3f46;
+    background: transparent;
+    color: #71717a;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    text-transform: none;
+    font-weight: 500;
+    margin-left: auto;
+}
+
+.toggle-btn:hover {
+    border-color: #52525b;
+    color: #a1a1aa;
+}
+
+.toggle-btn.active {
+    background: rgba(251, 146, 60, 0.15);
+    border-color: rgba(251, 146, 60, 0.4);
+    color: #fb923c;
 }
 
 .card-body {
@@ -3271,6 +3299,17 @@ function initOverview() {
     if (DATA.heatmap.data.length) {
         const container = document.getElementById('heatmap-plotly');
         initPlotlyHeatmap(container, DATA.heatmap, DATA.timeline, s.duration_secs);
+
+        // Toggle button for fault overlay
+        const toggleBtn = document.getElementById('toggle-fault-overlay');
+        if (toggleBtn) {
+            toggleBtn.addEventListener('click', () => {
+                toggleBtn.classList.toggle('active');
+                const isVisible = toggleBtn.classList.contains('active');
+                // Trace 1 is the fault overlay (trace 0 is heatmap)
+                Plotly.restyle(container, { visible: isVisible }, [1]);
+            });
+        }
     }
 
     // Access patterns
