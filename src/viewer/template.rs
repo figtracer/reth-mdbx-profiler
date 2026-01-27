@@ -214,14 +214,6 @@ pub fn generate_html(data: &ViewerData) -> String {
                                 <span class="metric-label">Slow Ops</span>
                                 <span class="metric-value" id="callsite-total-slow">-</span>
                             </div>
-                            <div class="metric">
-                                <span class="metric-label">Critical Path</span>
-                                <span class="metric-value major" id="callsite-critical-pct">-</span>
-                            </div>
-                            <div class="metric">
-                                <span class="metric-label">Background</span>
-                                <span class="metric-value minor" id="callsite-background-pct">-</span>
-                            </div>
                         </div>
                     </div>
 
@@ -3152,11 +3144,6 @@ document.getElementById('export-compact-btn').addEventListener('click', () => {
         // === CALL SITES / CALL PATHS (I/O attribution by code path) ===
         call_sites: DATA.call_site_analysis?.has_data ? {
             total_slow_ops: DATA.call_site_analysis.total_slow_ops,
-            path_summary: {
-                critical: DATA.call_site_analysis.path_summary.critical_path_count,
-                background: DATA.call_site_analysis.path_summary.background_count,
-                unknown: DATA.call_site_analysis.path_summary.unknown_count
-            },
             // Subsystems (caller modules) with their call sites and stack traces
             subsystems: (DATA.call_site_analysis.subsystems || []).slice(0, 15).map(ss => ({
                 name: ss.name,
@@ -4601,13 +4588,6 @@ function initCallSiteAnalysis() {
 
     // Populate metrics
     document.getElementById('callsite-total-slow').textContent = fmt(cs.total_slow_ops);
-
-    const totalOps = cs.path_summary.critical_path_count + cs.path_summary.background_count + cs.path_summary.unknown_count;
-    const criticalPct = totalOps > 0 ? (cs.path_summary.critical_path_count / totalOps * 100).toFixed(1) : '0';
-    const backgroundPct = totalOps > 0 ? (cs.path_summary.background_count / totalOps * 100).toFixed(1) : '0';
-
-    document.getElementById('callsite-critical-pct').textContent = criticalPct + '%';
-    document.getElementById('callsite-background-pct').textContent = backgroundPct + '%';
 
     // Render caller module table
     renderSubsystemTable(cs.subsystems);

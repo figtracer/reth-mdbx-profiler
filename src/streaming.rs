@@ -5,23 +5,23 @@
 //! Designed to handle traces of any size with bounded memory usage.
 
 use crate::event::{
-    CursorEvent, CursorLifecycleEvent, CursorOp, MdbxPageType, PageFaultEvent, SlowOpStackEvent,
-    TxnEvent, dbi_to_table_name, is_pre_trace_cursor,
+    dbi_to_table_name, is_pre_trace_cursor, CursorEvent, CursorLifecycleEvent, CursorOp,
+    MdbxPageType, PageFaultEvent, SlowOpStackEvent, TxnEvent,
 };
 use crate::viewer::{
-    AccessCountBucket, BTreeVisualization, BatchAnalysis, BlockRange, BurstStats,
-    CacheSimulationPoint, CallSiteAnalysis, CallSiteEntry, CpuProfileSummary, CpuTableEntry,
-    CriticalVsBackground, CursorData, CursorLifecycleData, CursorLifecycleTableStats,
-    CursorOpSample, CursorSummary, CursorTableStats, CursorTimelinePoint, DepthBucket,
-    DirectFaultAttribution, FaultsByCursorOp, FaultsByOpType, HeatmapCellAttribution, HeatmapData,
-    HistogramBucket, HotPageAnalysis, OpFaultCount, OperationDepthStats, OperationFaultHistogram,
+    extract_caller_module, AccessCountBucket, BTreeVisualization, BatchAnalysis, BlockRange,
+    BurstStats, CacheSimulationPoint, CallSiteAnalysis, CallSiteEntry, CpuProfileSummary,
+    CpuTableEntry, CursorData, CursorLifecycleData, CursorLifecycleTableStats, CursorOpSample,
+    CursorSummary, CursorTableStats, CursorTimelinePoint, DepthBucket, DirectFaultAttribution,
+    FaultsByCursorOp, FaultsByOpType, HeatmapCellAttribution, HeatmapData, HistogramBucket,
+    HotPageAnalysis, OpFaultCount, OperationDepthStats, OperationFaultHistogram,
     OperationPageTypeBreakdown, OperationStats, PageTypeFaultCount, PageTypeStats, ParetoPoint,
-    PathSummary, PatternAnalysis, RwCommitPoint, SlowKeyStats, SlowOpBreakdown, SlowOpsTableStats,
-    StrideInfo, SubsystemPattern, SubsystemStats, TableDepthStats, TableDrillDown, TableHotKey,
-    TableTreeStats, TableWorkingSet, ThreadStats, ThreadTableStats, ThreadTimelinePoint,
-    TimeWindowedWSS, TimelinePoint, TraceSummary, TreeDepthEstimate, TreeDepthStats,
-    TreeTraversalViz, TxnConcurrencyStats, TxnData, TxnSummary, TxnThreadStats, TxnTimelineEntry,
-    UnifiedTableStats, ViewerData, WorkingSetAnalysis, extract_caller_module,
+    PatternAnalysis, RwCommitPoint, SlowKeyStats, SlowOpBreakdown, SlowOpsTableStats, StrideInfo,
+    SubsystemPattern, SubsystemStats, TableDepthStats, TableDrillDown, TableHotKey, TableTreeStats,
+    TableWorkingSet, ThreadStats, ThreadTableStats, ThreadTimelinePoint, TimeWindowedWSS,
+    TimelinePoint, TraceSummary, TreeDepthEstimate, TreeDepthStats, TreeTraversalViz,
+    TxnConcurrencyStats, TxnData, TxnSummary, TxnThreadStats, TxnTimelineEntry, UnifiedTableStats,
+    ViewerData, WorkingSetAnalysis,
 };
 use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::io::{BufRead, BufReader};
@@ -474,7 +474,7 @@ impl HotKeyTracker {
     fn prune(&mut self) {
         // Keep only top N by slow_count
         let mut entries: Vec<_> = self.keys.drain().collect();
-        entries.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+        entries.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
         entries.truncate(self.max_keys);
         self.keys = entries.into_iter().collect();
     }
@@ -3359,17 +3359,6 @@ impl StreamingAggregator {
         // Sort by slow_ops descending
         subsystems.sort_by(|a, b| b.slow_ops.cmp(&a.slow_ops));
 
-        // Path summary is no longer meaningful since we removed critical path classification
-        // Keep a default for compatibility
-        let path_summary = PathSummary {
-            critical_path_count: 0,
-            critical_path_latency_ns: 0,
-            background_count: 0,
-            background_latency_ns: 0,
-            unknown_count: total_slow_ops,
-            critical_path_percentage: 0.0,
-        };
-
         // Top call sites overall (limit to 100)
         let top_call_sites: Vec<_> = entries.into_iter().take(100).collect();
 
@@ -3377,15 +3366,8 @@ impl StreamingAggregator {
             has_data: true,
             total_slow_ops,
             unique_call_sites: self.call_site_stats.len() as u64,
-            path_summary,
             subsystems,
-            detected_issues: vec![], // No longer detecting issues
             top_call_sites,
-            critical_vs_background: CriticalVsBackground {
-                critical_path: vec![],
-                background: vec![],
-                unknown: vec![],
-            },
         }
     }
 

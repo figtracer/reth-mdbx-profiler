@@ -812,73 +812,6 @@ pub struct CpuTableEntry {
 // Call Site Analysis (Stack Traces on Slow Operations)
 // ============================================================================
 
-/// Reth subsystem classification for I/O attribution
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Subsystem {
-    /// State root calculation (TrieWalker, TrieNodeIter, StateRoot, StorageRoot)
-    StateRoot,
-    /// Proof generation (StorageProofWorker, AccountProofWorker, multiproof)
-    ProofGeneration,
-    /// Block execution via EVM (BasicBlockExecutor, execute_transaction)
-    BlockExecution,
-    /// Prewarm/prefetch (PrewarmContext, PrewarmCacheTask)
-    Prewarm,
-    /// Persistence service (PersistenceService, on_save_blocks)
-    Persistence,
-    /// RPC handlers (EthApi, DebugApi, TraceApi)
-    Rpc,
-    /// Sync pipeline stages (ExecutionStage, headers, bodies)
-    Sync,
-    /// Transaction pool validation (EthTransactionValidator)
-    TxPool,
-    /// Engine API / consensus (EngineApiTreeHandler, on_new_payload)
-    Engine,
-    /// Unknown subsystem
-    Unknown,
-}
-
-impl Default for Subsystem {
-    fn default() -> Self {
-        Subsystem::Unknown
-    }
-}
-
-impl Subsystem {
-    /// Get human-readable display name
-    pub fn display_name(&self) -> &'static str {
-        match self {
-            Subsystem::StateRoot => "State Root",
-            Subsystem::ProofGeneration => "Proof Generation",
-            Subsystem::BlockExecution => "Block Execution",
-            Subsystem::Prewarm => "Prewarm/Prefetch",
-            Subsystem::Persistence => "Persistence",
-            Subsystem::Rpc => "RPC",
-            Subsystem::Sync => "Sync Pipeline",
-            Subsystem::TxPool => "Transaction Pool",
-            Subsystem::Engine => "Engine API",
-            Subsystem::Unknown => "Unknown",
-        }
-    }
-
-    /// Whether this subsystem is on the critical path (affects block times)
-    pub fn is_critical_path(&self) -> bool {
-        matches!(
-            self,
-            Subsystem::StateRoot
-                | Subsystem::BlockExecution
-                | Subsystem::Engine
-                | Subsystem::Persistence
-        )
-    }
-
-    /// Classify a stack trace into a subsystem - not currently used,
-    /// we now extract the caller module directly instead
-    pub fn classify_stack(_frames: &[String]) -> Self {
-        Subsystem::Unknown
-    }
-}
-
 /// Extract the caller module from a stack trace.
 /// Returns the first reth_* crate that isn't a DB layer (reth_db, reth_db_api, reth_storage_api).
 /// This gives us the actual code making the DB call.
@@ -975,16 +908,10 @@ pub struct CallSiteAnalysis {
     pub total_slow_ops: u64,
     /// Number of unique call sites identified
     pub unique_call_sites: u64,
-    /// Summary of critical path vs background work
-    pub path_summary: PathSummary,
     /// I/O attribution grouped by subsystem
     pub subsystems: Vec<SubsystemStats>,
-    /// Detected issues/optimization opportunities
-    pub detected_issues: Vec<DetectedIssue>,
     /// Top call sites causing slow operations (sorted by count) - for raw stack access
     pub top_call_sites: Vec<CallSiteEntry>,
-    /// Call sites grouped by whether they're on critical path (legacy, kept for compatibility)
-    pub critical_vs_background: CriticalVsBackground,
 }
 
 /// Statistics for a caller module (extracted from stack traces)
@@ -1029,55 +956,6 @@ pub struct SubsystemPattern {
     pub major_faults: u64,
 }
 
-/// A detected issue - describes observed behavior without suggestions
-#[derive(Debug, Serialize, Clone)]
-pub struct DetectedIssue {
-    /// Severity: "warning", "info"
-    pub severity: String,
-    /// Which subsystem this affects
-    pub subsystem: Subsystem,
-    /// Subsystem display name
-    pub subsystem_name: String,
-    /// Short pattern name (e.g., "High cache miss rate")
-    pub pattern: String,
-    /// Human-readable description of what's happening
-    pub description: String,
-    /// Evidence/stats backing this up
-    pub evidence: IssueEvidence,
-}
-
-/// Evidence supporting a detected issue
-#[derive(Debug, Serialize, Clone, Default)]
-pub struct IssueEvidence {
-    /// Affected operation count
-    pub affected_ops: u64,
-    /// Major fault rate (0.0-1.0)
-    pub major_fault_rate: f64,
-    /// Average latency (us)
-    pub avg_latency_us: f64,
-    /// Affected table (if applicable)
-    pub table: Option<String>,
-    /// Additional context
-    pub context: Option<String>,
-}
-
-/// Summary of critical path vs background work distribution
-#[derive(Debug, Serialize, Default)]
-pub struct PathSummary {
-    /// Number of slow ops on critical path (state updates, etc.)
-    pub critical_path_count: u64,
-    /// Total latency on critical path (ns)
-    pub critical_path_latency_ns: u64,
-    /// Number of slow ops on background path (prefetch, etc.)
-    pub background_count: u64,
-    /// Total latency on background path (ns)
-    pub background_latency_ns: u64,
-    /// Number of slow ops with unknown path
-    pub unknown_count: u64,
-    /// Percentage of slow ops on critical path
-    pub critical_path_percentage: f64,
-}
-
 /// Entry for a specific call site
 #[derive(Debug, Serialize, Clone)]
 pub struct CallSiteEntry {
@@ -1104,17 +982,6 @@ pub struct CallSiteEntry {
     /// Raw addresses (hex) corresponding to sample_stack for debugging symbol resolution
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_addresses: Option<Vec<String>>,
-}
-
-/// Breakdown of critical path vs background operations
-#[derive(Debug, Serialize, Default)]
-pub struct CriticalVsBackground {
-    /// Call sites on critical path
-    pub critical_path: Vec<CallSiteEntry>,
-    /// Call sites doing background work
-    pub background: Vec<CallSiteEntry>,
-    /// Call sites with unknown classification
-    pub unknown: Vec<CallSiteEntry>,
 }
 
 /// Block range information extracted from trace

@@ -118,47 +118,6 @@ impl ResolvedStack {
         self.frames.first()
     }
 
-    /// Determine if this stack trace is on the critical path
-    /// Returns true if the stack contains state update functions (critical)
-    /// Returns false if the stack contains prefetch functions (background)
-    pub fn is_critical_path(&self) -> Option<bool> {
-        // Patterns that indicate critical path (state updates)
-        let critical_patterns = [
-            "on_state_update",
-            "state_root",
-            "execute_block",
-            "apply_state",
-            "commit",
-            "new_payload",
-        ];
-
-        // Patterns that indicate background work (prefetch)
-        let background_patterns = [
-            "on_prefetch",
-            "prefetch_proof",
-            "background",
-            "spawn",
-            "rayon",
-            "thread_pool",
-        ];
-
-        for frame in &self.frames {
-            if let Some(ref sym) = frame.symbol {
-                for pattern in &critical_patterns {
-                    if sym.contains(pattern) {
-                        return Some(true);
-                    }
-                }
-                for pattern in &background_patterns {
-                    if sym.contains(pattern) {
-                        return Some(false);
-                    }
-                }
-            }
-        }
-        None // Unknown
-    }
-
     /// Get a summary of this stack for grouping purposes
     /// Returns a key that represents the unique call path
     pub fn call_path_key(&self) -> String {
@@ -438,62 +397,6 @@ impl Default for SymbolResolver {
     }
 }
 
-/// Statistics about call sites causing slow operations
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CallSiteStats {
-    /// The call path (function chain)
-    pub call_path: String,
-    /// Number of slow operations from this call site
-    pub count: u64,
-    /// Total latency in nanoseconds
-    pub total_latency_ns: u64,
-    /// Maximum latency in nanoseconds
-    pub max_latency_ns: u64,
-    /// Total faults
-    pub total_faults: u64,
-    /// Major faults
-    pub major_faults: u64,
-    /// Whether this is on the critical path
-    pub is_critical_path: Option<bool>,
-    /// Sample stack trace (first occurrence)
-    pub sample_stack: Option<Vec<String>>,
-}
-
-impl CallSiteStats {
-    pub fn new(call_path: String) -> Self {
-        Self {
-            call_path,
-            count: 0,
-            total_latency_ns: 0,
-            max_latency_ns: 0,
-            total_faults: 0,
-            major_faults: 0,
-            is_critical_path: None,
-            sample_stack: None,
-        }
-    }
-
-    pub fn avg_latency_us(&self) -> f64 {
-        if self.count == 0 {
-            0.0
-        } else {
-            (self.total_latency_ns as f64 / self.count as f64) / 1000.0
-        }
-    }
-
-    pub fn max_latency_us(&self) -> f64 {
-        self.max_latency_ns as f64 / 1000.0
-    }
-
-    pub fn avg_faults(&self) -> f64 {
-        if self.count == 0 {
-            0.0
-        } else {
-            self.total_faults as f64 / self.count as f64
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,59 +415,5 @@ mod tests {
 
         let unresolved = ResolvedFrame::unresolved(0x87654321);
         assert_eq!(unresolved.format(), "0x87654321");
-    }
-
-    #[test]
-    fn test_critical_path_detection() {
-        let stack = ResolvedStack {
-            pid: 1234,
-            frames: vec![
-                ResolvedFrame {
-                    address: 0x1,
-                    symbol: Some("mdbx_cursor_get".to_string()),
-                    file: None,
-                    line: None,
-                    offset: None,
-                },
-                ResolvedFrame {
-                    address: 0x2,
-                    symbol: Some("reth_trie::walker::TrieWalker::seek".to_string()),
-                    file: None,
-                    line: None,
-                    offset: None,
-                },
-                ResolvedFrame {
-                    address: 0x3,
-                    symbol: Some("on_state_update".to_string()),
-                    file: None,
-                    line: None,
-                    offset: None,
-                },
-            ],
-        };
-
-        assert_eq!(stack.is_critical_path(), Some(true));
-
-        let bg_stack = ResolvedStack {
-            pid: 1234,
-            frames: vec![
-                ResolvedFrame {
-                    address: 0x1,
-                    symbol: Some("mdbx_cursor_get".to_string()),
-                    file: None,
-                    line: None,
-                    offset: None,
-                },
-                ResolvedFrame {
-                    address: 0x2,
-                    symbol: Some("on_prefetch_proof".to_string()),
-                    file: None,
-                    line: None,
-                    offset: None,
-                },
-            ],
-        };
-
-        assert_eq!(bg_stack.is_critical_path(), Some(false));
     }
 }
